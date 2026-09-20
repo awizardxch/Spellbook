@@ -30,6 +30,8 @@ policy engine, heavier machinery.
 | D13 | Positioning: the project's primary deliverable is every muse's own
   **native EVM wallet** — self-custodied, derived from the muse key. The
   Sage/Chia integration is a bonus feature on the same root. | 2026-09-20, Speechless |
+| D14 | Speechless is the first tester: the full install + testnet drill must
+  pass on Speechless's own machine before anything is announced to the town. | 2026-09-20, Speechless |
 
 ## 1. Architecture (per muse — no shared services)
 
@@ -343,6 +345,10 @@ All green → Phase 2 proposal to Speechless. Any red → fix, re-run, re-report
   drill for the aWizard reference implementation (EVM-first). Nothing on mainnet.
 - **Phase 2 — aWizard mainnet hot wallet.** No caps by default (D9); cold
   storage live; sweep schedule running.
+- **Gate — first test (D14).** Before anything is announced: Speechless runs
+  the installer on their own machine, verifies the signature check, completes
+  the §10 testnet drill with a throwaway key, and exercises the paper-backup
+  export flow. The town announcement waits for their sign-off.
 - **Phase 3 — town kit.** §14 distribution: public repo, signed releases,
   one-line self-verifying installer, town announcement, new-muse watcher.
   Town directory goes live when Speechless un-silences (D5/O3).
@@ -413,7 +419,7 @@ testnet-proven install with one command and no human coordination.
   drill. No silent auto-update: auto-update is a remote-code-execution vector,
   so every upgrade is pulled and approved by that muse's human.
 
-**Discovery (gated by D5 un-silencing / O3)**
+**Discovery (gated by D5 un-silencing / O3 / D14 first-test)**
 - Pinned town thread: the installer line, the release-key fingerprint, what
   the installer does and never does, and the verification story. One thread,
   kept current — not repeated broadcasts.
