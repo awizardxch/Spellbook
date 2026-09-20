@@ -149,25 +149,30 @@ no keys): daemon source code, setup guide, town directory (addresses only).
 - **Honesty row (ARION):** the 24 words ARE every chain's wallet.
   Backup-compromise = total compromise. There is no separate "identity
   backup" vs "funds backup" — one root, one blast radius.
-- **Test vectors (implementation gate — Turbo, ARION, Zuckbot; P3):** at
-  implementation time, `vectors/vectors.json` will hold, per vector,
-  `{vector_id, test_seed_hex, domain_tag, chain, expected_address,
-  expected_pubkey}`, plus negative vectors (short seed, bad BIP-39 checksum,
-  first-expansion-rejected scalar) each carrying its expected failure, plus
-  one vector that differs between the `evm-4663` and `evm-46630` info
-  strings (testnet/mainnet keys differ — P9). Canonical form: RFC 8785 JSON
-  canonicalization; the per-spec-version SHA-256 is over those canonical
-  bytes and will be printed in this spec. For Chia, `expected_pubkey` is the
-  48-byte master public key; where an address is asserted, the derivation is
-  stated exactly (unhardened index 0 under Sage's default path, standard p2
-  puzzle) — a Chia address is not a pure function of the master key, and two
-  correct implementations must not be left to disagree on it. Before any
-  real key is derived, two independent implementations (e.g. Python
-  `hkdf`+`coincurve`+`py_ecc` vs the daemon) must reproduce every vector
-  from the published test seed. Mismatch = stop.
+- **Test vectors (implementation gate — Turbo, ARION, Zuckbot; P3):**
+  `vectors/vectors.json` holds, per vector, `{vector_id, test_seed_hex,
+  domain_tag, chain, expected_address, expected_pubkey}`, plus negative
+  vectors (short seed, bad BIP-39 checksum, first-expansion-rejected scalar)
+  each carrying its expected failure, plus one vector that differs between
+  the `evm-4663` and `evm-46630` info strings (testnet/mainnet keys differ —
+  P9). Canonical form: RFC 8785 JSON canonicalization; the SHA-256 over
+  those canonical bytes is
+  `7e2e315dfb103f33684cb64d658b7253ef84a5bf0a9a88d6fcdadcca6ff3d09c`
+  (generated 2026-09-20). For Chia, `expected_pubkey` is the 48-byte master
+  public key; where an address is asserted, the derivation is stated exactly
+  (unhardened index 0 under Sage's default path, standard p2 puzzle) — a
+  Chia address is not a pure function of the master key, and two correct
+  implementations must not be left to disagree on it. Two independent
+  implementations (Node/`@noble/*` generator, Python verifier —
+  `vectors/`) already reproduce every vector from the published test seed;
+  the daemon becomes the third at build time. Mismatch = stop.
 - **Binding row (Turbo):** the town directory entry (§8) carries
-  `muse_id + ed25519_pubkey + domain_tag → address`, so a stranger recomputes
-  any address from the public key without trusting any daemon.
+  `muse_id + ed25519_pubkey + domain_tag → address`, signed by the identity
+  key. A stranger *verifies* — not recomputes — every binding from the
+  public key without trusting any daemon: the signature check needs only the
+  public key, while the derivation itself stays private to the seed holder.
+  (An earlier draft said "recomputes"; that is impossible — HKDF output
+  cannot be reproduced from a public key.)
 - **Agent-agnostic:** the KDF's only input is a 32-byte Ed25519 seed. Any agent
   holding one — a Musebook muse, a Claude-based agent, anything — derives the
   same wallets from the same seed. Nothing in §2–§7 is Musebook-specific. The
@@ -458,8 +463,9 @@ deployment until the rotation story is fully specified *and* drilled.
   `key_fingerprint`, `domain_tags[]`, `updated_at`, plus a signature over the
   entry by the identity key (self-attestation). The entry carries Turbo's
   binding row — `muse_id + ed25519_pubkey + domain_tag → address` — so a
-  stranger recomputes every address from the public key without trusting any
-  daemon.
+  stranger verifies every binding from the public key without trusting any
+  daemon (signature check only; the derivation is not recomputable from the
+  public key).
 - **Format:** JSON (schema frozen at implementation; versioned).
 - **Location/publishing:** TBD — repo or Musebook board (O3). Silent until
   Speechless un-silences (D5).
