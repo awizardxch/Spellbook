@@ -107,3 +107,31 @@ no code, no keys, nothing on-chain.
 2. S4: optional — queue every spend for the first 24h after install, until
    the human writes any policy config.
 3. Approval of this revised spec as a whole before Phase 1.
+
+---
+
+# Pass 2 responses — 2026-09-20 (`docs/audit/2026-09-20-spec-review-pass2.md`)
+
+Second pass verified the a74f0e7 revision: 13 of 14 first-pass findings in
+the text as claimed; S1 correctly left as a decision. Nine new findings,
+all addressed:
+
+| ID | Severity | Solution | Spec |
+|----|----------|----------|------|
+| P1 | High | `sign_request` (raw bytes) replaced by `sign_musebook_request {method, path, body}` — daemon builds the canonical string with a fixed domain prefix, never signs caller bytes. Directory entries / rotation supersessions move to approve-token-only `POST /v1/publish_directory_entry` with a distinct prefix. §10 boundary drill: request-token signature over a directory entry must fail. Lands before the S1 decision is taken. | §4, §9, §10 |
+| P2 | Medium | `derive` purpose deleted — it would yield keys the daemon never signs with. Registry is `chain + "/sign/" + label`. | §2 |
+| P3 | Medium | Vectors tense fixed ("will hold"); canonical form = RFC 8785; Chia asserts `expected_master_pubkey` (48 bytes) with exact derivation stated for any address; added testnet/mainnet-distinguishing vector. | §2 |
+| P4 | Medium | Stale text fixed: §10 step 5 (approve-token, not chat relay), §5 (current info string), "self-verifying installer" (not "one-line"). | §5, §10, §11, §14 |
+| P5 | Medium | Three OS principals spelled out: daemon user, agent's non-login user, human's login account. Agent must not run under the human's login user; approve token readable-only-by the human, never at rest where accounts are shared. §10 attempts to read it as the agent user. | §1, §10 |
+| P6 | Low | Ledger readable via `GET /v1/ledger` on the request token; file-read struck from §9; `sighash` nullable (set only once a signature exists). | §1, §4, §9, §10 |
+| P7 | Low | Decoder split: v1 = plain transfers only (decode-and-display to/value/chain-id, daemon verifies what it built); ERC20/721/Permit2 decoder + `allow_opaque_calldata` + `allowance_cap` moved to v2. | §4 |
+| P8 | Low | Decision input recorded: Speechless to state where each signing process runs before the S1 call — if the sibling agent is off-machine, only the separate-root alternative works. | §1 |
+| P9 | Info | D3 marked "(true once S1 lands)"; §10 step 1 verifies the binary checksum against the pinned commit; testnet/mainnet key difference asserted in drill + vectors; export records the label list for restore. | §2, §6, §10, §12 |
+
+## Decisions now with Speechless (updated)
+1. S1 (+P1, +P8): move Musebook signing behind the daemon via
+   `sign_musebook_request` (recommended) vs separate wallet root — needs the
+   sibling-agent location first.
+2. S4: optional 24h queue-everything after install until any policy config
+   is written.
+3. Approval of this revised spec as a whole before Phase 1.

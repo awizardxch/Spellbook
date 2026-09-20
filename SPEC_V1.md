@@ -17,7 +17,7 @@ policy engine, heavier machinery.
 |----|----------|-----|
 | D1 | No central authority. Every muse runs its own Sage, derives its own keys, runs its own policy daemon, on its own machine. One compromised muse = one compromised wallet, never the town. | 2026-09-20, Speechless |
 | D2 | The muse's Ed25519 key is the custody root. Chain keys are KDF-derived locally from it — never generated as separate mnemonics, never held by a third party. | 2026-09-20, Speechless |
-| D3 | A non-LLM policy daemon (per muse) is the only process that holds secrets or signs. Conversational agents request spends; they never see keys. Policy in code, not in prompts. | 2026-09-20 |
+| D3 | A non-LLM policy daemon (per muse) is the only process that holds secrets or signs — **true once S1 lands** (P9: today the Musebook client also holds the seed, so until the S1 decision this reads as intent, not fact). Conversational agents request spends; they never see keys. Policy in code, not in prompts. | 2026-09-20 |
 | D4 | Sage source pinned to `xch-dev/sage` release tag **v0.13.1**. Upgrades are deliberate: review changelog, re-pin, rebuild. | 2026-09-20, Speechless |
 | D5 | Silent: nothing about this project is posted anywhere until Speechless says otherwise. | standing |
 | D6 | No on-chain execution without explicit instruction — testnet included. | standing |
@@ -72,11 +72,27 @@ rejects privileged routes from the request token (S7). Mode 600 alone was the
 v1 story and it protected against other users, not against the agent — that
 is fixed here.
 
+**Three OS principals, not two (P5).** The daemon user (`spellbook`), the
+agent's own non-login user, and the human's login account. The agent must not
+run under the human's login user — on a machine where it does, a token file
+the human's CLI can read is a file the agent can read, and the two-token
+split collapses back into S7. The *approve* token lives readable-only-by the
+human's login user; where the agent and the human share an account, the
+approve token is never at rest — the human's tooling prompts for it per use
+(or derives it via the O5 HMAC key on a separate device). §10 step 12
+attempts to read the approve token as the agent's user; it must fail.
+
+**Open input for the S1 decision (P8):** the sibling agent's location. The
+workspace notes say the Meta agent signs with the same seed "in parallel" —
+if it runs on another machine, daemon-local signing cannot serve it and the
+separate-wallet-root alternative becomes the only complete option. Speechless
+to state where each process that signs as the muse runs before the S1 call.
+
 **Seed hygiene (S1, Mikey).** Today the aWizard seed also lives in the agent's
 environment (the Musebook client reads it from `.env` inside the agent's tool
 process) — the spec's isolation starts from that true location, not from
 where we wish it lived. The fix, recommended: Musebook signing moves behind
-the daemon via `POST /v1/sign_request {bytes}` → `{signature}`; `musebook.mjs`
+the daemon via `POST /v1/sign_musebook_request` → `{signature}`; `musebook.mjs`
 and any sibling agent hold a request token, not the seed. Then D3 ("the
 daemon is the only process that holds secrets") is true by construction and
 one paper backup still covers everything. **This changes how aWizard signs
@@ -94,12 +110,17 @@ no keys): daemon source code, setup guide, town directory (addresses only).
 - **IKM:** the 32-byte Ed25519 private *seed* (not the 64-byte expanded secret).
 - **salt (fixed, public):** `"muse-wallet-v1"`.
 - **info (purpose registry — fixed strings, never reused across purposes):**
-  `info = "muse-wallet/v1/" + chain + "/" + purpose + "/" + label`, where
-  `chain` carries the chain id (`evm-4663`, `evm-46630`, `chia-mainnet`,
-  `chia-testnet`), `purpose` is `sign` (spend-signing) or `derive` (address
-  derivation), and `label` names the wallet (`default`, `tips`, `bounties`,
-  `trading`). The tag carries chain id + purpose (Turbo's checkable binding)
-  so one seed can never collide across contexts.
+  `info = "muse-wallet/v1/" + chain + "/sign/" + label`, where `chain`
+  carries the chain id (`evm-4663`, `evm-46630`, `chia-mainnet`,
+  `chia-testnet`) and `label` names the wallet (`default`, `tips`,
+  `bounties`, `trading`). The tag carries the chain id (Turbo's checkable
+  binding) so one seed can never collide across contexts. There is no
+  `derive` purpose (P2): every info string yields a distinct key, so an
+  address derived under a second purpose would belong to a key the daemon
+  never signs with — dead text at best, a fund-trapping bug at worst.
+  Stated plainly (P9): testnet and mainnet derive **different** keys. A
+  testnet address must never be funded on mainnet or vice versa; the drill
+  and the vectors assert the difference.
 - **One standalone key per label (S5):** each info string yields its own
   secp256k1/BLS key. There is no HD beneath a derived master — a 32-byte
   scalar is not a BIP-32 master (no chain code), so every labeled address is
@@ -128,16 +149,22 @@ no keys): daemon source code, setup guide, town directory (addresses only).
 - **Honesty row (ARION):** the 24 words ARE every chain's wallet.
   Backup-compromise = total compromise. There is no separate "identity
   backup" vs "funds backup" — one root, one blast radius.
-- **Test vectors (implementation gate — Turbo, ARION, Zuckbot):**
-  `vectors/vectors.json` in the repo holds, per vector,
+- **Test vectors (implementation gate — Turbo, ARION, Zuckbot; P3):** at
+  implementation time, `vectors/vectors.json` will hold, per vector,
   `{vector_id, test_seed_hex, domain_tag, chain, expected_address,
   expected_pubkey}`, plus negative vectors (short seed, bad BIP-39 checksum,
-  first-expansion-rejected scalar) each carrying its expected failure — specs
-  fork at the edges nobody wrote down, so the edges are written down. One
-  SHA-256 over the canonical file per spec version, printed in this spec.
-  Before any real key is derived, two independent implementations (e.g.
-  Python `hkdf`+`coincurve`+`py_ecc` vs the daemon) must reproduce every
-  vector from the published test seed. Mismatch = stop.
+  first-expansion-rejected scalar) each carrying its expected failure, plus
+  one vector that differs between the `evm-4663` and `evm-46630` info
+  strings (testnet/mainnet keys differ — P9). Canonical form: RFC 8785 JSON
+  canonicalization; the per-spec-version SHA-256 is over those canonical
+  bytes and will be printed in this spec. For Chia, `expected_pubkey` is the
+  48-byte master public key; where an address is asserted, the derivation is
+  stated exactly (unhardened index 0 under Sage's default path, standard p2
+  puzzle) — a Chia address is not a pure function of the master key, and two
+  correct implementations must not be left to disagree on it. Before any
+  real key is derived, two independent implementations (e.g. Python
+  `hkdf`+`coincurve`+`py_ecc` vs the daemon) must reproduce every vector
+  from the published test seed. Mismatch = stop.
 - **Binding row (Turbo):** the town directory entry (§8) carries
   `muse_id + ed25519_pubkey + domain_tag → address`, so a stranger recomputes
   any address from the public key without trusting any daemon.
@@ -225,8 +252,20 @@ mTLS cert, or submit transactions.
 - `POST /v1/queue/{id}/approve` and `/reject` → approve-token only
 - `GET /v1/status` → balances, caps, velocity windows, queue depth
 - `GET /v1/addresses` → the muse's labeled Chia and EVM addresses
-- `POST /v1/sign_request {bytes}` → `{signature}` — daemon-side Musebook
-  request signing (S1 — recommended, pending Speechless's call)
+- `GET /v1/ledger` → the decision ledger (request token may read it here;
+  never the file — P6)
+- `POST /v1/sign_musebook_request {method, path, body}` → `{signature}` —
+  daemon-side Musebook request signing (S1 — recommended, pending
+  Speechless's call). The daemon builds the canonical Musebook signing
+  string itself, with a fixed domain prefix, and signs **only** that. It
+  never signs caller-supplied raw bytes: a raw-bytes oracle on the request
+  token would let the agent mint signed directory entries and rotation
+  supersessions with the identity key (P1).
+- `POST /v1/publish_directory_entry {entry}` → `{ok}` — **approve token
+  only.** Signs directory entries (§8) and rotation supersessions (§7) with
+  the identity key. The entry prefix is distinct from the Musebook-request
+  prefix, so a Musebook signing string can never parse as a directory entry
+  (P1).
 
 **Policy config (per muse, file, daemon-user-owned, mode 600 — set by that
 muse's human, D9)**
@@ -246,23 +285,30 @@ configured, nothing more.
 - `destination_allowlist` (optional) — when set, non-allowlisted destinations
   above the auto-approve level are denied rather than queued
 - All amounts in base units (mojos / wei).
-- **Decision ledger (S10, Turbo, ARION):** every intent and decision is
+- **Decision ledger (S10, Turbo, ARION; P6):** every intent and decision is
   appended to a daemon-user-owned log — never secrets. Row shape, canonical:
-  `{ts, requester_muse, canon_digest(request_bytes_stored), sighash, decision}` —
-  the digest is over the stored bytes, never a quote, so the trail is
-  stranger-recomputable and clips can't drift it. This matches the desk
-  registry's shape (ARION's offer taken up; exact schema to be confirmed
-  against the registry's canonical thread). The ledger survives restarts —
-  the velocity window and queue with it (§10 step 11).
+  `{ts, requester_muse, canon_digest(request_bytes_stored), sighash?,
+  decision}` — the digest is over the stored bytes, never a quote, so the
+  trail is stranger-recomputable and clips can't drift it. `sighash` is
+  present only once a signature exists (null for denied or still-queued
+  requests). This matches the desk registry's shape (ARION's offer taken up;
+  exact schema to be confirmed against the registry's canonical thread). The
+  ledger survives restarts — the velocity window and queue with it (§10
+  step 11). Agents read it through `GET /v1/ledger`, never the file.
 
 **Human approval path (v1)** — dormant unless an `approval_threshold` is
 configured (default off, D9).
 - Queued spends surface to the human's own tooling (approve token), showing
-  the **decoded intent** — never just a hash (Zuckbot's blind-signing fix):
-  `to`, `value`, and decoded calldata for at least the ERC20 / ERC721 /
-  Permit2 shapes; anything the decoder cannot parse is labeled OPAQUE and
-  treated as hostile (denied unless a policy explicitly allows opaque
-  calldata). The decoder is part of the daemon, not the agent.
+  the **decoded intent** — never just a hash (Zuckbot's blind-signing fix).
+  **v1 scope:** plain transfers only. The daemon decodes and displays `to`,
+  `value`, `chain id`, asset — and verifies the built transaction matches
+  the approved intent before signing. There is no opaque calldata in v1
+  because the schema cannot express contract calls (S13).
+- **v2 (not in this plan):** calldata decoder for at least the ERC20 /
+  ERC721 / Permit2 shapes; undecodable calldata labeled OPAQUE and denied
+  unless an `allow_opaque_calldata` policy knob is set; allowances (ERC-20
+  `approve`, Permit2) governed by an `allowance_cap`. (P7 — the earlier text
+  described this decoder inside v1 and implied knobs that don't exist.)
 - **No malicious-relay assumption:** the v1 "agent relays the human's chat
   approval" design is removed with the two-token split (S7). The daemon's job
   remains bounding *autonomous* agent spends.
@@ -316,9 +362,10 @@ configured (default off, D9).
   native, self-custodied EVM wallet — no Bankr, no Privy, no third party
   holding anything. This is the feature; everything else is supporting cast.
 
-- Key: the §2 `evm-hot/v1` secp256k1 derivation. Address published by the muse
-  to the town directory (only the key holder can compute it — self-reported,
-  like the Chia address).
+- Key: the §2 `muse-wallet/v1/evm-4663/sign/<label>` secp256k1 derivation
+  (P4 — the retired `evm-hot/v1` string no longer appears). Address published
+  by the muse to the town directory (only the key holder can compute it —
+  self-reported, like the Chia address).
 - The daemon signs EIP-1559 transactions via a local signer against a
   configurable chain RPC endpoint. Default town chain: Robinhood Chain
   (chain id 4663; testnet 46630 for Phase 1).
@@ -344,7 +391,9 @@ configured (default off, D9).
      output).
   3. Daemon writes the seed (24-word phrase; root is words-only, S11) to a
      fresh file in a directory the agent's user cannot read; prints only the
-     path on its own TTY.
+     path on its own TTY. The export records the label list, so restore path
+     (a) re-derives every label named in the export file (P9 — a fresh daemon
+     cannot otherwise know which labels existed).
   4. Human reads the file through their own machine access, copies the
      24-word phrase to paper (words are easier to hand-copy than hex, and the
      built-in checksum catches transcription errors), stores offline.
@@ -425,7 +474,8 @@ construct/submit transactions directly, reproduce private key material in chat
 or anywhere else (D10), read the daemon's key-export output file, invoke the
 export command, or present the request token to privileged routes.
 Agents MAY: call the daemon's request-token API (`request_spend`, `queue`
-read, `status`, `addresses`, `sign_request`) and read the decision ledger.
+read, `status`, `addresses`, `sign_musebook_request`, `ledger` read). The
+ledger is read through the API, never the file (P6).
 Standard spend flow: agent drafts intent → `request_spend` → approved (execute),
 queued (the human's own tooling approves via the approve token — the agent
 never relays approvals), or denied (report reason).
@@ -437,11 +487,17 @@ Steps 4–7 enable temporary test values to prove the policy machinery works,
 then reset the config to default-off (D9). The EVM path is the primary
 acceptance target (D13); the Chia/Sage path is drilled alongside as the bonus
 feature.
-1. Install Sage CLI from the pinned tag; verify version string.
-2. Daemon boots; §2 test vectors reproduce; imports derived test key into Sage.
+1. Install Sage CLI from the pinned commit; verify the binary's checksum
+   against the release built from `f2ec89dd…` (P9 — a version string does not
+   prove the pinned commit).
+2. Daemon boots; §2 test vectors reproduce — including the
+   evm-4663/evm-46630 distinguishing vector (P9); imports derived test key
+   into Sage.
 3. Fund from the testnet faucet; confirm receipt via `/get_sync_status`.
 4. Spend below auto-approve threshold → executes, confirms on-chain.
-5. Spend above approval threshold → queued → relay approval in chat → executes.
+5. Spend above approval threshold → queued → the human approves with the
+   approve token from their own tooling → executes (P4 — the chat-relay
+   design is removed).
 6. Spend above per-spend cap → denied with reason.
 7. Velocity: exceed daily cap → denied until window clears.
 8. Offer flow: `make_offer` → `take_offer` between two test wallets.
@@ -452,10 +508,13 @@ feature.
     reboot re-derives correctly, **and** the decision ledger, velocity window,
     and queue survive the restart (S10 — policy state is not allowed to be
     memory-only).
-12. Boundary drill (S2): as the agent's OS user, attempt to read the seed
-    file, the Sage data dir, the mTLS certs, the export directory, and the
-    decision ledger — and attempt to call `/approve` with the request token.
-    Every attempt must fail.
+12. Boundary drill (S2/P1/P5/P6): as the agent's OS user, attempt to read the
+    seed file, the Sage data dir, the mTLS certs, the export directory, the
+    decision ledger file, and the approve token — attempt to call `/approve`
+    and `/publish_directory_entry` with the request token — and attempt to
+    obtain a signature over a directory entry via `sign_musebook_request`.
+    Every attempt must fail. (The ledger stays readable through
+    `GET /v1/ledger`; the file stays unreadable.)
 13. Seed-hygiene drill (S1): grep the agent's environment and workspace for
     the seed (or any 32-byte value matching it); the drill fails if it is
     found anywhere outside the daemon user's files.
@@ -490,7 +549,7 @@ All green → Phase 2 proposal to Speechless. Any red → fix, re-run, re-report
   the §10 testnet drill with a throwaway key, and exercises the paper-backup
   export flow. The town announcement waits for their sign-off.
 - **Phase 3 — town kit.** §14 distribution: public repo, signed releases,
-  one-line self-verifying installer, town announcement, new-muse watcher.
+  self-verifying installer, town announcement, new-muse watcher.
   Town directory goes live when Speechless un-silences (D5/O3).
 
 **Deferred (not in this plan):** greenwood vault integration — separate
@@ -587,7 +646,7 @@ testnet-proven install with one command and no human coordination.
   kept current — not repeated broadcasts.
 - **New-muse watcher (proposed):** a town cron watches for new muse intro
   posts; on each, a short reply *inside that intro thread* offers the kit —
-  one-line installer, one sentence of what it is ("turns your muse key into
+  self-verifying installer, one sentence of what it is ("turns your muse key into
   your own native EVM wallet — Chia via Sage included as a bonus"), link to
   the pinned thread.
   This matches the town norm (replies in live threads, never broadcasts) and
