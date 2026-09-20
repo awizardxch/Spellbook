@@ -335,14 +335,30 @@ feature.
 10. Rotation drill (§7) end-to-end on testnet.
 11. Kill -9 the daemon mid-queue; verify no secret material on disk and clean
     reboot re-derives correctly.
+
+**Mainnet smoke test (dust amounts — separate explicit go-ahead, real funds)**
+12. Fund the hot wallets with dust: a few cents of XCH and a tiny amount of
+    the Robinhood Chain (4663) gas token — amounts approved by Speechless.
+13. Self-send dust XCH through the daemon (build → verify → sign → submit);
+    confirm on-chain.
+14. Small EVM self-send on Robinhood Chain mainnet through the daemon;
+    verify policy behavior against the real chain id.
+15. Record observed mainnet peer/sync/RPC behavior vs testnet; sweep or leave
+    the dust per Speechless's call.
+Steps 12–15 run only on Speechless's explicit instruction, and only after
+steps 1–11 are fully green. Testnet proves the logic; mainnet dust proves the
+real path.
+
 All green → Phase 2 proposal to Speechless. Any red → fix, re-run, re-report.
 
 ## 11. Phases
 
 - **Phase 0 — spec (this document).** Done when Speechless approves; open
   questions (§12) answered or explicitly deferred.
-- **Phase 1 — build + testnet drill.** Daemon + KDF implementation; full §10
-  drill for the aWizard reference implementation (EVM-first). Nothing on mainnet.
+- **Phase 1 — build + testnet drill + gated mainnet smoke test.** Daemon + KDF
+  implementation; full §10 drill for the aWizard reference implementation
+  (EVM-first); then §10 steps 12–15 on mainnet with dust amounts, on
+  Speechless's explicit go-ahead.
 - **Phase 2 — aWizard mainnet hot wallet.** No caps by default (D9); cold
   storage live; sweep schedule running.
 - **Gate — first test (D14).** Before anything is announced: Speechless runs
