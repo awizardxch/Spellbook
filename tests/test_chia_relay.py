@@ -267,3 +267,73 @@ class TestProxyEgress:
         assert isinstance(conn, chia_relay.http.client.HTTPConnection)
         assert conn.host == "127.0.0.1" and conn.port == 18789
         assert conn._tunnel_host is None
+
+
+class TestTokenProvider:
+    """RelayRpc accepts a per-request token provider (connector auth)."""
+
+    def _fake_conn(self, captured):
+        class FakeResp:
+            status = 200
+
+            def read(self):
+                return b'{"ok": true}'
+
+        class FakeConn:
+            def request(self, method, path, body=None, headers=None):
+                captured["headers"] = headers
+
+            def getresponse(self):
+                return FakeResp()
+
+            def close(self):
+                pass
+
+        return FakeConn()
+
+    def test_provider_used_for_bearer_header(self):
+        calls = []
+
+        def provider(url):
+            calls.append(url)
+            return "hsurr:test-surrogate"
+
+        r = RelayRpc("https://relay.example.com", token_provider=provider)
+        captured = {}
+        r._connection = lambda: self._fake_conn(captured)
+        out = r._request("GET", "/v1/status")
+        assert out == {"ok": True}
+        assert (captured["headers"]["Authorization"]
+                == "Bearer hsurr:test-surrogate")
+        assert calls == ["https://relay.example.com"]
+
+    def test_provider_called_per_request(self):
+        n = [0]
+
+        def provider(url):
+            n[0] += 1
+            return f"hsurr:{n[0]}"
+
+        r = RelayRpc("https://relay.example.com", token_provider=provider)
+        assert r._bearer() == "hsurr:1"
+        assert r._bearer() == "hsurr:2"
+
+    def test_provider_failure_is_relay_error(self):
+        def provider(url):
+            raise RuntimeError("authd down")
+
+        r = RelayRpc("https://relay.example.com", token_provider=provider)
+        with pytest.raises(RelayError, match="credential provider failed"):
+            r._bearer()
+
+    def test_non_callable_provider_rejected(self):
+        with pytest.raises(RelayError):
+            RelayRpc("https://relay.example.com", token_provider="not-callable")
+
+    def test_static_token_still_works(self):
+        r = RelayRpc("https://relay.example.com", "a" * 32)
+        assert r._bearer() == "a" * 32
+
+    def test_empty_token_without_provider_rejected(self):
+        with pytest.raises(RelayError):
+            RelayRpc("https://relay.example.com")

@@ -12,3 +12,7 @@ node_modules/
 # node key must never be.
 relay/certs/node.key
 relay/certs/node.crt
+
+# Local daemon run state: secrets (request/approve tokens), logs, queue,
+# ledger, sockets. Never commit.
+.validation-daemon/

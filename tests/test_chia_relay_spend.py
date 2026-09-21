@@ -100,7 +100,9 @@ def daemon(tmp_path, monkeypatch):
     _write(os.path.join(cfgdir, "ledger.jsonl"), "")
     fake = FakeRelayRpc("https://relay.example.com", "t" * 32)
     import spellbook.chia_relay as relay_mod
-    monkeypatch.setattr(relay_mod, "RelayRpc", lambda url, token, timeout=60: fake)
+    monkeypatch.setattr(relay_mod, "RelayRpc",
+                        lambda url, token="", token_provider=None,
+                        timeout=60: fake)
     d = Daemon(cfgdir)
     return d, fake
 
@@ -122,7 +124,7 @@ def _make_daemon_with_chia_cfg(tmp_path, monkeypatch, chia_cfg):
     created = []
     behaviors = {}
 
-    def factory(url, token, timeout=60):
+    def factory(url, token="", token_provider=None, timeout=60):
         fake = FakeRelayRpc(url, token)
         for k, v in behaviors.get(url, {}).items():
             setattr(fake, k, v)
@@ -191,7 +193,7 @@ class TestRelayTransportSelection:
 
         import spellbook.chia_relay as relay_mod
 
-        def factory(url, token, timeout=60):
+        def factory(url, token="", token_provider=None, timeout=60):
             fake = FakeRelayRpc(url, token)
             fake.status = lambda: dict(mainnet_fake_status)
             for k, v in behaviors.get(url, {}).items():
@@ -239,7 +241,7 @@ class TestRelayTransportSelection:
             "relay_token": "t" * 32,
         })
 
-        def factory(url, token, timeout=60):
+        def factory(url, token="", token_provider=None, timeout=60):
             fake = FakeRelayRpc(url, token)
             fake.status = lambda: {"ok": True, "network": "mainnet",
                                    "peak_height": 1, "peers": [],
@@ -418,7 +420,7 @@ class TestAuditFixes20260921:
         coin, _ = _fund_coin_for(seed, "chia-mainnet", 0, AMOUNT)
         behaviors["https://mainnet.relay"] = {"coin": coin}
 
-        def factory(url, token, timeout=60):
+        def factory(url, token="", token_provider=None, timeout=60):
             fake = FakeRelayRpc(url, token)
             fake.status = lambda: {"ok": True, "network": "mainnet",
                                    "peak_height": 1, "peers": [],
@@ -520,3 +522,56 @@ class TestAuditFixes20260921:
         # Velocity consumed fail-closed: the spend counts against the 24h
         # window even though its fate is unknown.
         assert d.spent_last_24h("chia-testnet", "native") == spend
+
+
+def _daemon_with_token(tmp_path, monkeypatch, token_value):
+    """Daemon with a chosen chia.relay_token (real RelayRpc class kept)."""
+    cfgdir = str(tmp_path)
+    _write(os.path.join(cfgdir, "seed.key"), TEST_SEED_HEX)
+    _write(os.path.join(cfgdir, "request.token"), "11" * 32)
+    _write(os.path.join(cfgdir, "approve.token"), "22" * 32)
+    _write(os.path.join(cfgdir, "spellbook.json"), json.dumps({
+        "seed_path": os.path.join(cfgdir, "seed.key"),
+        "labels": ["default"],
+        "chia": {
+            "network": "testnet11",
+            "relay_urls": {"testnet11": "https://relay.example.com"},
+            "relay_token": token_value,
+            "fee_mojos": 0,
+            "relay_scan_indices": 10,
+        },
+    }))
+    _write(os.path.join(cfgdir, "policy.json"), json.dumps({}))
+    _write(os.path.join(cfgdir, "ledger.jsonl"), "")
+    return Daemon(cfgdir)
+
+
+class TestChiaRelayRpcTokenSources:
+    """_chia_relay_rpc dispatches env:/connector:/literal token sources."""
+
+    def test_connector_source_builds_provider(self, tmp_path, monkeypatch):
+        d = _daemon_with_token(tmp_path, monkeypatch,
+                               "connector:custom.spellbook-chia-relay")
+        rpc = d._chia_relay_rpc("testnet11")
+        assert rpc._token_provider is not None
+        assert rpc._token == ""
+        assert rpc._url == "https://relay.example.com"
+
+    def test_env_source_still_works(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SPELLBOOK_TEST_TOKEN", "e" * 32)
+        d = _daemon_with_token(tmp_path, monkeypatch,
+                               "env:SPELLBOOK_TEST_TOKEN")
+        rpc = d._chia_relay_rpc("testnet11")
+        assert rpc._token_provider is None
+        assert rpc._token == "e" * 32
+
+    def test_literal_token_still_works(self, tmp_path, monkeypatch):
+        d = _daemon_with_token(tmp_path, monkeypatch, "l" * 32)
+        rpc = d._chia_relay_rpc("testnet11")
+        assert rpc._token_provider is None
+        assert rpc._token == "l" * 32
+
+    def test_missing_relay_url_fails_closed(self, tmp_path, monkeypatch):
+        d = _daemon_with_token(tmp_path, monkeypatch, "l" * 32)
+        with pytest.raises(RelayError, match="no relay configured"):
+            d._chia_relay_rpc("mainnet")

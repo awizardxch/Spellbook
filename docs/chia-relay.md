@@ -173,6 +173,18 @@ Config:
 }
 ```
 
+`relay_token` accepts three sources (checked in this order):
+
+1. `"env:VAR_NAME"` — read from the process environment (never commit the
+   value; pass it only through the env var).
+2. `"connector:<connector-id>"` — e.g.
+   `"connector:custom.spellbook-chia-relay"`. The daemon resolves a fresh
+   surrogate from authd for **every** relay request
+   (`src/spellbook/connectors.py`); the raw token never lives in the
+   daemon's memory, logs, or config. Preferred wherever the Secure Vault
+   connector is set up.
+3. A literal token (≥ 16 chars) — legacy; avoid committing it anywhere.
+
 ## 5. Frontend (`web/`, Vercel)
 
 A static single-page dashboard for the first tester. No build step;

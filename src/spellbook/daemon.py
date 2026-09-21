@@ -30,6 +30,7 @@ import struct
 import subprocess
 import sys
 import time
+import urllib.parse
 
 from spellbook import chia, chia_relay, evm, kdf, sign as spellsign
 from spellbook import solana as solana_mod
@@ -535,6 +536,39 @@ class Daemon:
             return self._execute_chia_spend_via_relay(params)
         return self._execute_chia_spend_via_sage(params)
 
+    def _chia_relay_rpc(self, network: str):
+        """Build the relay client for a Chia network (SPEC §10).
+
+        Token sources for ``chia.relay_token`` (checked in order):
+          - ``"env:VAR"`` — value from the process environment.
+          - ``"connector:<id>"`` — fresh authd surrogate per request;
+            the raw token never lives in this process (connectors.py).
+          - literal token (>= 16 chars) — legacy.
+        """
+        relay_urls = self.chia_cfg.get("relay_urls", {})
+        relay_url = relay_urls.get(network) or self.chia_cfg.get("relay_url")
+        if not relay_url:
+            raise chia_relay.RelayError(
+                f"no relay configured for {network} — refusing")
+        token = self.chia_cfg.get("relay_token") or os.environ.get(
+            "SPELLBOOK_RELAY_TOKEN", "")
+        if token.startswith("env:"):
+            token = os.environ.get(token[4:], "")
+        token_provider = None
+        if token.startswith("connector:"):
+            # Connector-backed credential (Secure Vault): the raw token is
+            # never in this process — a fresh surrogate is resolved from
+            # authd for every relay request and swapped for the real
+            # credential by the egress layer.
+            from . import connectors
+            host = urllib.parse.urlparse(relay_url).hostname or ""
+            token_provider = connectors.connector_token_provider(
+                token[len("connector:"):], allowed_hosts=(host,))
+            token = ""
+        rpc = chia_relay.RelayRpc(relay_url, token,
+                                  token_provider=token_provider)
+        return rpc
+
     def _execute_chia_spend_via_relay(self, params: dict) -> dict:
         """Build, sign (locally), and broadcast an approved XCH transfer
         via the spellbook-chia-relay.
@@ -575,16 +609,7 @@ class Daemon:
         # are per-network — a testnet relay must never see a mainnet bundle.
         # `relay_urls` maps network name -> URL; the legacy flat `relay_url`
         # is kept as a fallback for single-network installs.
-        relay_urls = self.chia_cfg.get("relay_urls", {})
-        relay_url = relay_urls.get(network) or self.chia_cfg.get("relay_url")
-        if not relay_url:
-            raise chia_relay.RelayError(
-                f"no relay configured for {network} — refusing")
-        token = self.chia_cfg.get("relay_token") or os.environ.get(
-            "SPELLBOOK_RELAY_TOKEN", "")
-        if token.startswith("env:"):
-            token = os.environ.get(token[4:], "")
-        rpc = chia_relay.RelayRpc(relay_url, token)
+        rpc = self._chia_relay_rpc(network)
 
         # Verify the relay is on the expected network before touching keys.
         st = rpc.status()

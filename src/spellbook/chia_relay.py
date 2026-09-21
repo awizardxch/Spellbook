@@ -40,6 +40,7 @@ import os
 import ssl
 import time
 import urllib.parse
+from typing import Callable
 
 
 class RelayError(Exception):
@@ -70,12 +71,26 @@ MEMPOOL_STATUS = {
 class RelayRpc:
     """HTTPS client for the spellbook-chia-relay v1 API."""
 
-    def __init__(self, relay_url: str, token: str, timeout: int = 60):
+    def __init__(self, relay_url: str, token: str = "",
+                 token_provider: Callable[[str], str] | None = None,
+                 timeout: int = 60):
         if not relay_url or not relay_url.startswith(("https://", "http://")):
             raise RelayError(f"bad relay_url: {relay_url!r}")
-        if not token or len(token) < 16:
-            raise RelayError("relay token missing or too short")
-        # Never log the token; store it for the Authorization header only.
+        if token_provider is not None:
+            # Connector-backed credential (e.g. Secure Vault): a fresh
+            # surrogate is resolved per request; the raw token never lives
+            # in this process. The provider receives the relay base URL so
+            # it can enforce its own host allowlist.
+            if not callable(token_provider):
+                raise RelayError("token_provider must be callable")
+            self._token = ""
+            self._token_provider = token_provider
+        else:
+            if not token or len(token) < 16:
+                raise RelayError("relay token missing or too short")
+            # Never log the token; store it for the Authorization header only.
+            self._token = token
+            self._token_provider = None
         self._url = relay_url.rstrip("/")
         self._token = token
         self._timeout = timeout
@@ -140,11 +155,21 @@ class RelayRpc:
                         tunnel_headers or None)
         return conn
 
+    def _bearer(self) -> str:
+        """Bearer value for the Authorization header (never logged)."""
+        if self._token_provider is not None:
+            try:
+                return self._token_provider(self._url)
+            except Exception as e:
+                raise RelayError(
+                    f"relay credential provider failed: {e}") from e
+        return self._token
+
     def _request(self, method: str, path: str,
                  body: dict | None = None) -> dict:
         payload = json.dumps(body or {}).encode() if body is not None else None
         headers = {
-            "Authorization": f"Bearer {self._token}",
+            "Authorization": f"Bearer {self._bearer()}",
             "Content-Type": "application/json",
         }
         conn = self._connection()
