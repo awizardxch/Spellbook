@@ -1034,10 +1034,16 @@ class Daemon:
             # is not enough.
             self._check_mint_gate(params)
         if intent == "offer_make":
+            if params.get("transport") == "native":
+                return self._execute_offer_make_native(params)
             return self._execute_offer_make_via_sage(params)
         if intent == "offer_take":
+            if params.get("transport") == "native":
+                return self._execute_offer_take_native(params)
             return self._execute_offer_take_via_sage(params)
         if intent == "offer_cancel":
+            if params.get("transport") == "native":
+                return self._execute_offer_cancel_native(params)
             return self._execute_offer_cancel_via_sage(params)
         if intent == "nft_mint":
             return self._execute_nft_mint_via_sage(params)
@@ -1577,6 +1583,483 @@ class Daemon:
                 "retry blindly")
         return {"submitted": True, "tx_hash": ref or ids[0],
                 "offer_ids": ids}
+
+    # ---- native XCH offer path (chia_offer.py + relay, no Sage) ----
+
+    def _offer_native_route(self, chain: str) -> bool:
+        """True when the native offer path can serve this chain.
+
+        The native route never calls _chia_sage_rpc: chain data comes
+        from the relay and signing is local via chia_offer.py. Legs must
+        all be native XCH (checked by the caller); the relay must be
+        configured for the chain's network.
+        """
+        network = chia.NETWORKS.get(chain)
+        if not network:
+            return False
+        urls = self.chia_cfg.get("relay_urls", {}) or {}
+        return bool(urls.get(network) or self.chia_cfg.get("relay_url"))
+
+    # -- atomic mode-600 offer storage under config_dir/offers --
+
+    def _offer_store_dir(self) -> str:
+        d = os.path.join(self.config_dir, "offers")
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        return d
+
+    def _offer_store(self, record: dict) -> None:
+        """Persist an offer record atomically with mode 600.
+
+        Writes to a temp file (mode 600 from creation — never
+        world-readable) then os.replace, so a crash cannot leave a
+        half-written record and the plaintext offer string is never
+        exposed by file permissions.
+        """
+        d = self._offer_store_dir()
+        path = os.path.join(d, record["offer_id"] + ".json")
+        tmp = path + ".tmp"
+        data = json.dumps(record, indent=2).encode()
+        fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        os.replace(tmp, path)
+
+    def _offer_load(self, offer_id: str):
+        """Load a stored native offer record, or None."""
+        path = os.path.join(self._offer_store_dir(), offer_id + ".json")
+        try:
+            with open(path, "r") as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return None
+
+    def _offer_mark(self, offer_id: str, status: str,
+                    extra: dict | None = None) -> None:
+        rec = self._offer_load(offer_id)
+        if rec is None:
+            raise chia_relay.RelayError(
+                f"offer {offer_id[:16]}… not in the local offer store — refusing")
+        rec["status"] = status
+        if extra:
+            rec.update(extra)
+        self._offer_store(rec)
+
+    def _offer_list_local(self) -> list:
+        """All stored native offer records (newest first)."""
+        out = []
+        try:
+            names = os.listdir(self._offer_store_dir())
+        except FileNotFoundError:
+            return []
+        for name in sorted(names):
+            if not name.endswith(".json") or name.endswith(".tmp"):
+                continue
+            try:
+                with open(os.path.join(self._offer_store_dir(), name)) as f:
+                    out.append(json.load(f))
+            except (OSError, ValueError):
+                continue
+        out.sort(key=lambda r: r.get("created_at", 0), reverse=True)
+        return out
+
+    # -- relay chain access: fresh read on every call --
+
+    def _native_relay_coins(self, chain: str):
+        """(rpc, network, master_sk, unspent, index_for_ph, puzzle_hashes).
+
+        Fetches coins fresh from the relay on every call — the
+        execute-time unspent-input recheck happens immediately before
+        approved signing. Raises chia_relay.RelayError on any problem.
+        """
+        from spellbook import chia_relay, chia_sign
+        network = chia.NETWORKS[chain]
+        rpc = self._chia_relay_rpc(network)
+        st = rpc.status()
+        if st.get("network") != network:
+            raise chia_relay.RelayError(
+                f"relay network {st.get('network')!r} != expected "
+                f"{network!r} — refusing")
+        master_sk = self._chia_master_sk(chain)
+        scan_n = int(self.chia_cfg.get("relay_scan_indices", 10))
+        puzzle_hashes = []
+        index_for_ph = {}
+        for i in range(scan_n):
+            wsk = chia_sign.wallet_sk(master_sk, i)
+            spk = chia_sign.synthetic_pk(chia_sign.pk_bytes(wsk))
+            ph = chia_sign.puzzle_hash_for_synthetic_pk(spk)
+            puzzle_hashes.append(ph.hex())
+            index_for_ph[ph.hex()] = i
+        coins = rpc.coins(puzzle_hashes)
+        unspent = [c for c in coins if c.get("spent_height") is None]
+        return rpc, network, master_sk, unspent, index_for_ph, puzzle_hashes
+
+    def _native_select(self, unspent: list, index_for_ph: dict, need: int):
+        """Largest-first XCH input selection; returns ([XchInput], total)."""
+        from spellbook import chia_offer, chia_relay
+        ordered = sorted(unspent,
+                         key=lambda c: int(c.get("amount_mojos", 0)),
+                         reverse=True)
+        selected = []
+        total = 0
+        for c in ordered:
+            ph_hex = c["puzzle_hash"]
+            idx = index_for_ph.get(ph_hex)
+            if idx is None:
+                raise chia_relay.RelayError(
+                    f"coin puzzle hash {ph_hex[:16]}… not in our key set "
+                    "— refusing")
+            selected.append(chia_offer.XchInput(
+                bytes.fromhex(c["parent_coin_info"]),
+                bytes.fromhex(ph_hex),
+                int(c["amount_mojos"]), idx))
+            total += int(c["amount_mojos"])
+            if total >= need:
+                break
+        if total < need:
+            raise chia_relay.RelayError(
+                f"insufficient XCH via relay: have {total} mojos, need {need}")
+        return selected, total
+
+    def _relay_broadcast_strict(self, rpc, bundle_bytes: bytes) -> str:
+        """Broadcast with strict local/relay/peer txid identity.
+
+        The bundle txid is deterministically sha256 of its serialized
+        bytes — computed locally and required to equal BOTH the relay's
+        expected_txid and the peer mempool ack txid. Raises RelayError
+        on contract violations (nothing recorded, no velocity consumed)
+        and BroadcastUnknown on any identity mismatch (fate unknown —
+        never retry; the caller ledgers approved-submit-unknown and
+        consumes velocity fail-closed).
+        """
+        from spellbook import chia_relay
+        res = rpc.broadcast(bundle_bytes.hex())
+        status_name = res.get("status_name", "")
+        if status_name == "FAILED" or res.get("status") == 3:
+            raise chia_relay.RelayError(
+                f"relay broadcast FAILED: {res.get('error', res)!r}")
+        local_txid = hashlib.sha256(bundle_bytes).hexdigest()
+        expected_txid = res.get("expected_txid")
+        if not expected_txid:
+            raise chia_relay.RelayError(
+                "relay broadcast returned no expected_txid — refusing "
+                "(contract violation; bundle identity unverified)")
+        if expected_txid != local_txid:
+            raise chia_relay.BroadcastUnknown(
+                local_txid,
+                f"relay expected_txid {expected_txid!r} != locally computed "
+                f"bundle txid {local_txid[:16]}… — fate unknown, do not retry")
+        txid = res.get("txid")
+        if not txid:
+            raise chia_relay.RelayError(
+                "relay broadcast returned no txid — refusing "
+                "(contract violation; bundle identity unverified)")
+        if txid != local_txid:
+            raise chia_relay.BroadcastUnknown(
+                local_txid,
+                f"relay peer-ack txid {txid!r} != locally computed bundle "
+                f"txid {local_txid[:16]}… — fate unknown, do not retry")
+        return txid
+
+    # -- native make / take / cancel (approved execution) --
+
+    def _execute_offer_make_native(self, params: dict) -> dict:
+        """Create an approved native-XCH offer (off-chain — no broadcast).
+
+        Guards, leg re-validation (all-native or refuse), fresh relay
+        coin scan, local build+sign via chia_offer, atomic mode-600
+        storage of the offer record. Returns {"submitted": False,
+        "offer_id", "offer"} — nothing left the machine, so velocity
+        counts the encumbered legs and the ledger records the offer_id.
+        """
+        from spellbook import chia_offer, chia_relay
+        chain = params["chain"]
+        self._chia_offer_guards(params, chain)
+        offered = _validate_offer_legs(params["offered"], "offered")
+        requested = _validate_offer_legs(params["requested"], "requested")
+        if any(a != "native" for a, _ in offered + requested):
+            raise chia_relay.RelayError(
+                "native offer path is XCH-only — non-native legs go through Sage")
+        fee = params.get("fee_mojos", 0)
+        receive_ph = bytes.fromhex(params["_receive_ph"])
+        (rpc, network, master_sk, unspent, index_for_ph,
+         puzzle_hashes) = self._native_relay_coins(chain)
+        need = sum(m for _, m in offered) + fee
+        inputs, _total = self._native_select(unspent, index_for_ph, need)
+        change_ph = bytes.fromhex(puzzle_hashes[0])
+        built = chia_offer.make_offer(
+            master_sk, network,
+            offered=[("native", m) for _, m in offered],
+            requested=[chia_offer.RequestedPayment("native", receive_ph, m)
+                       for _, m in requested],
+            xch_inputs=inputs,
+            change_ph=change_ph,
+            fee=fee,
+        )
+        self._offer_store({
+            "offer_id": built.offer_id,
+            "offer": built.offer_str,
+            "bundle_hex": built.bundle_bytes.hex(),
+            "maker_coins": built.maker_coins,
+            "offered": [[a, m] for a, m in built.offered],
+            "requested": [[a, m] for a, m in built.requested],
+            "nonce": built.nonce.hex(),
+            "status": "open",
+            "chain": chain,
+            "network": network,
+            "transport": "native",
+            "created_at": time.time(),
+        })
+        return {"submitted": False, "offer_id": built.offer_id,
+                "offer": built.offer_str,
+                "note": f"native XCH offer {built.offer_id[:16]}… created "
+                        f"off-chain (stored open; nothing broadcast)"}
+
+    def _execute_offer_take_native(self, params: dict) -> dict:
+        """Take an approved native-XCH offer (on-chain spend of our side).
+
+        Re-parses the offer (the string is immutable — belt-and-braces),
+        re-verifies terms against the approval, rechecks unspent inputs
+        via the relay, builds and signs our side locally, completes
+        settlement, and broadcasts with strict txid identity. Raises
+        chia_relay.RelayError on any failure and BroadcastUnknown when
+        the take may have broadcast but identity could not be verified
+        (never retry, never reuse).
+        """
+        from spellbook import chia_offer, chia_relay
+        chain = params["chain"]
+        self._chia_offer_guards(params, chain)
+        try:
+            parsed = chia_offer.parse_offer(params["offer"])
+        except chia_offer.OfferError as e:
+            raise chia_relay.RelayError(
+                f"offer failed native parse: {e}") from e
+        legs = chia_offer.summarize_offer(parsed)
+        give = legs["requested"]  # what we must pay (maker's requested)
+        get = legs["offered"]     # what we receive (maker's offered)
+        want_give = [(it["asset"], it["amount_mojos"])
+                     for it in params["_give"]]
+        want_get = [(it["asset"], it["amount_mojos"])
+                    for it in params["_get"]]
+        if give != want_give or get != want_get:
+            raise chia_relay.RelayError(
+                "offer terms changed since approval — refusing to take")
+        fee = params.get("fee_mojos", 0)
+        (rpc, network, master_sk, unspent, index_for_ph,
+         puzzle_hashes) = self._native_relay_coins(chain)
+        need = sum(m for _, m in give) + fee
+        inputs, _total = self._native_select(unspent, index_for_ph, need)
+        recv_ph = bytes.fromhex(puzzle_hashes[0])
+        result = chia_offer.take_offer(
+            master_sk, network, parsed,
+            xch_inputs=inputs,
+            receive=[chia_offer.RequestedPayment(a, recv_ph, m)
+                     for a, m in get],
+            change_ph=recv_ph,
+            fee=fee,
+        )
+        txid = self._relay_broadcast_strict(rpc, result.bundle_bytes)
+        if self._offer_load(parsed.offer_id) is not None:
+            self._offer_mark(parsed.offer_id, "taken", {"take_txid": txid})
+        return {"submitted": True, "tx_hash": txid,
+                "give": params["_give"], "get": params["_get"]}
+
+    def _execute_offer_cancel_native(self, params: dict) -> dict:
+        """Cancel approved native-XCH offer(s) (on-chain coin spends).
+
+        Each offer must be in the local store and open; at least one
+        maker coin must still be unspent on the relay (immediate
+        recheck). Spends the first live maker coin back to our change
+        address and broadcasts with strict txid identity. Raises
+        chia_relay.RelayError on any failure and BroadcastUnknown when
+        a cancel may have broadcast but identity could not be verified
+        (never retry, never reuse).
+        """
+        from spellbook import chia_offer, chia_relay
+        chain = params["chain"]
+        self._chia_offer_guards(params, chain)
+        ids = list(params["offer_ids"])
+        fee = params.get("fee_mojos", 0)
+        (rpc, network, master_sk, unspent, index_for_ph,
+         puzzle_hashes) = self._native_relay_coins(chain)
+        unspent_ids = {c.get("coin_id") for c in unspent}
+        change_ph = bytes.fromhex(puzzle_hashes[0])
+        results = []
+        for oid in ids:
+            rec = self._offer_load(oid)
+            if rec is None:
+                raise chia_relay.RelayError(
+                    f"offer {oid[:16]}… not in the local offer store — refusing")
+            if rec.get("status") != "open":
+                raise chia_relay.RelayError(
+                    f"offer {oid[:16]}… is not open "
+                    f"(status {rec.get('status')!r}) — refusing")
+            if rec.get("chain") != chain:
+                raise chia_relay.RelayError(
+                    f"offer {oid[:16]}… belongs to {rec.get('chain')} — refusing")
+            maker_coins = rec.get("maker_coins") or []
+            live = [mc for mc in maker_coins
+                    if mc.get("coin_id") in unspent_ids]
+            if not live:
+                raise chia_relay.RelayError(
+                    f"offer {oid[:16]}… maker coins already spent — "
+                    "nothing to cancel")
+            mc = live[0]
+            idx = index_for_ph.get(mc["puzzle_hash"])
+            if idx is None:
+                raise chia_relay.RelayError(
+                    "maker coin puzzle hash not in our key set — refusing")
+            coin = chia_offer.Coin(bytes.fromhex(mc["parent"]),
+                                   bytes.fromhex(mc["puzzle_hash"]),
+                                   mc["amount"])
+            bundle = chia_offer.cancel_offer(master_sk, network, coin, idx,
+                                             change_ph, fee=fee)
+            txid = self._relay_broadcast_strict(rpc, bundle)
+            self._offer_mark(oid, "cancelled", {"cancel_txid": txid})
+            results.append({"offer_id": oid, "tx_hash": txid})
+        out = {"submitted": True, "tx_hash": results[0]["tx_hash"],
+               "offer_ids": ids}
+        if len(results) > 1:
+            out["cancels"] = results
+        return out
+
+    # -- native request-time validation (no Sage at request time either) --
+
+    def _rt_offer_make_native(self, p: dict, chain: str, offered: list,
+                              requested: list, muse_id: str) -> dict:
+        """Queue a native-XCH offer_make intent.
+
+        All-native legs are already validated; the receive address
+        decodes to a puzzle hash locally and the funding check reads
+        the relay — Sage is never consulted on this path.
+        """
+        from spellbook import chia_relay, chia_sign
+        recv = p.get("receive_address")
+        if not isinstance(recv, str) or not recv:
+            return {"ok": False,
+                    "error": "native offer_make needs receive_address "
+                             "(requested XCH needs a puzzle hash)"}
+        network = chia.NETWORKS[chain]
+        prefix = chia.PREFIXES[network]
+        if not recv.startswith(prefix):
+            return {"ok": False,
+                    "error": f"bad receive_address for {chain}: expected a "
+                             f"{prefix}… address"}
+        if not self._offer_native_route(chain):
+            return {"ok": False,
+                    "error": "native XCH offers need a configured Chia relay "
+                             f"(chia.relay_urls[{network}]) — refusing"}
+        try:
+            receive_ph = chia_sign.puzzle_hash_for_address(recv)
+            (_rpc, _net, _master, unspent, _idx,
+             _phs) = self._native_relay_coins(chain)
+            have = sum(int(c.get("amount_mojos", 0)) for c in unspent)
+            need = sum(m for _, m in offered) + p.get("fee_mojos", 0)
+            if have < need:
+                raise chia_relay.RelayError(
+                    f"insufficient XCH via relay: have {have} mojos, "
+                    f"need {need}")
+        except (chia_relay.RelayError, ValueError) as e:
+            return {"ok": False, "error": str(e)}
+        params = {"intent": "offer_make", "chain": chain,
+                  "transport": "native",
+                  "offered": [{"asset": a, "amount_mojos": m}
+                              for a, m in offered],
+                  "requested": [{"asset": a, "amount_mojos": m}
+                                for a, m in requested],
+                  "fee_mojos": p.get("fee_mojos", 0),
+                  "purpose": p.get("purpose", ""),
+                  "_receive_ph": receive_ph.hex()}
+        if p.get("expires_at_second") is not None:
+            params["expires_at_second"] = p["expires_at_second"]
+        entries = [(chain, a, m) for a, m in offered]
+        return self._run_fund_intent(params, muse_id, entries, "offer_make")
+
+    def _rt_offer_take_native(self, p: dict, chain: str, muse_id: str) -> dict:
+        """Queue a native-XCH offer_take intent.
+
+        The offer string decodes locally (exact legs for the policy
+        engine and the human — never an opaque string); the funding
+        check reads the relay. Falls back to the Sage path only when
+        the offer is not native-parseable (e.g. CAT legs).
+        """
+        from spellbook import chia_offer, chia_relay
+        try:
+            parsed = chia_offer.parse_offer(p["offer"])
+        except chia_offer.OfferError:
+            return None  # not native-parseable: caller tries Sage
+        legs = chia_offer.summarize_offer(parsed)
+        give = legs["requested"]
+        get = legs["offered"]
+        if not self._offer_native_route(chain):
+            return {"ok": False,
+                    "error": "native XCH offers need a configured Chia relay "
+                             f"(chia.relay_urls[{chia.NETWORKS[chain]}]) — refusing"}
+        try:
+            (_rpc, _net, _master, unspent, _idx,
+             _phs) = self._native_relay_coins(chain)
+            have = sum(int(c.get("amount_mojos", 0)) for c in unspent)
+            need = sum(m for _, m in give) + p.get("fee_mojos", 0)
+            if have < need:
+                raise chia_relay.RelayError(
+                    f"insufficient XCH via relay: have {have} mojos, "
+                    f"need {need}")
+        except chia_relay.RelayError as e:
+            return {"ok": False, "error": str(e)}
+        params = {"intent": "offer_take", "chain": chain,
+                  "transport": "native",
+                  "offer": p["offer"],
+                  "fee_mojos": p.get("fee_mojos", 0),
+                  "purpose": p.get("purpose", ""),
+                  "_give": [{"asset": a, "amount_mojos": m} for a, m in give],
+                  "_get": [{"asset": a, "amount_mojos": m} for a, m in get]}
+        entries = [(chain, a, m) for a, m in give]
+        return self._run_fund_intent(params, muse_id, entries, "offer_take")
+
+    def _rt_offer_cancel_native(self, p: dict, chain: str, ids: list,
+                                muse_id: str) -> dict:
+        """Queue a native-XCH offer_cancel intent.
+
+        Every offer must be ours: present in the local store and open.
+        Cancellation always queues for a human — no amount policy.
+        """
+        offered_all = []
+        for oid in ids:
+            rec = self._offer_load(oid)
+            if rec is None or rec.get("transport") != "native":
+                return None  # not ours: caller tries Sage
+            if rec.get("status") != "open":
+                return {"ok": False,
+                        "error": f"offer {oid[:16]}… is not open "
+                                 f"(status {rec.get('status')!r}) — refusing"}
+            if rec.get("chain") != chain:
+                return {"ok": False,
+                        "error": f"offer {oid[:16]}… belongs to "
+                                 f"{rec.get('chain')} — refusing"}
+            offered_all.append({"offer_id": oid, "offered": [
+                {"asset": a, "amount_mojos": m}
+                for a, m in rec.get("offered", [])]})
+        params = {"intent": "offer_cancel", "chain": chain,
+                  "transport": "native",
+                  "offer_ids": list(ids),
+                  "fee_mojos": p.get("fee_mojos", 0),
+                  "purpose": p.get("purpose", ""),
+                  "_offered": offered_all}
+        canon = json.dumps(params, sort_keys=True).encode()
+        qid = str(self.next_qid)
+        self.next_qid += 1
+        self.queue[qid] = {"params": params, "muse_id": muse_id,
+                           "queued_at": time.time()}
+        self._save_queue()
+        self.ledger.append(muse_id, canon, None, f"queued:{qid}")
+        return {"ok": True, "decision": "queued", "queue_id": qid,
+                "reason": "offer cancellation always requires human approval"}
 
     # ---- full Sage wallet surface: mints, DID/option/CAT, coin ops ----
 
@@ -2441,12 +2924,6 @@ class Daemon:
             self._chia_offer_guards(p, chain)
             offered = _validate_offer_legs(p["offered"], "offered")
             requested = _validate_offer_legs(p["requested"], "requested")
-            # NFT legs resolve to launcher ids now, so the queued intent
-            # the human approves names the exact NFT (and fails fast when
-            # the NFT is not in this wallet).
-            rpc, _, _ = self._chia_sage_rpc(chain)
-            offered = _resolve_offer_nft_legs(rpc, offered, "offered")
-            requested = _resolve_offer_nft_legs(rpc, requested, "requested")
             expires = p.get("expires_at_second")
             if expires is not None and (
                     not isinstance(expires, int) or expires <= 0):
@@ -2455,6 +2932,21 @@ class Daemon:
             recv = p.get("receive_address")
             if recv is not None and not isinstance(recv, str):
                 raise chia.SageError("receive_address must be a string")
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+        # All-native-XCH legs take the native offer path (local build,
+        # relay chain data — Sage is never consulted). Anything else
+        # keeps the existing Sage flow.
+        if all(a == "native" for a, _ in offered + requested):
+            return self._rt_offer_make_native(p, chain, offered, requested,
+                                              muse_id)
+        try:
+            # NFT legs resolve to launcher ids now, so the queued intent
+            # the human approves names the exact NFT (and fails fast when
+            # the NFT is not in this wallet).
+            rpc, _, _ = self._chia_sage_rpc(chain)
+            offered = _resolve_offer_nft_legs(rpc, offered, "offered")
+            requested = _resolve_offer_nft_legs(rpc, requested, "requested")
         except chia.SageError as e:
             return {"ok": False, "error": str(e)}
         params = {"intent": "offer_make", "chain": chain,
@@ -2485,6 +2977,15 @@ class Daemon:
             return {"ok": False, "error": "offer must be the offer string"}
         try:
             self._chia_offer_guards(p, chain)
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+        # Native-parseable (XCH-only) offers take the native path — the
+        # offer string decodes locally, funding is checked via the relay,
+        # and Sage is never consulted. Anything else keeps the Sage flow.
+        native = self._rt_offer_take_native(p, chain, muse_id)
+        if native is not None:
+            return native
+        try:
             # Decode the offer now so policy sees real legs and the human
             # sees real terms in the queue — never an opaque string alone.
             rpc, _, _ = self._chia_sage_rpc(chain)
@@ -2526,6 +3027,15 @@ class Daemon:
             return {"ok": False, "error": "offer_id(s) must be non-empty strings"}
         try:
             self._chia_offer_guards(p, chain)
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+        # Offers made on the native path cancel on the native path — the
+        # local store (not Sage) is the source of truth for our offers.
+        # Anything else keeps the Sage flow.
+        native = self._rt_offer_cancel_native(p, chain, ids, muse_id)
+        if native is not None:
+            return native
+        try:
             # Confirm each offer is ours and still open, so the human
             # approves a real cancellation with real terms attached.
             rpc, _, _ = self._chia_sage_rpc(chain)
@@ -3247,10 +3757,21 @@ class Daemon:
         if op not in _CHIA_READ_OPS:
             return {"ok": False,
                     "error": f"unknown chia_read op {op!r}"}
+        # Native-path offers live in the local store, not in Sage: serve
+        # our own records directly so reads work when Sage is down.
+        if op == "get_offer" and p.get("offer_id"):
+            rec = self._offer_load(p["offer_id"])
+            if rec is not None:
+                return {"ok": True, "result": rec}
         try:
             rpc, _, _ = self._chia_sage_rpc(chain)
             return {"ok": True, "result": _run_chia_read_op(self, rpc, op, p)}
         except chia.SageError as e:
+            if op == "get_offers":
+                local = self._offer_list_local()
+                if local:
+                    return {"ok": True, "result": local,
+                            "note": "Sage unavailable; local native offers only"}
             return {"ok": False, "error": str(e)}
 
     def _decoded_queue(self):
