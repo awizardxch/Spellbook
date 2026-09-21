@@ -256,10 +256,17 @@ class Daemon:
                                           rpc.nonce(sender), dest, amount,
                                           rpc.gas_price_wei(), gas_limit)
         # The approved intent, re-checked against the signed tx's fields.
-        assert signed["from"].lower() == sender.lower()
-        assert signed["to"].lower() == dest.lower()
-        assert signed["value_wei"] == amount
-        assert signed["chain_id"] == info["chain_id"]
+        # Explicit checks, not assert: this module must stay fail-closed
+        # even under `python -O` (which strips assert statements).
+        for name, got, want in (
+                ("from", signed["from"].lower(), sender.lower()),
+                ("to", signed["to"].lower(), dest.lower()),
+                ("value_wei", signed["value_wei"], amount),
+                ("chain_id", signed["chain_id"], info["chain_id"])):
+            if got != want:
+                raise evm.EvmError(
+                    f"signed tx {name} mismatch ({got!r} != {want!r}) — "
+                    "approved intent violated, refusing to broadcast")
         tx_hash = rpc.send_raw_tx(signed["raw_hex"])
         rcpt = rpc.wait_receipt(tx_hash)
         if int(rcpt.get("status", "0x0"), 16) != 1:
@@ -435,8 +442,24 @@ class Daemon:
         if d.verdict == "denied":
             self.ledger.append(muse_id, canon, None, "denied:" + d.reason)
             return {"ok": True, "decision": "denied", "reason": d.reason}
+        # Pre-execution intent line: if the process dies between here and the
+        # outcome line below, the ledger still records that this spend was
+        # executing. The human reconciles by canon_digest before any
+        # re-request (a blind retry could double-spend).
+        self.ledger.append(muse_id, canon, None, "executing")
         try:
             ex = self._execute_spend(p)
+        except (evm.BroadcastUnknown, chia.BroadcastUnknown) as e:
+            # The spend left the machine; its fate is unknown. Ledger the
+            # reference as unresolved and consume velocity fail-closed
+            # (assume it lands — a cap that undercounts is a broken cap).
+            # The human reconciles the hash on-chain before re-requesting.
+            ref = getattr(e, "tx_hash", None) or getattr(e, "reference", None)
+            self._record_velocity(p["chain"], asset, amount)
+            self.ledger.append(muse_id, canon, ref,
+                               "approved-submit-unknown:" + str(e))
+            return {"ok": True, "decision": "approved-submit-unknown",
+                    "tx_hash": ref, "note": str(e)}
         except (evm.EvmError, chia.SageError) as e:
             self.ledger.append(muse_id, canon, None,
                                "approved-submit-failed:" + str(e))
@@ -481,8 +504,20 @@ class Daemon:
         asset = params.get("asset", "native")
         amount = params.get("amount_mojos", params.get("amount_wei"))
         canon = json.dumps(params, sort_keys=True).encode()
+        # Same pre-execution intent line as the auto-approve path: the queue
+        # item is already popped (one approval = one execution attempt), so
+        # the ledger is the crash record for the in-flight window.
+        self.ledger.append(muse_id, canon, None, "executing")
         try:
             ex = self._execute_spend(params)
+        except (evm.BroadcastUnknown, chia.BroadcastUnknown) as e:
+            ref = getattr(e, "tx_hash", None) or getattr(e, "reference", None)
+            self._record_velocity(params["chain"], asset, amount)
+            self.ledger.append(muse_id, canon, ref,
+                               "approved-submit-unknown:" + str(e))
+            return {"ok": True, "queue_id": qid, "tx_hash": ref,
+                    "decision": "approved-submit-unknown",
+                    "note": str(e)}
         except (evm.EvmError, chia.SageError) as e:
             # Approved but never executed: the human's approval is consumed,
             # the failure is ledgered, nothing is recorded as spent. The
@@ -494,7 +529,8 @@ class Daemon:
         if ex["submitted"]:
             self.ledger.append(muse_id, canon, ex["tx_hash"], "approved-by-human")
             return {"ok": True, "queue_id": qid,
-                    "tx_hash": ex["tx_hash"], "block": ex["block"]}
+                    "tx_hash": ex["tx_hash"],
+                    "block": ex.get("block", ex.get("tx_height"))}
         self.ledger.append(muse_id, canon, None, "approved-by-human")
         return {"ok": True, "queue_id": qid, "note": ex["note"]}
 
@@ -508,9 +544,42 @@ class Daemon:
                            None, "rejected-by-human")
         return {"ok": True, "queue_id": qid}
 
+    # Resolved outcomes for an "executing" ledger line. Anything else with
+    # the same canon_digest leaves the execution unresolved — the human
+    # must reconcile the chain before re-requesting.
+    _RESOLVED_EXECUTIONS = frozenset({
+        "approved", "approved-by-human",
+        "approved-submit-failed", "approved-submit-unknown",
+    })
+
+    def unresolved_executions(self) -> list[dict]:
+        """Ledger rows marked 'executing' with no later resolution row.
+
+        This is the crash/ambiguity record: a daemon killed mid-execution
+        (or a broadcast whose receipt never arrived and was never
+        reconciled) leaves an 'executing' line with no outcome. Matching is
+        by canon_digest, so it is a heuristic when two identical requests
+        exist — err on the side of showing, not hiding.
+        """
+        rows = self.ledger.read_all()
+        resolved: set[str] = set()
+        executing: list[dict] = []
+        for row in rows:
+            digest = row.get("canon_digest")
+            decision = (row.get("decision") or "")
+            base = decision.split(":", 1)[0]
+            if base == "executing":
+                executing.append(row)
+            elif base in self._RESOLVED_EXECUTIONS:
+                resolved.add(digest)
+        return [{"canon_digest": r["canon_digest"], "ts": r["ts"],
+                 "requester_muse": r["requester_muse"]}
+                for r in executing if r["canon_digest"] not in resolved]
+
     def rt_status(self, p: dict, muse_id: str) -> dict:
         out = {"ok": True, "queue_depth": len(self.queue),
-               "seed_loaded": self.seed is not None}
+               "seed_loaded": self.seed is not None,
+               "unresolved_executions": self.unresolved_executions()}
         balances = {}
         if self.seed is not None:
             for chain, entry in (self.evm_cfg.get("chains") or {}).items():

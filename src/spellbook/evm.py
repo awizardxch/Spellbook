@@ -14,6 +14,15 @@ Safety rails:
   intent. Anything else aborts before the tx leaves the machine.
 - The RPC's chain_id is checked against the expected chain before any
   signing happens — a mispointed RPC cannot redirect funds.
+- Nonces are read at the "pending" block tag so back-to-back spends never
+  share a nonce.
+- Signing is legacy type-0 (EIP-155) only — a deliberate v1 limitation:
+  legacy transfers are valid on every EVM chain including post-merge, and
+  the hand-rolled RLP/signer stays small and auditable. EIP-1559 (type-2)
+  is a future enhancement, not a silent fallback.
+- A receipt timeout is NOT a failure: it raises BroadcastUnknown (the tx
+  left the machine, its fate is unknown) so no caller ever blind-retries
+  into a double-spend.
 """
 import json
 import time
@@ -35,6 +44,18 @@ TRANSFER_GAS_LIMIT = 21_000
 
 class EvmError(Exception):
     pass
+
+
+class BroadcastUnknown(EvmError):
+    """The signed tx was accepted by the node (a tx hash exists) but no
+    receipt arrived within the wait window — the spend left the machine and
+    its fate is UNKNOWN. Callers must NOT retry blindly (that would
+    double-spend); they ledger the hash as unresolved and let a human
+    reconcile before any re-request."""
+
+    def __init__(self, tx_hash: str, note: str):
+        super().__init__(note)
+        self.tx_hash = tx_hash
 
 
 def is_address(s: str) -> bool:
@@ -104,7 +125,12 @@ class Rpc:
         return int(self.call("eth_getBalance", [address, "latest"]), 16)
 
     def nonce(self, address: str) -> int:
-        return int(self.call("eth_getTransactionCount", [address, "latest"]), 16)
+        # "pending", not "latest": the daemon handles requests serially, but
+        # two approved spends can land before either is mined. "latest" would
+        # hand both the same nonce (second tx replaces the first); "pending"
+        # counts in-flight txs so each spend gets a distinct nonce.
+        return int(self.call("eth_getTransactionCount",
+                             [address, "pending"]), 16)
 
     def gas_price_wei(self) -> int:
         return int(self.call("eth_gasPrice"), 16)
@@ -132,7 +158,15 @@ class Rpc:
             if r is not None:
                 return r
             time.sleep(poll)
-        raise EvmError(f"no receipt for {tx_hash} within {timeout}s")
+        # The tx was broadcast and accepted (send_raw_tx returned a hash),
+        # but no receipt arrived in time. It may still confirm later —
+        # raise the unknown state, never a plain failure: a plain failure
+        # invites a blind retry, and a blind retry double-spends.
+        raise BroadcastUnknown(
+            tx_hash,
+            f"tx {tx_hash} broadcast but no receipt within {timeout}s — "
+            "confirmation UNKNOWN. Do not re-request blindly; reconcile "
+            "the hash on-chain first.")
 
 
 # --- signing ------------------------------------------------------------------

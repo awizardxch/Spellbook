@@ -56,6 +56,18 @@ class SageError(Exception):
     """Any Sage RPC failure — transport, protocol, or RPC-side."""
 
 
+class BroadcastUnknown(SageError):
+    """The spend was submitted (send_xch accepted it) but no matching
+    on-chain record appeared within the wait window — it left the machine
+    and its fate is UNKNOWN. Callers must NOT retry blindly (that would
+    double-spend); they ledger the reference as unresolved and let a human
+    reconcile before any re-request."""
+
+    def __init__(self, reference: str, note: str):
+        super().__init__(note)
+        self.reference = reference
+
+
 def amount_to_int(v) -> int:
     """Parse Sage's untagged Amount (string or number) into mojos."""
     if isinstance(v, bool):
@@ -200,7 +212,8 @@ def wait_for_outgoing(rpc: SageRpc, destination: str, amount_mojos: int,
                 if addr == dest and amt == amount_mojos:
                     return tx
         time.sleep(poll_s)
-    raise SageError(
+    raise BroadcastUnknown(
+        "",
         "spend was submitted but no matching transaction appeared in "
-        f"/get_transactions within {timeout_s}s — treat as broadcast, "
-        "confirmation unknown; do not retry blindly")
+        f"/get_transactions within {timeout_s}s — broadcast, confirmation "
+        "unknown; do not retry blindly")

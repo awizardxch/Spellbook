@@ -239,3 +239,122 @@ def test_s4_queue_by_default_end_to_end(tmp_path):
                                 "amount_mojos": 1000, "purpose": "t"}},
                     peer_uid=UID)
     assert resp["ok"] is True and resp["decision"] == "queued"
+
+
+# ------------------------------------------------- EVM caveat hardening
+
+from spellbook import evm as evm_mod
+
+
+class _FakeEvmRpc:
+    """Stands in for evm.Rpc. wait_receipt raises BroadcastUnknown."""
+
+    def __init__(self, url):
+        self.url = url
+        self.sent = []
+
+    def chain_id(self):
+        return 46630
+
+    def estimate_gas(self, *a):
+        return 30000
+
+    def nonce(self, addr):
+        return 7
+
+    def gas_price_wei(self):
+        return 10 ** 9
+
+    def send_raw_tx(self, raw):
+        self.sent.append(raw)
+        return "0xdeadbeef"
+
+    def wait_receipt(self, tx_hash, timeout=90, poll=1.0):
+        raise evm_mod.BroadcastUnknown(tx_hash, "no receipt in time")
+
+
+def _evm_daemon(tmp_path, monkeypatch):
+    from spellbook.daemon import Daemon
+    seed_hex = "42" * 32
+    _write(tmp_path / "seed.key", seed_hex)
+    cfg = {
+        "seed_path": str(tmp_path / "seed.key"),
+        "evm": {"chains": {"evm-46630": {"enabled": True,
+                                         "rpc_url": "http://fake"}}},
+    }
+    _write(tmp_path / "spellbook.json", json.dumps(cfg))
+    _write(tmp_path / "policy.json", json.dumps(
+        {"auto_approve_below": {"evm-46630:native": 10 ** 18}}))
+    _write(tmp_path / "request.token", "aa" * 32)
+    _write(tmp_path / "approve.token", "bb" * 32)
+    _write(tmp_path / "ledger.jsonl", "")
+    monkeypatch.setattr(evm_mod, "Rpc", _FakeEvmRpc)
+    return Daemon(str(tmp_path))
+
+
+def _evm_params():
+    return {"chain": "evm-46630",
+            "destination": "0x" + "11" * 20,
+            "amount_wei": 10 ** 15, "purpose": "t"}
+
+
+def test_evm_broadcast_unknown_is_not_a_failure(tmp_path, monkeypatch):
+    """Receipt timeout: the tx left the machine, so the daemon reports
+    approved-submit-unknown (never approved-submit-failed), ledgers the
+    hash, and consumes velocity fail-closed. No blind retry is possible
+    from this response."""
+    from spellbook.daemon import Daemon
+    d = _evm_daemon(tmp_path, monkeypatch)
+    resp = d.rt_request_spend(_evm_params(), "muse_test")
+    assert resp["ok"] is True
+    assert resp["decision"] == "approved-submit-unknown"
+    assert resp["tx_hash"] == "0xdeadbeef"
+    # velocity consumed fail-closed (assume it lands)
+    assert d.spent_last_24h("evm-46630", "native") == 10 ** 15
+    rows = d.ledger.read_all()
+    decisions = [r["decision"] for r in rows]
+    assert any(x == "executing" for x in decisions)
+    unknown = [r for r in rows
+               if r["decision"].startswith("approved-submit-unknown")]
+    assert len(unknown) == 1 and unknown[0]["sighash"] == "0xdeadbeef"
+
+
+def test_unresolved_executions_flags_crash_window(tmp_path, monkeypatch):
+    """An 'executing' line with no later resolution shows up in
+    unresolved_executions() — the crash-window record. Once the outcome
+    lands, it clears."""
+    from spellbook.daemon import Daemon
+    d = _evm_daemon(tmp_path, monkeypatch)
+    canon = json.dumps(_evm_params(), sort_keys=True).encode()
+    d.ledger.append("muse_test", canon, None, "executing")
+    un = d.unresolved_executions()
+    assert len(un) == 1 and un[0]["requester_muse"] == "muse_test"
+    # the outcome arrives later under the same canon digest
+    d.ledger.append("muse_test", canon, "0xabc", "approved")
+    assert d.unresolved_executions() == []
+    # and rt_status surfaces it
+    assert "unresolved_executions" in d.rt_status({}, "muse_test")
+
+
+def test_signed_intent_checks_are_not_asserts(tmp_path, monkeypatch):
+    """The pre-broadcast intent re-check must be real code, not `assert`
+    (stripped under python -O). Tamper the signed fields and confirm
+    _execute_spend refuses before broadcast."""
+    from spellbook.daemon import Daemon
+    import spellbook.evm as evm_mod
+    d = _evm_daemon(tmp_path, monkeypatch)
+    real_sign = evm_mod.sign_legacy_transfer
+
+    def bad_sign(*a, **k):
+        out = real_sign(*a, **k)
+        out["value_wei"] = out["value_wei"] + 1  # tamper post-signing
+        return out
+
+    monkeypatch.setattr(evm_mod, "sign_legacy_transfer", bad_sign)
+    rpc = _FakeEvmRpc("x")
+    rpc.wait_receipt = lambda h, timeout=90, poll=1.0: {"status": "0x1",
+                                                       "blockNumber": "0x5"}
+    monkeypatch.setattr(evm_mod, "Rpc", lambda url: rpc)
+    with pytest.raises(evm_mod.EvmError, match="mismatch"):
+        d._execute_spend(_evm_params())
+    assert rpc.sent == []  # nothing left the machine

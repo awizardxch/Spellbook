@@ -17,7 +17,8 @@ import threading
 import pytest
 
 from spellbook import chia
-from spellbook.chia import SageError, SageRpc, amount_to_int, chia_fingerprint
+from spellbook.chia import (BroadcastUnknown, SageError, SageRpc,
+                             amount_to_int, chia_fingerprint)
 
 
 # ---------------------------------------------------------------- helpers
@@ -386,3 +387,31 @@ def test_daemon_chia_request_spend_end_to_end(tmp_path, monkeypatch):
     assert resp["tx_hash"] == "0xcoin1"
     # velocity was consumed on the approved chain
     assert d.spent_last_24h("chia-testnet", "native") == 1_000_000
+
+
+def test_wait_for_outgoing_timeout_is_broadcast_unknown():
+    rpc = _FakeRpc([])  # nothing ever appears
+    with pytest.raises(BroadcastUnknown):
+        chia.wait_for_outgoing(rpc, "txch1dest", 5, since_ts=1_700_000_000,
+                               timeout_s=0.2, poll_s=0.05)
+
+
+def test_daemon_chia_broadcast_unknown_ledgers_reference(tmp_path, monkeypatch):
+    d, _ = _daemon_with_seed(tmp_path, monkeypatch)
+    from spellbook.policy import Policy
+    d.policy = Policy(auto_approve_below={("chia-testnet", "native"): 2_000_000})
+    fake = _FakeSage("x")
+    monkeypatch.setattr(chia, "SageRpc", lambda *a, **k: fake)
+    monkeypatch.setattr(
+        chia, "wait_for_outgoing",
+        lambda *a, **k: (_ for _ in ()).throw(
+            chia.BroadcastUnknown("0xcoin9", "submitted, confirmation unknown")))
+    resp = d.rt_request_spend(_spend_params(), "muse_test")
+    assert resp["ok"] is True
+    assert resp["decision"] == "approved-submit-unknown"
+    assert resp["tx_hash"] == "0xcoin9"
+    # velocity consumed fail-closed, hash ledgered as unresolved
+    assert d.spent_last_24h("chia-testnet", "native") == 1_000_000
+    rows = d.ledger.read_all()
+    assert any(r["decision"].startswith("approved-submit-unknown")
+               and r["sighash"] == "0xcoin9" for r in rows)
