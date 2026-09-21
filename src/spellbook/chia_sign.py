@@ -183,6 +183,75 @@ def deser(data: bytes):
     return obj
 
 
+def deser_partial(data: bytes, pos: int = 0):
+    """Deserialize one CLVM program starting at ``pos``.
+
+    Returns ``(sexpr, end_pos)`` so callers can walk concatenated
+    programs (e.g. puzzle reveal followed by solution in a CoinSpend).
+    """
+    def go(p):
+        if p >= len(data):
+            raise ChiaSignError("truncated CLVM")
+        b = data[p]
+        if b == 0xFF:
+            first, p = go(p + 1)
+            rest, p = go(p)
+            return (first, rest), p
+        if b <= 0x7F:
+            return bytes([b]), p + 1
+        if b <= 0xBF:
+            n = b & 0x3F
+            p += 1
+        elif b <= 0xDF:
+            n = ((b & 0x1F) << 8) | data[p + 1]
+            p += 2
+        elif b <= 0xEF:
+            n = ((b & 0x0F) << 16) | (data[p + 1] << 8) | data[p + 2]
+            p += 3
+        elif b <= 0xF7:
+            n = ((b & 0x07) << 24) | (data[p + 1] << 16) | (data[p + 2] << 8) | data[p + 3]
+            p += 4
+        else:
+            raise ChiaSignError("bad CLVM atom prefix")
+        return data[p:p + n], p + n
+    obj, end = go(pos)
+    return obj, end
+
+
+def bech32m_encode(hrp: str, payload: bytes) -> str:
+    """bech32m-encode an arbitrary payload (offer strings, etc.)."""
+    data = _convertbits(payload, 8, 5)
+    polymod = _bech32_polymod(_bech32_hrp_expand(hrp) + data + [0] * 6) ^ _BECH32M_CONST
+    checksum = [(polymod >> 5 * (5 - i)) & 31 for i in range(6)]
+    return hrp + "1" + "".join(_BECH32_CHARSET[d] for d in data + checksum)
+
+
+def bech32m_decode(s: str) -> tuple:
+    """bech32m-decode; returns (hrp, payload bytes). Fail-closed."""
+    s = s.strip().lower()
+    if "1" not in s:
+        raise ChiaSignError("bad bech32m: no separator")
+    hrp, _, data_part = s.rpartition("1")
+    if not hrp or len(data_part) < 6:
+        raise ChiaSignError("bad bech32m: malformed")
+    try:
+        data = [_BECH32_CHARSET.index(c) for c in data_part]
+    except ValueError:
+        raise ChiaSignError("bad bech32m: bad charset")
+    if _bech32_polymod(_bech32_hrp_expand(hrp) + data) != _BECH32M_CONST:
+        raise ChiaSignError("bad bech32m: checksum")
+    vals = data[:-6]
+    acc = bits = 0
+    out = bytearray()
+    for v in vals:
+        acc = (acc << 5) | v
+        bits += 5
+        while bits >= 8:
+            bits -= 8
+            out.append((acc >> bits) & 0xFF)
+    return hrp, bytes(out)
+
+
 def quote(obj):
     """(q . obj) — dotted quote. Valid when obj is a LIST (CLVM quote returns
     it unevaluated). Matches chia's clvm_quote! for the delegated puzzle."""
