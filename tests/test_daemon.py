@@ -358,3 +358,49 @@ def test_signed_intent_checks_are_not_asserts(tmp_path, monkeypatch):
     with pytest.raises(evm_mod.EvmError, match="mismatch"):
         d._execute_spend(_evm_params())
     assert rpc.sent == []  # nothing left the machine
+
+
+def test_serve_survives_broken_pipe(tmp_path):
+    """Regression: a client that dies mid-request (BrokenPipeError on the
+    server side) must not kill the daemon's accept loop."""
+    import socket as socket_mod
+    import threading
+
+    from spellbook import daemon as daemon_mod
+
+    sock_path = str(tmp_path / "spellbook.sock")
+    calls = {"n": 0}
+
+    class FakeDaemon:
+        cfg = {}
+
+        def handle(self, req, uid):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise BrokenPipeError("client went away mid-request")
+            return {"ok": True, "n": calls["n"]}
+
+    t = threading.Thread(target=daemon_mod.serve,
+                         args=(sock_path, FakeDaemon()), daemon=True)
+    t.start()
+    for _ in range(100):
+        if os.path.exists(sock_path):
+            break
+        time.sleep(0.05)
+
+    def rpc(payload):
+        c = socket_mod.socket(socket_mod.AF_UNIX, socket_mod.SOCK_STREAM)
+        c.connect(sock_path)
+        c.sendall((json.dumps(payload) + "\n").encode())
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = c.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+        c.close()
+        return json.loads(buf.decode()) if buf else None
+
+    rpc({"route": "ping"})  # server-side BrokenPipeError; must not kill serve
+    resp = rpc({"route": "ping"})  # daemon must still be answering
+    assert resp == {"ok": True, "n": 2}

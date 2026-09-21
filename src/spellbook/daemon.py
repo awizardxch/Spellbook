@@ -1185,6 +1185,10 @@ def serve(sock_path: str, daemon: Daemon):
                 continue
             resp = daemon.handle(req, uid)
             conn.sendall((json.dumps(resp) + "\n").encode())
+        except OSError:
+            # The client went away mid-request (RST, EPIPE on send). Drop
+            # the request; the daemon must not crash with it.
+            pass
         finally:
             conn.close()
 
