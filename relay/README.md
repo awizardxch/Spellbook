@@ -92,9 +92,9 @@ python server.py                  # http://localhost:8000
 ```
 
 `RELAY_CHIA_CA_DIR` should point at any Chia install's `config/ssl/ca/`
-(which contains the shared `chia_ca.crt`/`chia_ca.key`). Without it the
-server refuses to start rather than mint a cert real full nodes would
-reject (see `cert.py`).
+(which contains the shared `chia_ca.crt`/`chia_ca.key`). The Docker image
+already bundles the shared public CA in `certs/`, so this is only needed
+for local runs outside Docker.
 
 Through a proxy (sandboxed environments): set `HTTPS_PROXY` — the peer
 WSS client tunnels via HTTP CONNECT.
