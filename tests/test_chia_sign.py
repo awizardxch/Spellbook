@@ -178,6 +178,26 @@ class TestCoinAndConditions:
         with pytest.raises(ChiaSignError):
             cs.coin_id(bytes(32), bytes(32), -1)
 
+    def test_coin_id_uses_chia_int_to_bytes(self):
+        # Regression: coin_id must use Chia's int_to_bytes (minimal signed
+        # big-endian) for the amount, matching Coin.name(), NOT fixed 8-byte
+        # big-endian. The wrong encoding produces a coin_id the network
+        # rejects with BAD_AGGREGATE_SIGNATURE (2026-09-21).
+        import hashlib
+        parent = bytes([2]) * 32
+        ph = bytes([3]) * 32
+        # 1000000 = 0x0F4240 -> int_to_bytes gives 3 bytes, not 8
+        assert cs.int_to_bytes(1000000) == bytes.fromhex("0f4240")
+        expected = hashlib.sha256(parent + ph + bytes.fromhex("0f4240")).digest()
+        assert cs.coin_id(parent, ph, 1000000) == expected
+        # Wrong (old) encoding would be 8-byte; ensure we don't match it
+        wrong = hashlib.sha256(parent + ph + (1000000).to_bytes(8, "big")).digest()
+        assert cs.coin_id(parent, ph, 1000000) != wrong
+        # Edge: 128 needs a leading zero byte in signed encoding
+        assert cs.int_to_bytes(128) == bytes.fromhex("0080")
+        assert cs.coin_id(parent, ph, 128) == hashlib.sha256(
+            parent + ph + bytes.fromhex("0080")).digest()
+
     def test_create_coin_conditions(self):
         ph = bytes([1]) * 32
         conds = cs.conditions_from_outputs([(ph, 1000)])

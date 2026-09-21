@@ -416,11 +416,17 @@ def receive_address(master_sk: bytes, index: int, network_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 def coin_id(parent_coin_id: bytes, puzzle_hash: bytes, amount: int) -> bytes:
-    """sha256(parent || puzzle_hash || amount_be64)."""
+    """sha256(parent || puzzle_hash || int_to_bytes(amount)).
+
+    Chia's Coin.name() serializes the amount with int_to_bytes (minimal
+    signed big-endian), NOT fixed 8-byte big-endian. Using the wrong
+    encoding produces a coin_id the network rejects with
+    BAD_AGGREGATE_SIGNATURE (the AGG_SIG_ME message commits to coin_id).
+    """
     if len(parent_coin_id) != 32 or len(puzzle_hash) != 32 or amount < 0:
         raise ChiaSignError("bad coin fields")
     return hashlib.sha256(
-        parent_coin_id + puzzle_hash + amount.to_bytes(8, "big")).digest()
+        parent_coin_id + puzzle_hash + int_to_bytes(amount)).digest()
 
 
 def create_coin_condition(puzzle_hash: bytes, amount: int):
