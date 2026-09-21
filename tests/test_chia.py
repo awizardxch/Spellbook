@@ -270,7 +270,7 @@ class _FakeSage:
     def get_keys(self):
         return [{"fingerprint": fp} for fp in self.keys]
 
-    def import_key(self, name, key_hex):
+    def import_key(self, name, key_hex, derivation_count=100):
         fp = self.import_returns
         if fp is None:
             # fingerprint the key the same way Chia does: sha256 of the

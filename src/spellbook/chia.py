@@ -18,6 +18,9 @@ POST /{endpoint} with a JSON body. The endpoints used here:
   POST /set_network        {"name": "testnet11"}
   POST /get_keys           {}                      -> {"keys": [{"fingerprint": ...}]}
   POST /import_key         {"name","key","derivation_index"} -> {"fingerprint": n}
+                          derivation_index > 0 (default 100): initial address
+                          pool, derived synchronously. With 0, /get_sync_status
+                          fails with "Insufficient derivations".
   POST /login              {"fingerprint": n}
   POST /get_sync_status    {} -> {"selectable_balance","receive_address",...}
   POST /get_wallet_address {"fingerprint": n, "network_id": "testnet11"}
@@ -147,10 +150,20 @@ class SageRpc:
     def get_keys(self) -> list:
         return self.call("get_keys").get("keys", [])
 
-    def import_key(self, name: str, key_hex: str) -> int:
-        """Import a raw 32-byte hex private key; returns its fingerprint."""
+    def import_key(self, name: str, key_hex: str,
+                   derivation_count: int = 100) -> int:
+        """Import a raw 32-byte hex private key; returns its fingerprint.
+
+        derivation_count is the initial address-pool size Sage derives
+        synchronously at import (0..derivation_count). It must be > 0:
+        with zero derivations Sage's /get_sync_status fails with
+        "Insufficient derivations" and the wallet cannot report a balance
+        or receive address until the sync worker derives a batch (which
+        needs peer connectivity). Importing the pool up front makes the
+        wallet usable immediately and deterministically.
+        """
         out = self.call("import_key", {"name": name, "key": key_hex,
-                                      "derivation_index": 0})
+                                      "derivation_index": derivation_count})
         try:
             return int(out["fingerprint"])
         except (KeyError, TypeError, ValueError) as e:
