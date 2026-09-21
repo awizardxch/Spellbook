@@ -25,6 +25,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import socket
 import struct
 import subprocess
@@ -54,6 +55,36 @@ SPEND_FIELDS = {"chain", "destination", "asset", "purpose"}
 AMOUNT_FIELDS = {"amount_mojos", "amount_wei", "amount_lamports"}
 
 VELOCITY_WINDOW_S = 24 * 3600
+
+# Chia asset model (SPEC §3b): the `asset` field on a Chia-chain request
+# is a real routing signal, not a label.
+#   "native"           -> native XCH (Sage or relay transport)
+#   64-hex             -> CAT asset id = tree hash of the curried TAIL
+#                          (Sage transport only — /send_cat)
+#   "nft:<id>"         -> NFT transfer; <id> is the NFT's coin id (64-hex)
+#                          or nft1 id. Amount must be 1 (the NFT is a
+#                          singleton). (Sage transport only — /transfer_nfts)
+_HEX64 = re.compile(r"[0-9a-fA-F]{64}")
+
+
+def chia_asset_kind(asset: str) -> tuple:
+    """Split a Chia asset field into (kind, ref).
+
+    kind is "native" | "cat" | "nft"; ref is the CAT asset id (lowercased
+    hex) or the NFT id, None for native. Raises chia.SageError on any
+    malformed value so bad assets fail closed at request time.
+    """
+    if asset == "native":
+        return ("native", None)
+    if isinstance(asset, str) and _HEX64.fullmatch(asset):
+        return ("cat", asset.lower())
+    if isinstance(asset, str) and asset.startswith("nft:"):
+        ref = asset[4:]
+        if ref and (_HEX64.fullmatch(ref) or ref.startswith("nft1")):
+            return ("nft", ref)
+    raise chia.SageError(
+        f"bad chia asset {asset!r}: expected 'native', a 64-hex CAT asset "
+        "id, or 'nft:<id>'")
 
 
 def _redacted(req: dict) -> str:
@@ -531,7 +562,15 @@ class Daemon:
         `chia.relay_url` (single-network installs) is set. Precedence
         inside the relay path: relay_urls[<network>] wins over the flat
         relay_url. Otherwise the Sage RPC path is used (default, unchanged).
+
+        CAT and NFT assets always take the Sage path — the HTTPS relay is
+        native-XCH only (it builds standard-puzzle spends via chia_sign).
+        The asset was validated at request time; re-validating here is the
+        execute-time second layer.
         """
+        kind, _ = chia_asset_kind(params.get("asset", "native"))
+        if kind != "native":
+            return self._execute_chia_spend_via_sage(params)
         if self.chia_cfg.get("relay_urls") or self.chia_cfg.get("relay_url"):
             return self._execute_chia_spend_via_relay(params)
         return self._execute_chia_spend_via_sage(params)
@@ -584,6 +623,11 @@ class Daemon:
         left the machine records nothing and consumes no velocity.
         """
         from spellbook import chia_relay, chia_sign
+        kind, _ = chia_asset_kind(params.get("asset", "native"))
+        if kind != "native":
+            raise chia_relay.RelayError(
+                "relay path is native-XCH only — CAT/NFT spends go through "
+                "Sage RPC (/send_cat, /transfer_nfts)")
         chain = params["chain"]
         network = chia.NETWORKS[chain]
         if chain == "chia-mainnet" and not self.chia_cfg.get(
@@ -764,6 +808,157 @@ class Daemon:
             out["confirmed_height"] = conf.get("spent_height")
         return out
 
+    def _chia_sage_rpc(self, chain: str):
+        """Start/connect Sage RPC and select the daemon's wallet for `chain`.
+
+        Shared setup for all Sage-path Chia spends (XCH, CAT, NFT): ensures
+        `sage rpc start` answers, switches to the chain's network, and
+        imports + logs in the daemon's KDF-derived BLS key. Returns
+        (rpc, fingerprint, sender_address).
+        """
+        self._ensure_sage_rpc()
+        data_home = self.chia_cfg.get("sage_data_home")
+        data_dir = os.path.join(data_home, "com.rigidnetwork.sage")
+        if not os.path.isdir(data_dir):
+            raise chia.SageError(
+                f"Sage data dir {data_dir} missing after startup — refusing")
+        rpc = chia.SageRpc(data_dir,
+                           port=int(self.chia_cfg.get("rpc_port", 9257)))
+        expected_fp, sender = self._chia_wallet(rpc, chain)
+        return rpc, expected_fp, sender
+
+    def _chia_sage_guards(self, params: dict, chain: str) -> tuple:
+        """Fail-fast checks shared by every Sage-path Chia spend.
+
+        Returns (network, destination, amount_mojos). Raises chia.SageError
+        on mainnet-without-flag, missing seed, wrong amount field, or a
+        destination with the wrong address prefix.
+        """
+        network = chia.NETWORKS[chain]
+        if chain == "chia-mainnet" and not self.chia_cfg.get(
+                "mainnet_submit_enabled"):
+            raise chia.SageError(
+                "mainnet submission refused for chia-mainnet — needs the "
+                "separately-authorized mainnet_submit_enabled flag (§10.14-17)")
+        if self._signing_seed() is None:
+            raise chia.SageError("no seed configured — cannot sign")
+        if params.get("amount_wei") is not None or params.get(
+                "amount_lamports") is not None:
+            raise chia.SageError(
+                "wei/lamports on a Chia chain — schema misuse, refusing")
+        dest = params.get("destination", "")
+        prefix = chia.PREFIXES[network]
+        if not isinstance(dest, str) or not dest.startswith(prefix):
+            raise chia.SageError(
+                f"bad destination for {chain}: expected a {prefix}... address")
+        amount = params["amount_mojos"]
+        return network, dest, amount
+
+    def _execute_chia_cat_spend_via_sage(self, params: dict,
+                                         asset_id: str) -> dict:
+        """Build, sign, and submit an approved CAT transfer via Sage RPC.
+
+        Flow mirrors the XCH Sage path: guards, wallet selection, balance
+        check against /get_cats, /send_cat with auto_submit, then
+        verification — the outgoing transaction must appear in
+        /get_transactions carrying a created CAT coin to the approved
+        destination with the approved amount and the CAT asset id echoed
+        on the coin record. The created CAT coin id is the ledger
+        reference. Raises chia.SageError on any failure, and
+        chia.BroadcastUnknown when the send may have broadcast but the
+        matching transaction never appeared (the caller's unknown-fate
+        rule applies: never retry, never reuse the queue id).
+        """
+        chain = params["chain"]
+        network, dest, amount = self._chia_sage_guards(params, chain)
+        rpc, _, sender = self._chia_sage_rpc(chain)
+        fee = int(self.chia_cfg.get("fee_mojos", 0))
+        cat_bal = chia.cat_balance(rpc, asset_id)
+        if cat_bal < amount:
+            raise chia.SageError(
+                f"insufficient CAT balance: have {cat_bal} mojos of "
+                f"{asset_id[:16]}…, need {amount}")
+        xch_bal = chia.amount_to_int(rpc.sync_status()["selectable_balance"])
+        if xch_bal < fee:
+            raise chia.SageError(
+                f"insufficient XCH for fee: have {xch_bal} mojos, "
+                f"need {fee}")
+        t0 = time.time()
+        rpc.send_cat(asset_id, dest, amount, fee,
+                     memos=[str(params.get("purpose", ""))[:64]])
+        # The approved intent, re-checked against the on-wallet transaction
+        # record: destination, amount, AND asset id must all match.
+        tx = chia.wait_for_outgoing(rpc, dest, amount, t0,
+                                    asset_ref=asset_id,
+                                    timeout_s=self._sage_wait_timeout_s())
+        coin_id = None
+        for coin in tx.get("created", []):
+            if ((coin.get("address") or "").lower() == dest.lower()
+                    and chia.amount_to_int(coin.get("amount")) == amount
+                    and isinstance(coin.get("asset_id"), str)
+                    and coin["asset_id"].lower() == asset_id.lower()):
+                coin_id = coin.get("coin_id")
+                break
+        if not coin_id:
+            raise chia.SageError(
+                "outgoing transaction found but no created coin matches the "
+                "approved destination+amount+asset — refusing to report "
+                "success")
+        return {"submitted": True, "tx_hash": coin_id,
+                "coin_id": coin_id, "from": sender,
+                "tx_height": tx.get("height"), "asset_id": asset_id}
+
+    def _execute_chia_nft_spend_via_sage(self, params: dict,
+                                         nft_ref: str) -> dict:
+        """Transfer an approved NFT to a new owner via Sage RPC.
+
+        The NFT is a singleton: amount is 1 (validated at request time and
+        re-checked here). Flow: guards, wallet selection, XCH fee-balance
+        check, /transfer_nfts with auto_submit, then verification — the
+        exact approved NFT coin must be consumed and a coin created to the
+        approved destination. The new coin id is the ledger reference.
+        Raises chia.SageError on any failure, and chia.BroadcastUnknown on
+        unknown fate (same no-retry rule as every other spend).
+        """
+        chain = params["chain"]
+        network, dest, amount = self._chia_sage_guards(params, chain)
+        if amount != 1:
+            raise chia.SageError(
+                "NFT transfer amount must be 1 — refusing schema misuse")
+        rpc, _, sender = self._chia_sage_rpc(chain)
+        fee = int(self.chia_cfg.get("fee_mojos", 0))
+        xch_bal = chia.amount_to_int(rpc.sync_status()["selectable_balance"])
+        if xch_bal < fee:
+            raise chia.SageError(
+                f"insufficient XCH for fee: have {xch_bal} mojos, "
+                f"need {fee}")
+        t0 = time.time()
+        rpc.transfer_nfts([nft_ref], dest, fee)
+        tx = chia.wait_for_nft_transfer(rpc, nft_ref, dest, t0,
+                                        timeout_s=self._sage_wait_timeout_s())
+        coin_id = None
+        for coin in tx.get("created", []):
+            if (coin.get("address") or "").lower() == dest.lower():
+                coin_id = coin.get("coin_id")
+                break
+        if not coin_id:
+            raise chia.SageError(
+                "NFT transfer transaction found but no created coin pays "
+                "the approved destination — refusing to report success")
+        return {"submitted": True, "tx_hash": coin_id,
+                "coin_id": coin_id, "from": sender,
+                "tx_height": tx.get("height"), "nft_id": nft_ref}
+
+    def _sage_wait_timeout_s(self) -> int:
+        """Seconds to wait for the outgoing transaction to appear in
+        Sage's /get_transactions after a send. Configurable via
+        ``chia.sage_wait_timeout_s`` (default 180). After the window the
+        spend is recorded as approved-submit-unknown — never retried."""
+        try:
+            return int(self.chia_cfg.get("sage_wait_timeout_s", 180))
+        except (TypeError, ValueError):
+            return 180
+
     def _execute_chia_spend_via_sage(self, params: dict) -> dict:
         """Build, sign, and submit an approved XCH transfer via Sage RPC.
 
@@ -779,31 +974,14 @@ class Daemon:
         chia.SageError on any failure — a spend that never left the machine
         records nothing and consumes no velocity.
         """
+        kind, ref = chia_asset_kind(params.get("asset", "native"))
+        if kind == "cat":
+            return self._execute_chia_cat_spend_via_sage(params, ref)
+        if kind == "nft":
+            return self._execute_chia_nft_spend_via_sage(params, ref)
         chain = params["chain"]
-        network = chia.NETWORKS[chain]
-        if chain == "chia-mainnet" and not self.chia_cfg.get("mainnet_submit_enabled"):
-            raise chia.SageError(
-                "mainnet submission refused for chia-mainnet — needs the "
-                "separately-authorized mainnet_submit_enabled flag (§10.14-17)")
-        if self._signing_seed() is None:
-            raise chia.SageError("no seed configured — cannot sign")
-        if params.get("amount_wei") is not None or params.get("amount_lamports") is not None:
-            raise chia.SageError("wei/lamports on a Chia chain — schema misuse, refusing")
-        dest = params.get("destination", "")
-        prefix = chia.PREFIXES[network]
-        if not isinstance(dest, str) or not dest.startswith(prefix):
-            raise chia.SageError(
-                f"bad destination for {chain}: expected a {prefix}... address")
-        amount = params["amount_mojos"]
-        self._ensure_sage_rpc()
-        data_home = self.chia_cfg.get("sage_data_home")
-        data_dir = os.path.join(data_home, "com.rigidnetwork.sage")
-        if not os.path.isdir(data_dir):
-            raise chia.SageError(
-                f"Sage data dir {data_dir} missing after startup — refusing")
-        rpc = chia.SageRpc(data_dir,
-                           port=int(self.chia_cfg.get("rpc_port", 9257)))
-        expected_fp, sender = self._chia_wallet(rpc, chain)
+        network, dest, amount = self._chia_sage_guards(params, chain)
+        rpc, _, sender = self._chia_sage_rpc(chain)
         fee = int(self.chia_cfg.get("fee_mojos", 0))
         bal = chia.amount_to_int(rpc.sync_status()["selectable_balance"])
         if bal < amount + fee:
@@ -815,7 +993,8 @@ class Daemon:
                      memos=[str(params.get("purpose", ""))[:64]])
         # The approved intent, re-checked against the on-wallet transaction
         # record: destination and amount must match what was approved.
-        tx = chia.wait_for_outgoing(rpc, dest, amount, t0)
+        tx = chia.wait_for_outgoing(rpc, dest, amount, t0,
+                                    timeout_s=self._sage_wait_timeout_s())
         coin_id = None
         for coin in tx.get("created", []):
             if ((coin.get("address") or "").lower() == dest.lower()
@@ -857,6 +1036,17 @@ class Daemon:
         # Note: contract-call-shaped requests never reach here — "calldata"/"data"
         # are not in the v1 schema, so they fail the subset check above (S13).
         asset = p.get("asset", "native")
+        if p["chain"] in chia.NETWORKS:
+            # Chia asset model (SPEC §3b): the asset field is a routing signal.
+            # Malformed assets fail closed here; NFT transfers carry amount 1
+            # (the NFT is a singleton — anything else is schema misuse).
+            try:
+                kind, _ = chia_asset_kind(asset)
+            except chia.SageError as e:
+                return {"ok": False, "error": str(e)}
+            if kind == "nft" and p.get("amount_mojos") != 1:
+                return {"ok": False, "error":
+                        "NFT transfer amount must be 1 (singleton asset)"}
         d = evaluate(self.policy, p["chain"], asset,
                      amount, p.get("destination", ""),
                      self.spent_last_24h(p["chain"], asset))

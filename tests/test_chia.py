@@ -267,6 +267,10 @@ class _FakeSage:
         self.import_returns = None  # override fingerprint on import
         self.sent = []
         self.networks = []
+        self.sent_cats = []     # (asset_id, address, amount, fee)
+        self.sent_nfts = []     # (nft_ids, address, fee)
+        self.cat_balances = {}  # asset_id.lower() -> CAT mojos
+        self.cats_echo_asset = True  # created CAT coins carry asset_id
 
     def set_network(self, name):
         self.network = name
@@ -307,10 +311,38 @@ class _FakeSage:
         self.sent.append((address, amount_mojos, fee_mojos))
         return {"summary": {"fee": fee_mojos, "inputs": []}, "coin_spends": []}
 
+    def send_cat(self, asset_id, address, amount_mojos, fee_mojos=0, memos=None):
+        self.sent_cats.append((asset_id, address, amount_mojos, fee_mojos))
+        self._last_cat = (asset_id, address, amount_mojos)
+        return {"summary": {"fee": fee_mojos, "inputs": []}, "coin_spends": []}
+
+    def get_cats(self):
+        return [{"asset_id": k, "balance": v}
+                for k, v in self.cat_balances.items()]
+
+    def transfer_nfts(self, nft_ids, address, fee_mojos=0):
+        self.sent_nfts.append((list(nft_ids), address, fee_mojos))
+        self._last_nft = (list(nft_ids), address)
+        return {"summary": {"fee": fee_mojos, "inputs": []}, "coin_spends": []}
+
     def recent_transactions(self, limit=5):
         import time as _time
+        ts = int(_time.time())
+        if getattr(self, "_last_nft", None):
+            nft_ids, addr = self._last_nft
+            return [{"height": 9, "timestamp": ts,
+                     "spent": [{"coin_id": nft_ids[0]}],
+                     "created": [{"coin_id": "0xnftcoin2", "amount": 1,
+                                  "address": addr, "nft_id": nft_ids[0]}]}]
+        if getattr(self, "_last_cat", None):
+            asset_id, addr, amount = self._last_cat
+            coin = {"coin_id": "0xcatcoin1", "amount": amount,
+                    "address": addr}
+            if self.cats_echo_asset:
+                coin["asset_id"] = asset_id
+            return [{"height": 9, "timestamp": ts, "created": [coin]}]
         addr, amount, _fee = self.sent[-1]
-        return [{"height": 9, "timestamp": int(_time.time()), "created": [
+        return [{"height": 9, "timestamp": ts, "created": [
             {"coin_id": "0xcoin1", "amount": amount, "address": addr}]}]
 
 
@@ -471,3 +503,280 @@ def test_daemon_chia_broadcast_unknown_ledgers_reference(tmp_path, monkeypatch):
     rows = d.ledger.read_all()
     assert any(r["decision"].startswith("approved-submit-unknown")
                and r["sighash"] == "0xcoin9" for r in rows)
+
+
+# ----------------------------------------------- chia_asset_kind
+
+from spellbook.daemon import chia_asset_kind
+
+
+def test_asset_kind_native():
+    assert chia_asset_kind("native") == ("native", None)
+
+
+def test_asset_kind_cat_hex_normalized():
+    aid = "a" * 64
+    assert chia_asset_kind(aid) == ("cat", aid)
+    assert chia_asset_kind("A" * 64) == ("cat", aid)
+
+
+def test_asset_kind_nft_coin_id():
+    assert chia_asset_kind("nft:" + "b" * 64) == ("nft", "b" * 64)
+
+
+def test_asset_kind_nft_bech32m():
+    assert chia_asset_kind("nft:nft1qpzry9x8gf2tvdw0s3jn54khce6mua7l")[0] == "nft"
+
+
+@pytest.mark.parametrize("bad", [
+    "", "BTC", "xch", "native ", "nft:", "nft:xyz", "cat:xxx",
+    "a" * 63, "a" * 65, "0x" + "a" * 64, "g" * 64, None, 123, ["a" * 64],
+])
+def test_asset_kind_rejects_garbage(bad):
+    with pytest.raises(SageError):
+        chia_asset_kind(bad)
+
+
+# ----------------------------------------------- request-time validation
+
+def test_request_spend_rejects_bad_asset(tmp_path, monkeypatch):
+    d, _ = _daemon_with_seed(tmp_path, monkeypatch)
+    p = _spend_params()
+    p["asset"] = "DOGE"
+    out = d.rt_request_spend(p, "muse_test")
+    assert out["ok"] is False
+
+
+def test_request_spend_rejects_nft_amount_not_one(tmp_path, monkeypatch):
+    d, _ = _daemon_with_seed(tmp_path, monkeypatch)
+    p = _spend_params(amount=2)
+    p["asset"] = "nft:" + "c" * 64
+    out = d.rt_request_spend(p, "muse_test")
+    assert out["ok"] is False
+    assert "singleton" in out["error"]
+
+
+def test_request_spend_accepts_cat_shape(tmp_path, monkeypatch):
+    d, _ = _daemon_with_seed(tmp_path, monkeypatch)
+    p = _spend_params(amount=5)
+    p["asset"] = "d" * 64
+    out = d.rt_request_spend(p, "muse_test")
+    assert out["ok"] is True and out["decision"] == "queued"  # S4: no policy
+
+
+def test_request_spend_accepts_nft_shape(tmp_path, monkeypatch):
+    d, _ = _daemon_with_seed(tmp_path, monkeypatch)
+    p = _spend_params(amount=1)
+    p["asset"] = "nft:" + "e" * 64
+    out = d.rt_request_spend(p, "muse_test")
+    assert out["ok"] is True and out["decision"] == "queued"  # S4: no policy
+
+
+# ----------------------------------------------- SageRpc bodies
+
+def _bare_rpc():
+    return SageRpc.__new__(SageRpc)
+
+
+def test_send_cat_body():
+    captured = {}
+    rpc = _bare_rpc()
+    rpc.call = lambda endpoint, body: captured.update(
+        endpoint=endpoint, body=body) or {}
+    rpc.send_cat("a" * 64, "txch1x", 100, 10, memos=["m"])
+    assert captured["endpoint"] == "send_cat"
+    assert captured["body"] == {
+        "asset_id": "a" * 64, "address": "txch1x", "amount": 100,
+        "fee": 10, "memos": ["m"], "auto_submit": True}
+
+
+def test_transfer_nfts_body():
+    captured = {}
+    rpc = _bare_rpc()
+    rpc.call = lambda endpoint, body: captured.update(
+        endpoint=endpoint, body=body) or {}
+    rpc.transfer_nfts(["0x" + "b" * 62], "txch1y", 5)
+    assert captured["endpoint"] == "transfer_nfts"
+    assert captured["body"] == {
+        "nft_ids": ["0x" + "b" * 62], "address": "txch1y",
+        "fee": 5, "auto_submit": True}
+
+
+def test_get_cats_body():
+    captured = {}
+    rpc = _bare_rpc()
+    rpc.call = lambda endpoint, body: captured.update(
+        endpoint=endpoint, body=body) or {"cats": []}
+    assert rpc.get_cats() == []
+    assert captured["endpoint"] == "get_cats"
+
+
+def test_cat_balance_found_and_missing():
+    rpc = _bare_rpc()
+    rpc.call = lambda endpoint, body: {"cats": [
+        {"asset_id": "a" * 64, "balance": "5000"}]} if endpoint == "get_cats" else {}
+    assert chia.cat_balance(rpc, "a" * 64) == 5000
+    assert chia.cat_balance(rpc, "A" * 64) == 5000  # case-insensitive
+    with pytest.raises(SageError):
+        chia.cat_balance(rpc, "f" * 64)
+
+
+# ----------------------------------------------- verification matchers
+
+def test_wait_for_outgoing_matches_asset_ref():
+    aid = "a" * 64
+    tx = {"timestamp": 1_700_000_100, "created": [
+        {"coin_id": "0x1", "amount": 5000, "address": "txch1dest",
+         "asset_id": aid},
+    ]}
+    rpc = _FakeRpc([tx])
+    found = chia.wait_for_outgoing(rpc, "txch1dest", 5000,
+                                   since_ts=1_700_000_000,
+                                   timeout_s=5, poll_s=0.01, asset_ref=aid)
+    assert found is tx
+
+
+def test_wait_for_outgoing_rejects_wrong_asset_ref():
+    tx = {"timestamp": 1_700_000_100, "created": [
+        {"coin_id": "0x1", "amount": 5000, "address": "txch1dest",
+         "asset_id": "b" * 64},
+    ]}
+    rpc = _FakeRpc([tx])
+    with pytest.raises(SageError):
+        chia.wait_for_outgoing(rpc, "txch1dest", 5000,
+                               since_ts=1_700_000_000,
+                               timeout_s=0.2, poll_s=0.01,
+                               asset_ref="a" * 64)
+
+
+def test_wait_for_outgoing_rejects_missing_asset_field():
+    # Sage must echo the asset on the coin record — silence fails closed.
+    tx = {"timestamp": 1_700_000_100, "created": [
+        {"coin_id": "0x1", "amount": 5000, "address": "txch1dest"},
+    ]}
+    rpc = _FakeRpc([tx])
+    with pytest.raises(SageError):
+        chia.wait_for_outgoing(rpc, "txch1dest", 5000,
+                               since_ts=1_700_000_000,
+                               timeout_s=0.2, poll_s=0.01,
+                               asset_ref="a" * 64)
+
+
+def test_wait_for_nft_transfer_matches_spent_and_dest():
+    tx = {"timestamp": 1_700_000_100,
+          "spent": [{"coin_id": "0xnft"}],
+          "created": [{"coin_id": "0xnft2", "amount": 1,
+                       "address": "txch1dest"}]}
+    rpc = _FakeRpc([tx])
+    found = chia.wait_for_nft_transfer(rpc, "0xnft", "txch1dest",
+                                       since_ts=1_700_000_000,
+                                       timeout_s=5, poll_s=0.01)
+    assert found is tx
+
+
+def test_wait_for_nft_transfer_ignores_unrelated_tx():
+    tx = {"timestamp": 1_700_000_100,
+          "spent": [{"coin_id": "0xother"}],
+          "created": [{"coin_id": "0x1", "amount": 1,
+                       "address": "txch1dest"}]}
+    rpc = _FakeRpc([tx])
+    with pytest.raises(SageError):
+        chia.wait_for_nft_transfer(rpc, "0xnft", "txch1dest",
+                                   since_ts=1_700_000_000,
+                                   timeout_s=0.2, poll_s=0.01)
+
+
+# ----------------------------------------------- daemon CAT/NFT paths
+
+def _cat_params(dest="txch1catdest", amount=250_000, aid=None):
+    p = _spend_params(dest=dest, amount=amount)
+    p["asset"] = aid or "f" * 64
+    return p
+
+
+def test_daemon_cat_spend_happy_path(tmp_path, monkeypatch):
+    d, _ = _daemon_with_seed(tmp_path, monkeypatch)
+    fake = _FakeSage("x")
+    fake.cat_balances["f" * 64] = 1_000_000
+    monkeypatch.setattr(chia, "SageRpc", lambda *a, **k: fake)
+    out = d._execute_chia_spend(_cat_params())
+    assert out["submitted"] is True
+    assert out["asset_id"] == "f" * 64
+    assert out["coin_id"] == "0xcatcoin1" and out["tx_hash"] == "0xcatcoin1"
+    assert fake.sent_cats == [("f" * 64, "txch1catdest", 250_000, 0)]
+    assert fake.sent == []  # no XCH send happened
+
+
+def test_daemon_cat_spend_insufficient_balance(tmp_path, monkeypatch):
+    d, _ = _daemon_with_seed(tmp_path, monkeypatch)
+    fake = _FakeSage("x")
+    fake.cat_balances["f" * 64] = 100
+    monkeypatch.setattr(chia, "SageRpc", lambda *a, **k: fake)
+    with pytest.raises(SageError, match="insufficient CAT balance"):
+        d._execute_chia_spend(_cat_params())
+    assert fake.sent_cats == []
+
+
+def test_daemon_cat_spend_missing_cat_fails_closed(tmp_path, monkeypatch):
+    d, _ = _daemon_with_seed(tmp_path, monkeypatch)
+    fake = _FakeSage("x")  # no CATs in wallet at all
+    monkeypatch.setattr(chia, "SageRpc", lambda *a, **k: fake)
+    with pytest.raises(SageError, match="not in wallet"):
+        d._execute_chia_spend(_cat_params())
+    assert fake.sent_cats == []
+
+
+def test_daemon_cat_spend_no_asset_echo_is_unknown(tmp_path, monkeypatch):
+    # Sage sent the CAT but its tx record doesn't echo the asset id:
+    # verification fails closed -> BroadcastUnknown (no false success).
+    d, _ = _daemon_with_seed(tmp_path, monkeypatch)
+    d.chia_cfg["sage_wait_timeout_s"] = 1
+    fake = _FakeSage("x")
+    fake.cat_balances["f" * 64] = 1_000_000
+    fake.cats_echo_asset = False
+    monkeypatch.setattr(chia, "SageRpc", lambda *a, **k: fake)
+    with pytest.raises(SageError):
+        d._execute_chia_spend(_cat_params())
+
+
+def test_daemon_nft_spend_happy_path(tmp_path, monkeypatch):
+    d, _ = _daemon_with_seed(tmp_path, monkeypatch)
+    fake = _FakeSage("x")
+    monkeypatch.setattr(chia, "SageRpc", lambda *a, **k: fake)
+    nid = "0" * 64
+    p = _spend_params(dest="txch1nftdest", amount=1)
+    p["asset"] = "nft:" + nid
+    out = d._execute_chia_spend(p)
+    assert out["submitted"] is True
+    assert out["nft_id"] == nid
+    assert out["coin_id"] == "0xnftcoin2" and out["tx_hash"] == "0xnftcoin2"
+    assert fake.sent_nfts == [([nid], "txch1nftdest", 0)]
+    assert fake.sent == [] and fake.sent_cats == []
+
+
+def test_execute_chia_spend_cat_ignores_relay_config(tmp_path, monkeypatch):
+    # Even with a relay configured, CATs route to Sage (relay is XCH-only).
+    d, _ = _daemon_with_seed(tmp_path, monkeypatch)
+    d.chia_cfg["relay_urls"] = {"testnet11": "https://example.invalid"}
+    fake = _FakeSage("x")
+    fake.cat_balances["f" * 64] = 1_000_000
+    monkeypatch.setattr(chia, "SageRpc", lambda *a, **k: fake)
+    out = d._execute_chia_spend(_cat_params())
+    assert out["submitted"] is True
+    assert fake.sent_cats != []
+
+
+def test_relay_path_refuses_cat(tmp_path, monkeypatch):
+    from spellbook import chia_relay
+    d, _ = _daemon_with_seed(tmp_path, monkeypatch)
+    with pytest.raises(chia_relay.RelayError, match="native-XCH only"):
+        d._execute_chia_spend_via_relay(_cat_params())
+
+
+def test_relay_path_refuses_nft(tmp_path, monkeypatch):
+    from spellbook import chia_relay
+    d, _ = _daemon_with_seed(tmp_path, monkeypatch)
+    p = _spend_params(dest="txch1nftdest", amount=1)
+    p["asset"] = "nft:" + "0" * 64
+    with pytest.raises(chia_relay.RelayError, match="native-XCH only"):
+        d._execute_chia_spend_via_relay(p)

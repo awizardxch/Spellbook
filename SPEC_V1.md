@@ -382,6 +382,41 @@ covers both networks:
   denials, live balances, ledger sighash) validate the exact wallet the
   agent will keep using.
 
+### 3b. Chia asset model — XCH, CATs, NFTs (added 2026-09-21, per Speechless)
+
+Sage already exposes `/send_xch`, `/send_cat`, and `/transfer_nfts`, so
+Spellbook routes all three through the existing Sage transport instead of
+hand-rolling CAT outer puzzles or NFT singleton spends. The `asset` field
+on a Chia-chain request is a real routing signal:
+
+- `"native"` → native XCH. Sage path (`/send_xch`) or the HTTPS relay
+  path (which builds standard-puzzle spends locally via `chia_sign.py`).
+- 64-hex string → CAT asset id (tree hash of the curried TAIL). Sage path
+  only: balance pre-check via `/get_cats`, send via `/send_cat`. Amounts
+  are CAT mojos. The relay path refuses non-native assets — it only
+  builds native spends.
+- `"nft:<id>"` → NFT transfer to a new owner; `<id>` is the NFT's coin id
+  (64-hex) or `nft1…` id. Sage path only (`/transfer_nfts`). Amount must
+  be 1 (the NFT is a singleton); anything else is schema misuse.
+
+Verification is asset-aware and fail-closed, mirroring the XCH rule that
+a txid mismatch is UNKNOWN fate, never safe-to-retry:
+
+- CAT: the outgoing transaction in `/get_transactions` must carry a
+  created coin to the approved destination with the approved amount AND
+  the CAT asset id echoed on the coin record. A record that doesn't echo
+  the asset fails closed (`BroadcastUnknown`), never a false success.
+- NFT: the exact approved NFT coin must appear among the transaction's
+  spent coins, with a created coin to the approved destination. The new
+  coin id is the ledger reference.
+- The created coin id (CAT) / new coin id (NFT) is the stable `tx_hash`
+  ledger reference, same as the XCH Sage path.
+
+Policy is unchanged and already asset-keyed: `(chain, asset)` caps,
+thresholds, allowlists, and 24h velocity all work per CAT asset id and
+per NFT id, defaulting to S4 queue-until-configured. `sage_wait_timeout_s`
+(chia config, default 180) bounds the post-send verification window.
+
 ## 4. Policy daemon spec
 
 A small non-LLM service (one per muse), running as the dedicated `spellbook`

@@ -26,6 +26,9 @@ POST /{endpoint} with a JSON body. The endpoints used here:
   POST /get_wallet_address {"fingerprint": n, "network_id": "testnet11"}
   POST /send_xch           {"address","amount","fee","memos","auto_submit": true}
   POST /get_transactions   {"offset":0,"limit":5,"ascending":false}
+  POST /send_cat            {"asset_id","address","amount","fee","memos","auto_submit": true}
+  POST /get_cats            {} -> {"cats": [{"asset_id","balance",...}]}
+  POST /transfer_nfts       {"nft_ids","address","fee","auto_submit": true}
 
 Amounts in Sage's API are untagged string-or-number ("Amount"); we send
 plain JSON integers for mojos and accept either form back.
@@ -193,23 +196,73 @@ class SageRpc:
             "auto_submit": True,
         })
 
+    def send_cat(self, asset_id: str, address: str, amount_mojos: int,
+                 fee_mojos: int = 0, memos: list | None = None) -> dict:
+        """POST /send_cat — send CAT tokens of `asset_id` to `address`.
+
+        `asset_id` is the 64-hex tree hash of the curried TAIL.
+        """
+        return self.call("send_cat", {
+            "asset_id": asset_id,
+            "address": address,
+            "amount": amount_mojos,
+            "fee": fee_mojos,
+            "memos": memos or [],
+            "auto_submit": True,
+        })
+
+    def get_cats(self) -> list:
+        """POST /get_cats — list CATs in the logged-in wallet."""
+        return self.call("get_cats", {}).get("cats", [])
+
+    def transfer_nfts(self, nft_ids: list, address: str,
+                      fee_mojos: int = 0) -> dict:
+        """POST /transfer_nfts — move NFT(s) to a new owner `address`.
+
+        `nft_ids` are the wallet's NFT identifiers (nft1… ids accepted).
+        """
+        return self.call("transfer_nfts", {
+            "nft_ids": list(nft_ids),
+            "address": address,
+            "fee": fee_mojos,
+            "auto_submit": True,
+        })
+
     def recent_transactions(self, limit: int = 5) -> list:
         return self.call("get_transactions",
                          {"offset": 0, "limit": limit,
                           "ascending": False}).get("transactions", [])
 
 
+def cat_balance(rpc: SageRpc, asset_id: str) -> int:
+    """Spendable balance (CAT mojos) of `asset_id` in the logged-in wallet.
+
+    Raises SageError when the CAT is not in the wallet — sending a CAT we
+    don't hold must fail closed before /send_cat is ever called.
+    """
+    want = asset_id.lower()
+    for cat in rpc.get_cats():
+        if (cat.get("asset_id") or "").lower() == want:
+            return amount_to_int(cat.get("balance", 0))
+    raise SageError(f"CAT {asset_id[:16]}… not in wallet — refusing")
+
+
 def wait_for_outgoing(rpc: SageRpc, destination: str, amount_mojos: int,
                       since_ts: float, timeout_s: int = 180,
-                      poll_s: int = 5) -> dict:
+                      poll_s: int = 5, asset_ref: str | None = None) -> dict:
     """Poll /get_transactions until our outgoing spend shows up.
 
     Matches the first transaction created after `since_ts` whose created
-    coins include `destination` (case-insensitive). Fail-closed on timeout:
-    the spend may still confirm later, so the caller must treat this as
-    "broadcast, confirmation unknown" rather than as a failure.
+    coins include `destination` (case-insensitive) with `amount_mojos`.
+    When `asset_ref` is given (a CAT asset id), the created coin must also
+    carry that reference in one of its asset/nft/coin id fields — Sage's
+    tx records must echo the asset or verification fails closed.
+    Fail-closed on timeout: the spend may still confirm later, so the
+    caller must treat this as "broadcast, confirmation unknown" rather
+    than as a failure.
     """
     dest = destination.lower()
+    ref = asset_ref.lower() if asset_ref else None
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         for tx in rpc.recent_transactions(limit=10):
@@ -222,11 +275,55 @@ def wait_for_outgoing(rpc: SageRpc, destination: str, amount_mojos: int,
                     amt = amount_to_int(coin.get("amount"))
                 except SageError:
                     continue
-                if addr == dest and amt == amount_mojos:
-                    return tx
+                if addr != dest or amt != amount_mojos:
+                    continue
+                if ref is not None:
+                    fields = (coin.get("asset_id"), coin.get("nft_id"),
+                              coin.get("coin_id"))
+                    if not any(isinstance(f, str) and f.lower() == ref
+                               for f in fields):
+                        continue
+                return tx
         time.sleep(poll_s)
     raise BroadcastUnknown(
         "",
         "spend was submitted but no matching transaction appeared in "
         f"/get_transactions within {timeout_s}s — broadcast, confirmation "
         "unknown; do not retry blindly")
+
+
+def wait_for_nft_transfer(rpc: SageRpc, nft_ref: str, destination: str,
+                          since_ts: float, timeout_s: int = 180,
+                          poll_s: int = 5) -> dict:
+    """Poll /get_transactions until the approved NFT move shows up.
+
+    An NFT transfer consumes the exact NFT coin (`nft_ref` — coin id or
+    nft1 id) and creates a coin to the new owner. Matches the first
+    transaction created after `since_ts` where a *spent* coin references
+    the NFT and a *created* coin goes to `destination`. Fail-closed on
+    timeout, same as wait_for_outgoing.
+    """
+    dest = destination.lower()
+    ref = nft_ref.lower()
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        for tx in rpc.recent_transactions(limit=10):
+            ts = tx.get("timestamp") or 0
+            if ts < since_ts - 60:
+                continue
+            spent_ids = set()
+            for coin in tx.get("spent", []):
+                for f in (coin.get("coin_id"), coin.get("nft_id")):
+                    if isinstance(f, str):
+                        spent_ids.add(f.lower())
+            if ref not in spent_ids:
+                continue
+            for coin in tx.get("created", []):
+                if (coin.get("address") or "").lower() == dest:
+                    return tx
+        time.sleep(poll_s)
+    raise BroadcastUnknown(
+        "",
+        "NFT transfer was submitted but no matching transaction appeared "
+        f"in /get_transactions within {timeout_s}s — broadcast, "
+        "confirmation unknown; do not retry blindly")
