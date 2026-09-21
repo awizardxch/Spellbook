@@ -213,14 +213,24 @@ export class RelayError extends Error {
   }
 }
 
+/** Normalize a user-pasted relay URL: trim, add https:// if no scheme. */
+export function normalizeRelayUrl(raw: string): string {
+  const t = raw.trim().replace(/\/+$/, "");
+  if (/^https?:\/\//i.test(t)) return t;
+  return "https://" + t;
+}
+
 export class RelayClient {
+  private base: string;
   constructor(
-    private baseUrl: string,
+    baseUrl: string,
     private token: string
-  ) {}
+  ) {
+    this.base = normalizeRelayUrl(baseUrl);
+  }
 
   private async req<T>(path: string, init?: RequestInit): Promise<T> {
-    const url = this.baseUrl.replace(/\/+$/, "") + path;
+    const url = this.base + path;
     let res: Response;
     try {
       res = await fetch(url, {
