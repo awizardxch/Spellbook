@@ -1,70 +1,277 @@
-"use client";
-
-import { useMemo, useState } from "react";
-import { RelayClient, RelayStatus } from "../lib/chia";
-import { useLocalStorage, useLocalStorageJson } from "../lib/useLocalStorage";
-import StatusPanel from "../components/StatusPanel";
-import WatchPanel from "../components/WatchPanel";
-import BroadcastPanel, { BroadcastLogEntry } from "../components/BroadcastPanel";
-import DrillPanel from "../components/DrillPanel";
-
-const DEFAULT_RELAY_URL = process.env.NEXT_PUBLIC_RELAY_URL ?? "";
-
 export default function Home() {
-  const [relayUrl, setRelayUrl] = useLocalStorage("spellbook.relayUrl", DEFAULT_RELAY_URL);
-  const [token, setToken] = useLocalStorage("spellbook.relayToken", "");
-  const [status, setStatus] = useState<RelayStatus | null>(null);
-  const [log, setLog] = useLocalStorageJson<BroadcastLogEntry[]>("spellbook.broadcastLog", []);
-
-  const client = useMemo(
-    () => (relayUrl.trim() && token.trim() ? new RelayClient(relayUrl.trim(), token.trim()) : null),
-    [relayUrl, token]
-  );
-
-  const onBroadcast = (entry: BroadcastLogEntry) => {
-    setLog([entry, ...log].slice(0, 20));
-  };
-
   return (
-    <main>
+    <div className="wrap">
+      <nav className="nav">
+        <a className="brand" href="/">
+          <span className="brand-mark">🪄</span>
+          Spellbook
+        </a>
+        <div className="nav-links">
+          <a href="#how">How it works</a>
+          <a href="#security">Security</a>
+          <a href="#networks">Networks</a>
+          <a href="/onboard">Agent onboarding</a>
+        </div>
+      </nav>
+
       <header className="hero">
+        <span className="kicker">The agent&apos;s wallet</span>
         <h1>
-          <span className="wand">🪄</span>Spellbook Chia Relay
+          Your muse can hold coins.
+          <br />
+          <span className="glow">You hold the approvals.</span>
         </h1>
-        <p>
-          First-tester console for the testnet11 relay. Watch addresses, check relay
-          health, and broadcast signed spend bundles. This page is <strong>read-only</strong>:
-          it never asks for seeds, mnemonics, or private keys — all signing happens in
-          your local daemon.
+        <p className="lede">
+          Spellbook is a wallet stack for AI agents. The agent surfaces what
+          it wants to do — balances, queued spends, decoded intent. The
+          human approves from their own chat. The daemon executes and reports
+          back. The agent can request and relay; it can never approve on its
+          own.
         </p>
-        <p>
-          <a href="/onboard">Onboard a muse →</a> — what Spellbook is and how to
-          connect your own relay. Agents: fetch <a href="/onboard.txt"><code>/onboard.txt</code></a>.
-        </p>
-        {status && <div className="network-badge">{status.network}</div>}
+        <div className="cta-row">
+          <a className="btn" href="/onboard">Onboard your agent →</a>
+          <a
+            className="btn ghost"
+            href="https://github.com/awizardxch/Spellbook"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            GitHub — awizardxch/Spellbook
+          </a>
+        </div>
       </header>
 
-      <StatusPanel
-        relayUrl={relayUrl}
-        setRelayUrl={setRelayUrl}
-        token={token}
-        setToken={setToken}
-        onStatus={setStatus}
-      />
-      <WatchPanel client={client} />
-      <BroadcastPanel client={client} onBroadcast={onBroadcast} />
-      <DrillPanel client={client} log={log} />
+      <section className="section" id="how">
+        <div className="section-head">
+          <h2>How it works</h2>
+          <p>
+            A three-beat loop, with the human holding the only key that
+            matters: approval.
+          </p>
+        </div>
+        <div className="grid3">
+          <div className="glass">
+            <span className="step">01 · Agent</span>
+            <span className="icon">🧙</span>
+            <h3>Requests &amp; relays</h3>
+            <p>
+              The agent proposes spends, watches balances, and shows its
+              intent in plain language. Its request token has no approve
+              method — the daemon would reject the attempt anyway.
+            </p>
+          </div>
+          <div className="glass">
+            <span className="step">02 · Human</span>
+            <span className="icon">🔮</span>
+            <h3>Approves from chat</h3>
+            <p>
+              You review each decoded request where you already talk to your
+              muse and approve with your own tooling. No wallet software to
+              install, no keys to touch.
+            </p>
+          </div>
+          <div className="glass">
+            <span className="step">03 · Daemon</span>
+            <span className="icon">⚙️</span>
+            <h3>Executes &amp; reports</h3>
+            <p>
+              The local daemon signs with keys that never leave its machine,
+              enforces spend caps and velocity limits, and reports every
+              result back to the ledger.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section className="section" id="security">
+        <div className="section-head">
+          <h2>Security model</h2>
+          <p>
+            Built so that even a compromised relay learns nothing worth
+            stealing.
+          </p>
+        </div>
+        <div className="grid2">
+          <div className="glass">
+            <span className="icon">🔑</span>
+            <h3>Keys never leave the machine</h3>
+            <p>
+              Seeds, private keys, and BLS signing live in the daemon only.
+              The relay sees public puzzle hashes and already-signed spend
+              bundles — the same trust model as pointing a wallet at any
+              public full node.
+            </p>
+          </div>
+          <div className="glass">
+            <span className="icon">🚫</span>
+            <h3>The relay rejects key material</h3>
+            <p>
+              Any request field named like <code>seed</code>,{" "}
+              <code>mnemonic</code>, or <code>private_key</code> is a hard
+              400. Malformed spend bundles are rejected before they ever
+              reach a peer.
+            </p>
+          </div>
+          <div className="glass">
+            <span className="icon">🧱</span>
+            <h3>Policy enforced locally</h3>
+            <p>
+              Per-spend caps, 24-hour velocity limits, and an approval queue
+              are enforced by the daemon on its own machine — not by a
+              remote service you have to trust.
+            </p>
+          </div>
+          <div className="glass">
+            <span className="icon">📜</span>
+            <h3>Two-mnemonic paper backup</h3>
+            <p>
+              Install prints the paper backup once: a standard-recovery set
+              whose words and raw keys import straight into Sage and
+              MetaMask, plus a daemon-native secondary set. Written on
+              paper, offline, verified after import.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section className="section" id="networks">
+        <div className="section-head">
+          <h2>Networks</h2>
+          <p>
+            One seed covers the whole stack — networks differ only in
+            derivation label and address encoding.
+          </p>
+        </div>
+        <div className="pill-row">
+          <span className="pill">
+            <span className="dot" /> Chia testnet11 — live now
+          </span>
+          <span className="pill pending">
+            <span className="dot" /> Chia mainnet — gated, later
+          </span>
+          <span className="pill">
+            <span className="dot" /> EVM testnets — live now
+          </span>
+          <span className="pill pending">
+            <span className="dot" /> EVM mainnet — gated, later
+          </span>
+        </div>
+        <div className="grid2" style={{ marginTop: 26 }}>
+          <div className="glass">
+            <span className="icon">🟣</span>
+            <h3>Chia</h3>
+            <p>
+              Testnet11 is the default network today — faucet-funded,
+              drills and validation live. Mainnet submission stays gated
+              behind explicit human authorization with exact amounts.
+              Addresses: <code>txch1…</code> on testnet, <code>xch1…</code>{" "}
+              on mainnet.
+            </p>
+          </div>
+          <div className="glass">
+            <span className="icon">⛓️</span>
+            <h3>EVM</h3>
+            <p>
+              Standard secp256k1 keys, plain transfers on testnets (e.g.
+              Robinhood Chain testnet). Mainnet is gated the same way as
+              Chia mainnet.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section className="section" id="api">
+        <div className="section-head">
+          <h2>The relay API is for agents</h2>
+          <p>
+            This site has no wallet console, no forms, no key handling —
+            nothing to click. The Chia relay is a bearer-authed HTTPS API
+            that agent software talks to.
+          </p>
+        </div>
+        <div className="glass">
+          <table className="api-table">
+            <thead>
+              <tr>
+                <th>Endpoint</th>
+                <th>What it does</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>
+                  <code>GET /v1/status</code>
+                </td>
+                <td>Network, peak height, peer count, uptime</td>
+              </tr>
+              <tr>
+                <td>
+                  <code>POST /v1/coins</code>
+                </td>
+                <td>Coins by puzzle hash — balances and confirmation heights</td>
+              </tr>
+              <tr>
+                <td>
+                  <code>POST /v1/broadcast</code>
+                </td>
+                <td>
+                  Broadcast a signed spend bundle — mempool ack: 1 SUCCESS, 2
+                  PENDING, 3 FAILED
+                </td>
+              </tr>
+              <tr>
+                <td>
+                  <code>GET /v1/coin/:id</code>
+                </td>
+                <td>Confirmation tracking for one coin</td>
+              </tr>
+            </tbody>
+          </table>
+          <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginTop: 16 }}>
+            Full contract, auth rules, and deploy notes live in the repo:{" "}
+            <a
+              href="https://github.com/awizardxch/Spellbook/blob/main/docs/AGENT_ONBOARDING.md"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              docs/AGENT_ONBOARDING.md
+            </a>
+            .
+          </p>
+        </div>
+      </section>
+
+      <div className="callout">
+        <h2>Bring your muse a wallet.</h2>
+        <p>
+          The onboarding guide is written for AI agents, not humans. Point
+          your agent at it — the repo file is the authority.
+        </p>
+        <div className="cta-row">
+          <a className="btn" href="/onboard">Agent onboarding →</a>
+        </div>
+      </div>
 
       <footer className="footer">
-        <p>
-          Relay API: <code>GET /v1/status</code> · <code>POST /v1/coins</code> ·{" "}
-          <code>POST /v1/broadcast</code> · <code>GET /v1/coin/:id</code>
-        </p>
-        <p>
-          Trust model: the relay sees public puzzle hashes and signed bundles only —
-          the same as any public full node. Keys and signing stay on your machine.
-        </p>
+        <span>Spellbook — the agent&apos;s wallet. Forged in the Nightspire.</span>
+        <div className="links">
+          <a
+            href="https://github.com/awizardxch/Spellbook"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            GitHub
+          </a>
+          <a
+            href="https://github.com/awizardxch/Spellbook/tree/main/docs"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Docs
+          </a>
+          <a href="/onboard">Onboard</a>
+        </div>
       </footer>
-    </main>
+    </div>
   );
 }

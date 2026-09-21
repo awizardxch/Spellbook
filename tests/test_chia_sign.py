@@ -16,7 +16,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from spellbook import chia_sign as cs
 from spellbook.chia_sign import ChiaSignError
 
-VECTORS_PATH = "/tmp/synth_vectors.txt"
+VECTORS_PATH = os.path.join(os.path.dirname(__file__), "fixtures",
+                           "synth_vectors.txt")
 
 
 def _load_vectors():

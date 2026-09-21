@@ -99,3 +99,134 @@ class TestBroadcastUnknown:
         e = BroadcastUnknown("ref123", "note")
         assert isinstance(e, RelayError)
         assert e.reference == "ref123"
+
+
+class TestBroadcastRequestShape:
+    """The relay documents {spend_bundle: hex}; assert the exact field."""
+
+    def test_sends_documented_spend_bundle_field(self):
+        r = RelayRpc("https://relay.example.com", "a" * 32)
+        captured = {}
+
+        def fake_request(method, path, body=None):
+            captured["method"] = method
+            captured["path"] = path
+            captured["body"] = body
+            return {"ok": True, "txid": "ab" * 32,
+                    "expected_txid": "ab" * 32, "status": 1,
+                    "status_name": "SUCCESS", "error": None}
+
+        r._request = fake_request
+        bundle = "ab" * 128
+        r.broadcast(bundle)
+        assert captured["method"] == "POST"
+        assert captured["path"] == "/v1/broadcast"
+        assert captured["body"] == {"spend_bundle": bundle}
+        assert "spend_bundle_hex" not in captured["body"]
+
+
+class _FakeCoinRpc:
+    """Minimal rpc.coin() double for wait_for_confirmation."""
+
+    def __init__(self, script):
+        # script: list of ("ok", coin_dict) or ("404", None) or
+        # ("err", RelayError).
+        self.script = list(script)
+        self.calls = 0
+
+    def coin(self, coin_id_hex):
+        self.calls += 1
+        kind, payload = self.script.pop(0)
+        if kind == "ok":
+            return {"ok": True, "coin": dict(payload)}
+        if kind == "flat":
+            return dict(payload)
+        if kind == "404":
+            raise RelayError(
+                f"relay GET /v1/coin/{coin_id_hex} -> HTTP 404: "
+                '{"ok": false, "error": "unknown coin"}')
+        raise payload
+
+
+class TestWaitForConfirmation:
+    CID = "cd" * 32
+
+    def test_spent_coin_confirmed(self):
+        rpc = _FakeCoinRpc([
+            ("ok", {"coin_id": self.CID, "spent_height": None,
+                    "created_height": 100}),
+            ("ok", {"coin_id": self.CID, "spent_height": 4715400,
+                    "created_height": 100}),
+        ])
+        coin = chia_relay.wait_for_confirmation(rpc, self.CID, poll_s=0)
+        assert coin["spent_height"] == 4715400
+        assert rpc.calls == 2
+
+    def test_nested_coin_envelope_parsed(self):
+        # Regression: the relay nests under "coin"; top-level fields must
+        # not be read (they are absent -> would spin until timeout).
+        rpc = _FakeCoinRpc([
+            ("ok", {"coin_id": self.CID, "spent_height": 9,
+                    "created_height": 8}),
+        ])
+        coin = chia_relay.wait_for_confirmation(rpc, self.CID, poll_s=0)
+        assert coin["coin_id"] == self.CID
+        assert rpc.calls == 1
+
+    def test_404_tolerated_while_polling(self):
+        rpc = _FakeCoinRpc([
+            ("404", None),
+            ("404", None),
+            ("ok", {"coin_id": self.CID, "spent_height": 12,
+                    "created_height": 10}),
+        ])
+        coin = chia_relay.wait_for_confirmation(rpc, self.CID, poll_s=0)
+        assert coin["spent_height"] == 12
+        assert rpc.calls == 3
+
+    def test_created_mode_waits_for_coin_to_appear(self):
+        rpc = _FakeCoinRpc([
+            ("404", None),
+            ("ok", {"coin_id": self.CID, "spent_height": None,
+                    "created_height": 4715401}),
+        ])
+        coin = chia_relay.wait_for_confirmation(
+            rpc, self.CID, poll_s=0, created=True)
+        assert coin["created_height"] == 4715401
+
+    def test_created_mode_ignores_spent_height_none(self):
+        # A fresh change coin has spent_height None; created=True must
+        # NOT treat that as unconfirmed-forever.
+        rpc = _FakeCoinRpc([
+            ("ok", {"coin_id": self.CID, "spent_height": None,
+                    "created_height": 4715401}),
+        ])
+        coin = chia_relay.wait_for_confirmation(
+            rpc, self.CID, poll_s=0, created=True)
+        assert coin["created_height"] == 4715401
+        assert rpc.calls == 1
+
+    def test_timeout_raises_broadcast_unknown(self):
+        rpc = _FakeCoinRpc([
+            ("ok", {"coin_id": self.CID, "spent_height": None,
+                    "created_height": 100}),
+        ])
+        with pytest.raises(BroadcastUnknown) as ei:
+            chia_relay.wait_for_confirmation(rpc, self.CID,
+                                             timeout_s=0, poll_s=0)
+        assert ei.value.reference == self.CID
+
+    def test_non_404_error_raises_immediately(self):
+        rpc = _FakeCoinRpc([
+            ("err", RelayError("relay transport failure on GET /v1/coin")),
+        ])
+        with pytest.raises(RelayError, match="transport failure"):
+            chia_relay.wait_for_confirmation(rpc, self.CID, poll_s=0)
+        assert rpc.calls == 1
+
+    def test_flat_shape_tolerated(self):
+        rpc = _FakeCoinRpc([
+            ("flat", {"spent_height": 7, "created_height": 6}),
+        ])
+        coin = chia_relay.wait_for_confirmation(rpc, self.CID, poll_s=0)
+        assert coin["spent_height"] == 7

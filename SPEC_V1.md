@@ -236,6 +236,60 @@ software:
   several addresses per muse, each with its binding row (§8).
 - Backup is unchanged: the root backup re-derives every label ever created.
 
+### 2b. Two-mnemonic wallet model (added 2026-09-21, per Speechless)
+
+Every install carries **two independent wallets**, each with its own 24-word
+paper backup. They are separate key hierarchies — neither derives the other.
+
+**Set 1 — standard recovery (primary; the daemon's live keys on new
+installs).** One BIP-39 24-word mnemonic. Keys derive exactly the way stock
+wallets derive them, so the same words load directly in Sage (Chia) and
+MetaMask (EVM):
+
+- **Chia:** BIP-39 seed (PBKDF2-HMAC-SHA512, 2048 rounds, empty passphrase)
+  → BLS `key_gen` (HKDF with salt `"BLS-SIG-KEYGEN-SALT-"`, as implemented
+  by blspy) → the master secret Sage itself derives from an imported
+  mnemonic. Wallet keys then follow the standard path `[12381, 8444, 2,
+  index]` + synthetic key — one master key; testnet11/mainnet addresses
+  differ only by bech32m HRP (`txch1` vs `xch1`).
+- **EVM:** the same 64-byte BIP-39 seed → BIP-32 master →
+  `m/44'/60'/0'/0/0` — the first account MetaMask derives when importing a
+  mnemonic (same `0x` address on every EVM chain, as with MetaMask).
+
+**Set 2 — Spellbook daemon seed (custom KDF; secondary recovery).** One
+BIP-39 24-word mnemonic over 32 bytes of entropy. All fund keys derive via
+the daemon's labeled HKDF KDF (§2: `muse-wallet/v1/<chain>/sign/<label>`,
+per-chain scalars for `chia-testnet`, `chia-mainnet`, `evm-4663`,
+`evm-46630`).
+
+**What works where (read carefully):**
+
+- The **standard words work in Sage and MetaMask** (import the words), and
+  the **raw keys work too**: the standard EVM private key imports into
+  MetaMask as a raw private key; the standard Chia BLS master key imports
+  into Sage as a private key. After import, the addresses shown must match
+  the addresses printed on the paper backup — that match is the verification.
+- The **KDF seed words do NOT work in Sage or MetaMask** — the daemon's KDF
+  is not BIP-39/BIP-32/EIP-2334, so stock wallets derive unrelated keys from
+  those words. They recover through the Spellbook daemon only.
+- The **standard words do NOT derive daemon KDF addresses** — different KDF,
+  different keys, different addresses. The two sets are independent on
+  purpose: compromising one does not compromise the other.
+- The **KDF raw keys DO import into stock wallets**: each KDF scalar is a
+  plain secp256k1/BLS private key. Importing a KDF EVM scalar into MetaMask
+  (or a KDF Chia scalar into Sage) yields exactly the address the daemon
+  uses for that chain — this is the backstop if the daemon is ever
+  unavailable (§6 path (b)).
+
+**Daemon selection.** `spellbook.json` carries `key_derivation`:
+`"kdf"` (default) or `"standard"`, plus `std_seed_path` (the 64-byte BIP-39
+seed file, 0600) required in standard mode. New installs set `"standard"` —
+the daemon derives, signs, and reports the standard wallet's addresses, so
+the standard backup is the funded path. Existing installs carry no flag and
+default to `"kdf"`: their keys, addresses, and behavior are byte-for-byte
+unchanged. The daemon refuses to start in standard mode without
+`std_seed_path` — a spend can never silently fall back to KDF keys.
+
 ## 3. Sage deployment spec (per muse)
 
 - **Source:** `xch-dev/sage` at tag `v0.13.1` (D4), pinned **by commit as well
@@ -264,6 +318,35 @@ software:
 - **Sync:** Sage connects to Chia peers directly or to a configured trusted
   node. Record observed sync behavior in the Phase 1 log; slow/failed sync is a
   go/no-go input for Phase 2.
+
+### 3a. Dual-network Chia wallet (added 2026-09-21, per Speechless)
+
+Users want their agents to hold testnet capabilities *alongside* the mainnet
+install — testnet for drills and play, mainnet for real funds later. One seed
+covers both networks:
+
+- The KDF already derives **different** keys per chain id (`chia-testnet` vs
+  `chia-mainnet`, §2/P9). A testnet address can never be confused with a
+  mainnet address: different keys *and* different bech32m HRPs (`txch1` vs
+  `xch1`). The installer's single paper backup therefore recovers both
+  networks.
+- `spellbook.json` → `chia.network` selects the active network: `testnet11`
+  today; flips to `mainnet` once mainnet is authorized (separate go-ahead +
+  amounts, D6). `chia.mainnet_submit_enabled` stays an independent hard gate
+  (default false) — selecting mainnet in config does not by itself enable
+  submission.
+- `spellbook.json` → `chia.relay_urls` maps each network to its own relay
+  URL. Relays are single-network: each Railway deployment pins its own
+  `RELAY_NETWORK`, so a dual-network user runs two relay services (or one,
+  if they only need testnet). The daemon fails closed when the active
+  network has no relay configured, and re-verifies the relay's
+  `/v1/status` network pin before every broadcast — a mainnet bundle can
+  never leave through a testnet relay or vice versa.
+- The Phase 1 testnet drill runs against a **persistent** (non-throwaway)
+  testnet wallet whose paper backup is held by the human, so the funded
+  cases (queued→approved transfer, auto-approved dust, per-spend/velocity
+  denials, live balances, ledger sighash) validate the exact wallet the
+  agent will keep using.
 
 ## 4. Policy daemon spec
 

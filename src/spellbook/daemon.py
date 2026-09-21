@@ -22,6 +22,7 @@ Ed25519 identity signing behind the S1 gate (Option B adopted).
 Nothing here touches mainnet without the explicit mainnet_submit_enabled flag.
 """
 import argparse
+import hashlib
 import json
 import os
 import socket
@@ -86,6 +87,22 @@ class Daemon:
         # process. Real seeds enter only after the §10 phase-1 authorization.
         seed_path = self.cfg.get("seed_path")
         self.seed = load_seed(seed_path) if seed_path else None
+        # Standard-recovery wallet (SPEC §2b): the 64-byte BIP-39 seed whose
+        # keys derive the way stock wallets do (Sage / MetaMask). Required
+        # exactly when key_derivation == "standard" — the daemon refuses to
+        # start in standard mode without it, so a spend can never silently
+        # fall back to KDF keys.
+        self.key_derivation = self.cfg.get("key_derivation", "kdf")
+        if self.key_derivation not in ("kdf", "standard"):
+            raise ValueError("key_derivation must be 'kdf' or 'standard'")
+        self.std_seed = None
+        if self.key_derivation == "standard":
+            std_seed_path = self.cfg.get("std_seed_path")
+            if not std_seed_path:
+                raise ValueError(
+                    "key_derivation=standard requires std_seed_path")
+            from spellbook.seed import load_std_seed
+            self.std_seed = load_std_seed(std_seed_path)
         if self.seed and self.cfg.get("musebook_signing_mode") == "daemon":
             from nacl.signing import SigningKey
             self._identity_key = SigningKey(self.seed)
@@ -207,6 +224,44 @@ class Daemon:
         return handler(params, req.get("muse_id", "?"))
 
     # ------------------------------------------------------------ chain execution
+    def _signing_seed(self):
+        """The seed that actually signs under the configured derivation.
+
+        Standard mode signs with the BIP-39 seed only; KDF mode signs with
+        the daemon seed only. A spend can never draw keys from the other
+        wallet set, and a missing active seed fails closed even when the
+        other set is present.
+        """
+        return self.std_seed if self.key_derivation == "standard" else self.seed
+
+    def _evm_key(self, chain):
+        """(priv_bytes, address) for an EVM chain under the configured derivation.
+
+        KDF mode: the labeled secp256k1 scalar (existing behavior).
+        Standard mode: BIP-32 m/44'/60'/0'/0/0 of the BIP-39 seed — the key
+        MetaMask derives from the same mnemonic.
+        """
+        if self.key_derivation == "standard":
+            from spellbook import stdkeys
+            priv = stdkeys.evm_privkey(self.std_seed)
+            return priv, stdkeys.evm_address(priv)
+        d = kdf.derive_labeled(self.seed, chain, "default")
+        return bytes.fromhex(d["scalar_hex"]), d["address"]
+
+    def _chia_master_sk(self, chain):
+        """32-byte Chia master secret for `chain` under the configured derivation.
+
+        KDF mode: the per-chain labeled BLS scalar (existing behavior).
+        Standard mode: the BLS key_gen master key of the BIP-39 seed — the
+        same key Sage derives from the same mnemonic (one key; only the
+        bech32m HRP differs between testnet11 and mainnet).
+        """
+        if self.key_derivation == "standard":
+            from spellbook import stdkeys
+            return stdkeys.chia_master_sk(self.std_seed)
+        d = kdf.derive_labeled(self.seed, chain, "default")
+        return bytes.fromhex(d["scalar_hex"])
+
     def _execute_spend(self, params: dict) -> dict:
         """Build, sign, and broadcast an approved EVM transfer (SPEC §10).
 
@@ -231,7 +286,7 @@ class Daemon:
             raise evm.EvmError(
                 f"mainnet submission refused for {chain} — needs the "
                 "separately-authorized mainnet_submit_enabled flag (§10.14-17)")
-        if self.seed is None:
+        if self._signing_seed() is None:
             raise evm.EvmError("no seed configured — cannot sign")
         if params.get("amount_mojos") is not None:
             raise evm.EvmError("mojos on an EVM chain — schema misuse, refusing")
@@ -239,9 +294,7 @@ class Daemon:
         if not evm.is_address(dest):
             raise evm.EvmError(f"bad destination address: {dest!r}")
         amount = params["amount_wei"]
-        d = kdf.derive_labeled(self.seed, chain, "default")
-        priv = bytes.fromhex(d["scalar_hex"])
-        sender = d["address"]
+        priv, sender = self._evm_key(chain)
         rpc = evm.Rpc(entry["rpc_url"])
         if rpc.chain_id() != info["chain_id"]:
             raise evm.EvmError(
@@ -334,12 +387,16 @@ class Daemon:
             "sage rpc did not answer on its port within 45s — see sage-rpc.log")
 
     def _chia_wallet(self, rpc, chain):
-        """Select the daemon-owned KDF wallet for `chain` on Sage.
+        """Select the daemon-owned wallet for `chain` on Sage.
 
-        Switches Sage to the chain's network, imports the KDF-derived BLS
-        key when missing (verifying the fingerprint locally — never trusting
-        the RPC's word for which key it imported), and logs in. Returns
-        (fingerprint, address).
+        Switches Sage to the chain's network, imports the daemon's BLS
+        master key when missing (verifying the fingerprint locally — never
+        trusting the RPC's word for which key it imported), and logs in.
+        Returns (fingerprint, address).
+
+        In standard mode the imported key is the BLS key_gen master key, so
+        Sage operates the exact wallet the mnemonic opens in stock Sage —
+        the daemon and Sage agree on every address.
 
         Every balance read goes through here. Sage's /get_sync_status
         reports whichever wallet was logged in last, so a foreign wallet
@@ -351,8 +408,9 @@ class Daemon:
         """
         network = chia.NETWORKS[chain]
         rpc.set_network(network)
-        d = kdf.derive_labeled(self.seed, chain, "default")
-        expected_fp = chia.chia_fingerprint(d["pubkey_hex"])
+        master_sk = self._chia_master_sk(chain)
+        from spellbook import chia_sign
+        expected_fp = chia.chia_fingerprint(chia_sign.pk_bytes(master_sk).hex())
         have = set()
         for k in rpc.get_keys():
             try:
@@ -360,10 +418,10 @@ class Daemon:
             except (TypeError, ValueError):
                 continue
         if expected_fp not in have:
-            got = rpc.import_key("spellbook-default", d["scalar_hex"])
+            got = rpc.import_key("spellbook-default", master_sk.hex())
             if got != expected_fp:
                 raise chia.SageError(
-                    f"imported fingerprint {got} != KDF-derived {expected_fp} "
+                    f"imported fingerprint {got} != derived {expected_fp} "
                     "— refusing to use an unexpected key")
         rpc.login(expected_fp)
         return expected_fp, rpc.wallet_address(expected_fp, network)
@@ -371,11 +429,13 @@ class Daemon:
     def _execute_chia_spend(self, params: dict) -> dict:
         """Dispatch to the Sage or relay Chia spend path.
 
-        If `chia.relay_url` is set in spellbook.json, the relay path is
-        used: keys stay local (chia_sign.py), the relay only broadcasts.
-        Otherwise the Sage RPC path is used (default, unchanged).
+        The relay path is selected when EITHER the per-network
+        `chia.relay_urls` map (new installs) or the legacy flat
+        `chia.relay_url` (single-network installs) is set. Precedence
+        inside the relay path: relay_urls[<network>] wins over the flat
+        relay_url. Otherwise the Sage RPC path is used (default, unchanged).
         """
-        if self.chia_cfg.get("relay_url"):
+        if self.chia_cfg.get("relay_urls") or self.chia_cfg.get("relay_url"):
             return self._execute_chia_spend_via_relay(params)
         return self._execute_chia_spend_via_sage(params)
 
@@ -401,7 +461,7 @@ class Daemon:
             raise chia_relay.RelayError(
                 "mainnet submission refused for chia-mainnet — needs the "
                 "separately-authorized mainnet_submit_enabled flag (§10.14-17)")
-        if self.seed is None:
+        if self._signing_seed() is None:
             raise chia_relay.RelayError("no seed configured — cannot sign")
         if params.get("amount_wei") is not None:
             raise chia_relay.RelayError(
@@ -414,7 +474,16 @@ class Daemon:
         amount = params["amount_mojos"]
         fee = int(self.chia_cfg.get("fee_mojos", 0))
 
-        relay_url = self.chia_cfg["relay_url"]
+        # Dual-network wallets: one seed serves testnet11 and mainnet (the
+        # KDF derives per-chain keys; only the bech32m HRP differs). Relays
+        # are per-network — a testnet relay must never see a mainnet bundle.
+        # `relay_urls` maps network name -> URL; the legacy flat `relay_url`
+        # is kept as a fallback for single-network installs.
+        relay_urls = self.chia_cfg.get("relay_urls", {})
+        relay_url = relay_urls.get(network) or self.chia_cfg.get("relay_url")
+        if not relay_url:
+            raise chia_relay.RelayError(
+                f"no relay configured for {network} — refusing")
         token = self.chia_cfg.get("relay_token") or os.environ.get(
             "SPELLBOOK_RELAY_TOKEN", "")
         if token.startswith("env:"):
@@ -428,10 +497,11 @@ class Daemon:
                 f"relay network {st.get('network')!r} != expected {network!r} "
                 "— refusing")
 
-        # Derive our wallet key and addresses locally. The KDF label matches
-        # the Sage path ("default") so both transports use the same wallet.
-        d = kdf.derive_labeled(self.seed, chain, "default")
-        master_sk = bytes.fromhex(d["scalar_hex"])
+        # Derive our wallet master key locally. In KDF mode the label matches
+        # the Sage path ("default") so both transports use the same wallet;
+        # in standard mode it is the BLS key_gen master key (same for both
+        # networks — only the bech32m HRP differs).
+        master_sk = self._chia_master_sk(chain)
         # Scan the first N derivation indices for coins.
         scan_n = int(self.chia_cfg.get("relay_scan_indices", 10))
         puzzle_hashes = []
@@ -498,24 +568,64 @@ class Daemon:
 
         bundle_hex = chia_sign.build_spend_bundle(spends).hex()
         res = rpc.broadcast(bundle_hex)
+        # The relay returns mempool status as an int (1=SUCCESS, 2=PENDING,
+        # 3=FAILED) plus a status_name string.  Check the name — comparing
+        # the int to "FAILED" would never match and a failed broadcast
+        # would be recorded as submitted.
         status = res.get("status", "")
-        if status == "FAILED":
+        status_name = res.get("status_name", "")
+        if status_name == "FAILED" or status == 3:
             raise chia_relay.RelayError(
                 f"relay broadcast FAILED: {res.get('error', res)!r}")
+        # Fail closed on bundle-identity mismatch. The bundle's txid is
+        # deterministically sha256 of its serialized bytes — we compute it
+        # locally and require BOTH the relay's expected_txid (sha256 of the
+        # bytes the relay received) and the peer mempool ack txid to equal
+        # it. Any divergence means the pipeline saw a different bundle
+        # than the one we signed; recording success would be wrong, so we
+        # raise before anything is recorded or any velocity consumed.
+        # A missing expected_txid is also a refusal: the documented
+        # contract always returns it.
+        local_txid = hashlib.sha256(bytes.fromhex(bundle_hex)).hexdigest()
+        expected_txid = res.get("expected_txid")
+        if not expected_txid or expected_txid != local_txid:
+            raise chia_relay.RelayError(
+                f"relay expected_txid {expected_txid!r} != locally computed "
+                f"bundle txid {local_txid[:16]}… — refusing")
+        if res.get("txid") != local_txid:
+            raise chia_relay.RelayError(
+                f"relay peer-ack txid {res.get('txid')!r} != locally computed "
+                f"bundle txid {local_txid[:16]}… — refusing")
         # txid here is the mempool ack; the stable ledger reference is the
         # created coin id (first CREATE_COIN output).
         coin_id = None
+        spent_coin_id = selected[0]["coin_id"]
         for c in selected[:1]:
             # Recompute the expected created coin id for the destination
-            # output: sha256(parent || puzzle_hash || amount).
+            # output: sha256(parent || puzzle_hash || amount), where the
+            # parent is the SPENT coin's own id (c["coin_id"]) — not the
+            # spent coin's parent_coin_info.
             cid = chia_sign.coin_id(
-                bytes.fromhex(c["parent_coin_info"]),
+                bytes.fromhex(c["coin_id"]),
                 dest_ph, amount)
             coin_id = cid.hex()
             break
-        return {"submitted": True, "tx_hash": res.get("txid"),
-                "coin_id": coin_id, "from": puzzle_hashes[0],
-                "mempool_status": status}
+        # "from" is the bech32m address of our change/index-0 puzzle hash
+        # (txch1… on testnet11, xch1… on mainnet) — not raw puzzle-hash hex.
+        hrp = prefix[:-1] if prefix.endswith("1") else prefix
+        from_addr = chia_sign.address_for_puzzle_hash(
+            bytes.fromhex(puzzle_hashes[0]), hrp)
+        out = {"submitted": True, "tx_hash": res.get("txid"),
+               "coin_id": coin_id, "from": from_addr,
+               "mempool_status": status_name or status}
+        # Opt-in on-chain confirmation (chia.confirm_spends): poll the
+        # spent coin until spent_height is set. Default off — the mempool
+        # ack above is the recorded result; confirmation is a stronger
+        # claim that blocks up to the relay timeout.
+        if self.chia_cfg.get("confirm_spends"):
+            conf = chia_relay.wait_for_confirmation(rpc, spent_coin_id)
+            out["confirmed_height"] = conf.get("spent_height")
+        return out
 
     def _execute_chia_spend_via_sage(self, params: dict) -> dict:
         """Build, sign, and submit an approved XCH transfer via Sage RPC.
@@ -538,7 +648,7 @@ class Daemon:
             raise chia.SageError(
                 "mainnet submission refused for chia-mainnet — needs the "
                 "separately-authorized mainnet_submit_enabled flag (§10.14-17)")
-        if self.seed is None:
+        if self._signing_seed() is None:
             raise chia.SageError("no seed configured — cannot sign")
         if params.get("amount_wei") is not None:
             raise chia.SageError("wei on a Chia chain — schema misuse, refusing")
@@ -747,21 +857,25 @@ class Daemon:
     def rt_status(self, p: dict, muse_id: str) -> dict:
         out = {"ok": True, "queue_depth": len(self.queue),
                "seed_loaded": self.seed is not None,
+               "std_seed_loaded": self.std_seed is not None,
+               "key_derivation": self.key_derivation,
                "unresolved_executions": self.unresolved_executions()}
         balances = {}
-        if self.seed is not None:
+        signing_seed = (self.std_seed if self.key_derivation == "standard"
+                        else self.seed)
+        if signing_seed is not None:
             for chain, entry in (self.evm_cfg.get("chains") or {}).items():
                 if not entry.get("enabled") or not entry.get("rpc_url"):
                     continue
                 try:
-                    addr = kdf.derive_labeled(self.seed, chain, "default")["address"]
+                    addr = self._evm_key(chain)[1]
                     balances[chain] = {
                         "address": addr,
                         "balance_wei": evm.Rpc(entry["rpc_url"]).balance_wei(addr),
                     }
                 except Exception as e:  # best effort — a down RPC is not a daemon failure
                     balances[chain] = {"error": str(e)}
-        if (self.seed is not None and self.cfg.get("chia_enabled", True)
+        if (signing_seed is not None and self.cfg.get("chia_enabled", True)
                 and self.chia_cfg.get("sage_data_home")):
             try:
                 data_dir = os.path.join(self.chia_cfg["sage_data_home"],
@@ -785,9 +899,31 @@ class Daemon:
         return out
 
     def rt_addresses(self, p: dict, muse_id: str) -> dict:
-        if self.seed is None:
+        signing_seed = (self.std_seed if self.key_derivation == "standard"
+                        else self.seed)
+        if signing_seed is None:
             return {"ok": True, "addresses": {},
                     "note": "no seed configured — daemon serves policy/queue/ledger only"}
+        if self.key_derivation == "standard":
+            # One standard wallet: a single EVM account (same 0x address on
+            # every EVM chain, as with MetaMask) and one BLS master key whose
+            # testnet11/mainnet addresses differ only by bech32m HRP.
+            from spellbook import chia_sign, stdkeys
+            master_sk = stdkeys.chia_master_sk(self.std_seed)
+            evm_addr = stdkeys.evm_address(stdkeys.evm_privkey(self.std_seed))
+            per_label = {}
+            for chain in kdf.CHAINS:
+                if chain.startswith("chia-") and not self.cfg.get("chia_enabled", True):
+                    continue
+                if chain.startswith("evm-"):
+                    per_label[chain] = evm_addr
+                elif chain == "chia-testnet":
+                    per_label[chain] = chia_sign.receive_address(
+                        master_sk, 0, "testnet11")
+                elif chain == "chia-mainnet":
+                    per_label[chain] = chia_sign.receive_address(
+                        master_sk, 0, "mainnet")
+            return {"ok": True, "addresses": {"default": per_label}}
         out = {}
         for label in self.cfg.get("labels", ["default"]):
             per_label = {}

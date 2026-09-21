@@ -258,6 +258,17 @@ printf '%s' "$SEED_HEX" > "${PREFIX}/seed.key"
 chown "${SPELLBOOK_USER}:${SPELLBOOK_USER}" "${PREFIX}/seed.key"
 chmod 0600 "${PREFIX}/seed.key"
 
+# The standard-recovery wallet: a SECOND, independent 24-word BIP-39
+# mnemonic whose keys derive the way stock wallets do (Sage / MetaMask).
+# The daemon uses these keys (key_derivation=standard in the config below),
+# so the standard backup is the primary recovery path; the KDF seed above
+# stays as the daemon-native secondary. Its backup block prints ONCE in
+# §6 — the output below is never logged anywhere else.
+[ ! -e "${PREFIX}/std_seed.key" ] || fail "${PREFIX}/std_seed.key already exists — this machine looks installed. Refusing to overwrite; uninstall first."
+log "generating the standard-recovery wallet (once) ..."
+STD_BACKUP="$(runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" \
+  "${SRC}/scripts/make_standard_wallet.py" "${PREFIX}")"
+
 log "writing config ..."
 runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" - "$PREFIX" "$AGENT_UID" "$HUMAN_UID" "$CHIA_ENABLED" "$SAGE_BIN_FINAL" <<'EOF'
 import json, sys
@@ -265,6 +276,12 @@ prefix, agent_uid, human_uid, chia = sys.argv[1], int(sys.argv[2]), int(sys.argv
 sage_bin = sys.argv[5] or None
 cfg = {
     "seed_path": f"{prefix}/seed.key",
+    # Two-mnemonic wallet model (SPEC §2b). The daemon's LIVE keys are the
+    # standard-recovery set below (Sage/MetaMask-compatible); the KDF seed
+    # above stays as the daemon-native secondary recovery path. Existing
+    # installs carry no key_derivation flag and default to "kdf" — untouched.
+    "key_derivation": "standard",
+    "std_seed_path": f"{prefix}/std_seed.key",
     "labels": ["default"],
     "chia_enabled": chia,
     "sage_bin": sage_bin,   # verified sage CLI (§10 step 1); null with --no-sage
@@ -272,11 +289,20 @@ cfg = {
     # with XDG_DATA_HOME=sage_data_home, so Sage keeps its DB + mTLS certs
     # at <sage_data_home>/com.rigidnetwork.sage. mainnet spends stay gated
     # behind chia.mainnet_submit_enabled (separate authorization).
+    # Dual-network wallet: ONE seed serves testnet11 AND mainnet (the KDF
+    # derives per-chain keys; only the bech32m HRP differs, txch1 vs xch1),
+    # so the paper backup shown at install covers both networks. `network`
+    # is the active network — testnet11 default; flips to mainnet once
+    # mainnet is authorized. `relay_urls` holds one relay per network
+    # (each relay pins its own RELAY_NETWORK); empty string = unconfigured,
+    # and the daemon fails closed on a missing relay for the active net.
     "chia": ({
         "sage_bin": sage_bin,
         "sage_data_home": f"{prefix}/sage",
         "rpc_port": 9257,
         "fee_mojos": 0,
+        "network": "testnet11",
+        "relay_urls": {"testnet11": "", "mainnet": ""},
         "mainnet_submit_enabled": False,
     } if chia else {}),
     "socket_group": "spellbook-clients",
@@ -342,6 +368,22 @@ chmod 0600 "${PREFIX}/drill-status.json"
 # ---------------------------------------------------------------- 6. paper backup + next steps
 MNEMONIC="$(runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" -c \
   "from spellbook.seed import load_seed, mnemonic_from_entropy; print(mnemonic_from_entropy(load_seed('${PREFIX}/seed.key')))")"
+# Raw KDF keys: each imports directly into the matching stock wallet and
+# yields the same address the daemon uses (EVM -> MetaMask, BLS -> Sage).
+KDF_KEYS="$(runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" -c "
+from spellbook.seed import load_seed
+from spellbook import kdf, chia_sign
+seed = load_seed('${PREFIX}/seed.key')
+for chain in ('evm-4663', 'evm-46630'):
+    d = kdf.derive_labeled(seed, chain, 'default')
+    print('  ' + chain + ' raw EVM privkey -> MetaMask: ' + d['scalar_hex'])
+    print('    address ' + d['address'])
+for chain, net in (('chia-testnet', 'testnet11'), ('chia-mainnet', 'mainnet')):
+    d = kdf.derive_labeled(seed, chain, 'default')
+    sk = bytes.fromhex(d['scalar_hex'])
+    print('  ' + chain + ' raw BLS key -> Sage: ' + d['scalar_hex'])
+    print('    address ' + chia_sign.receive_address(sk, 0, net))
+")"
 
 cat <<EOF
 
@@ -349,12 +391,30 @@ cat <<EOF
 INSTALL COMPLETE — off-chain drill green.
 ================================================================
 
-PAPER BACKUP (§6) — write these 24 words down NOW, on paper, offline.
-They are shown ONCE and never again:
+PAPER BACKUP (§6) — write these down NOW, on paper, offline.
+Shown ONCE and never again. Two copies, two places.
+Anyone holding EITHER set below holds the wallet.
 
+----------------------------------------------------------------
+SET 1 — STANDARD RECOVERY (primary: these are the daemon's live keys).
+The 24 words AND the raw keys work in STOCK wallets.
+----------------------------------------------------------------
+
+${STD_BACKUP}
+
+----------------------------------------------------------------
+SET 2 — SPELLBOOK DAEMON SEED (custom KDF — secondary recovery).
+The 24 words recover through the Spellbook daemon ONLY (they do NOT
+work in Sage/MetaMask); the raw keys below import directly and yield
+the same addresses the daemon would use.
+----------------------------------------------------------------
+
+  24 WORDS (daemon recovery only):
     ${MNEMONIC}
 
-Two copies, two places. Anyone holding them holds the wallet.
+${KDF_KEYS}
+
+Verify after import: every address above must match what the wallet shows.
 
 AGENT WIRING (request token — shown ONCE):
     export SPELLBOOK_SOCKET=${SOCK_PATH}

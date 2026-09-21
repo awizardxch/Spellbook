@@ -5,6 +5,16 @@ spellbook.json (all fields optional unless noted):
   seed_path             : path to the 32-byte hex seed file (optional —
                           without it the daemon serves policy/queue/ledger
                           but derives no addresses)
+  key_derivation        : "kdf" | "standard" (default "kdf"). "kdf" keeps the
+                          daemon's custom labeled KDF (existing wallets
+                          untouched). "standard" makes the daemon derive and
+                          sign with the standards-based wallet instead: Chia
+                          via BLS key_gen (Sage-compatible), EVM via BIP-32
+                          m/44'/60'/0'/0/0 (MetaMask-compatible) — SPEC §2b.
+  std_seed_path         : path to the 64-byte BIP-39 seed file (128 hex
+                          chars, 0600). Required when key_derivation is
+                          "standard"; the daemon refuses to start in
+                          standard mode without it.
   labels                : [label, ...] to derive addresses for (default ["default"])
   chia_enabled          : bool (default true; false with install.sh --no-sage)
   sage_bin              : path to the verified sage CLI binary built from the
@@ -12,12 +22,21 @@ spellbook.json (all fields optional unless noted):
   chia                  : {"sage_bin": str, "sage_data_home": str,
                           "rpc_port": int (default 9257),
                           "fee_mojos": int (default 0),
+                          "network": "testnet11" | "mainnet" (default
+                              "testnet11" — the active network; the default
+                              flips to mainnet once mainnet is authorized),
+                          "relay_urls": {"testnet11": url, "mainnet": url}
+                              (per-network relay URLs; legacy flat
+                              "relay_url" still works as a fallback),
                           "mainnet_submit_enabled": bool (default false)} —
                           Sage wiring (§10 phase 1); {} or missing with
                           --no-sage. The daemon spawns `sage rpc start` with
                           XDG_DATA_HOME=sage_data_home when the RPC port is
                           silent; Sage keeps its DB + mTLS certs at
                           <sage_data_home>/com.rigidnetwork.sage.
+                          One seed serves both networks: the KDF derives
+                          per-chain keys and only the bech32m HRP differs
+                          (txch1 vs xch1), so the paper backup covers both.
   socket_group          : Unix group allowed to connect to the socket (optional —
                           without it the socket is 0700, daemon user only)
   allowed_request_uids  : [uid, ...] allowed to use the request token (optional —

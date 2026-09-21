@@ -15,8 +15,19 @@ It NEVER receives seeds, private keys, or mnemonics.
 API (from docs/chia-relay.md):
   GET  /v1/status              -> {ok, network, peak_height, peers, ...}
   POST /v1/coins               {puzzle_hashes: [hex...]} -> {coins: [...]}
-  POST /v1/broadcast           {spend_bundle_hex} -> {ok, txid, status}
-  GET  /v1/coin/{coin_id}      -> {coin_id, spent_height, created_height}
+  POST /v1/broadcast           {spend_bundle: hex}
+                               -> {ok, txid, expected_txid, status,
+                                   status_name, error}
+  GET  /v1/coin/{coin_id}      -> {ok, coin: {coin_id, spent_height,
+                                             created_height, ...}}
+                               (HTTP 404 {"ok": False, "error": ...} when the
+                               coin is not known yet)
+
+Mempool status is the Chia mempool-inclusion int (1=SUCCESS, 2=PENDING,
+3=FAILED); status_name is its string form. `expected_txid` is the
+relay-computed sha256 of the bundle bytes it received — the daemon
+compares it against its own locally computed bundle txid and fails
+closed on any mismatch.
 
 Fail-closed: any transport error, non-2xx status, or schema mismatch
 raises RelayError. Nothing is retried blindly.
@@ -146,27 +157,32 @@ class RelayRpc:
             raise RelayError(f"/v1/coins gave no coins list: {out!r}")
         return coins
 
-    def broadcast(self, spend_bundle_hex: str) -> dict:
+    def broadcast(self, spend_bundle: str) -> dict:
         """POST /v1/broadcast — submit a signed spend bundle.
 
-        spend_bundle_hex: hex of the serialized SpendBundle (built and
-        signed locally via chia_sign.py).
-        Returns {ok, txid, status} where status is the mempool inclusion
-        string (SUCCESS/PENDING/FAILED).
+        spend_bundle: hex of the serialized SpendBundle (built and
+        signed locally via chia_sign.py). Sent as {"spend_bundle": hex}
+        per the documented contract.
+        Returns {ok, txid, expected_txid, status, status_name, error}
+        where status is the mempool inclusion int (1=SUCCESS, 2=PENDING,
+        3=FAILED) and status_name is its string form. `expected_txid` is
+        the relay's sha256 of the bundle bytes it received.
         """
-        if not isinstance(spend_bundle_hex, str) or not spend_bundle_hex:
-            raise RelayError("spend_bundle_hex must be a non-empty hex string")
+        if not isinstance(spend_bundle, str) or not spend_bundle:
+            raise RelayError("spend_bundle must be a non-empty hex string")
         try:
-            raw = bytes.fromhex(spend_bundle_hex)
+            raw = bytes.fromhex(spend_bundle)
         except ValueError:
-            raise RelayError("spend_bundle_hex is not valid hex")
+            raise RelayError("spend_bundle is not valid hex")
         if len(raw) > 5 * 1024 * 1024:
             raise RelayError(
                 f"spend bundle too large ({len(raw)} > 5MB)")
         # Fail fast on obvious key-material smuggling: the relay also
         # rejects, but we never even send.
+        # Documented field name is `spend_bundle`; the relay tolerates the
+        # legacy `spend_bundle_hex` alias but we send the documented shape.
         out = self._request("POST", "/v1/broadcast",
-                            {"spend_bundle_hex": spend_bundle_hex})
+                            {"spend_bundle": spend_bundle})
         if "txid" not in out:
             raise RelayError(f"/v1/broadcast gave no txid: {out!r}")
         return out
@@ -184,19 +200,48 @@ class RelayRpc:
 
 def wait_for_confirmation(rpc: RelayRpc, coin_id_hex: str,
                           timeout_s: int = 180,
-                          poll_s: int = 5) -> dict:
-    """Poll /v1/coin/{coin_id} until spent_height is set.
+                          poll_s: int = 5,
+                          created: bool = False) -> dict:
+    """Poll /v1/coin/{coin_id} until the spend is confirmed on-chain.
 
-    Used to track change coins after a broadcast. Fail-closed on timeout:
-    raises BroadcastUnknown (the spend left the machine; do not retry).
+    The relay returns {ok, coin: {...}} (HTTP 404 while the coin is not
+    known yet — e.g. a change coin whose creating spend has not been
+    included; tolerated during polling).
+
+    Confirmation semantics:
+      - created=False (default): the coin is one we SPENT; confirmed when
+        spent_height becomes non-None.
+      - created=True: the coin is one we CREATED (destination/change);
+        confirmed when the relay knows it at all (created_height set).
+
+    Returns the coin dict. Fail-closed on timeout: raises BroadcastUnknown
+    (the spend left the machine; do not retry blindly). Non-404 relay
+    errors raise immediately.
     """
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        info = rpc.coin(coin_id_hex)
-        if info.get("spent_height") is not None:
-            return info
+        try:
+            info = rpc.coin(coin_id_hex)
+        except RelayError as e:
+            if "HTTP 404" not in str(e):
+                raise
+            # Coin not known yet — the spend may not be included. Keep
+            # polling; the timeout stays the fail-closed backstop.
+            time.sleep(poll_s)
+            continue
+        # Tolerate a legacy flat shape; the documented one nests under
+        # "coin".
+        coin = info.get("coin", info)
+        if not isinstance(coin, dict):
+            raise RelayError(
+                f"/v1/coin/{coin_id_hex[:16]}… bad coin shape: {info!r}")
+        if created:
+            if coin.get("created_height") is not None:
+                return coin
+        elif coin.get("spent_height") is not None:
+            return coin
         time.sleep(poll_s)
     raise BroadcastUnknown(
         coin_id_hex,
-        f"broadcast accepted but coin {coin_id_hex[:16]}… not spent within "
-        f"{timeout_s}s — confirmation unknown; do not retry blindly")
+        f"broadcast accepted but coin {coin_id_hex[:16]}… not confirmed "
+        f"within {timeout_s}s — confirmation unknown; do not retry blindly")

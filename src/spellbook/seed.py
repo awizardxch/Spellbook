@@ -33,6 +33,11 @@ def _wordlist() -> list[str]:
     return _WORDLIST
 
 
+def bip39_wordlist() -> list[str]:
+    """The 2048-word BIP-39 English wordlist (public accessor)."""
+    return _wordlist()
+
+
 def load_seed(path: str) -> bytes:
     """Load the 32-byte seed from a daemon-user-owned, mode-0600 file.
 
@@ -51,6 +56,27 @@ def load_seed(path: str) -> bytes:
         raise ValueError("seed file is not hex")
     if len(seed) != 32:
         raise ValueError("reject: seed must be exactly 32 bytes")
+    return seed
+
+
+def load_std_seed(path: str) -> bytes:
+    """Load the 64-byte BIP-39 seed (standard recovery, SPEC §2b).
+
+    The file holds 128 hex chars (whitespace tolerated), mode 0600,
+    daemon-user-owned. Fail-closed on permissions, length, or encoding —
+    same contract as load_seed.
+    """
+    st = os.stat(path)
+    if st.st_mode & 0o077:
+        raise PermissionError(f"std seed file {path} is not 0600 — refusing to load")
+    with open(path) as f:
+        text = f.read().strip()
+    try:
+        seed = bytes.fromhex(text)
+    except ValueError:
+        raise ValueError("std seed file is not hex")
+    if len(seed) != 64:
+        raise ValueError("reject: std seed must be exactly 64 bytes")
     return seed
 
 
