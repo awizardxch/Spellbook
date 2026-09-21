@@ -337,3 +337,125 @@ class TestTokenProvider:
     def test_empty_token_without_provider_rejected(self):
         with pytest.raises(RelayError):
             RelayRpc("https://relay.example.com")
+
+
+class TestCoinIdsValidation:
+    def setup_method(self):
+        self.r = RelayRpc("https://relay.example.com", "a" * 32)
+
+    def test_not_a_list(self):
+        with pytest.raises(RelayError):
+            self.r.coin_ids("not-a-list")
+
+    def test_empty(self):
+        with pytest.raises(RelayError):
+            self.r.coin_ids([])
+
+    def test_too_many(self):
+        with pytest.raises(RelayError):
+            self.r.coin_ids(["ab" * 32] * 51)
+
+    def test_bad_id_length(self):
+        with pytest.raises(RelayError):
+            self.r.coin_ids(["ab" * 16])
+
+    def test_bad_id_hex(self):
+        with pytest.raises(RelayError):
+            self.r.coin_ids(["zz" * 32])
+
+    def test_non_string_id(self):
+        with pytest.raises(RelayError):
+            self.r.coin_ids([12345])
+
+
+class TestCoinIdsShape:
+    """POST /v1/coin_ids request/response contract."""
+
+    def test_sends_documented_body_and_returns_split(self):
+        r = RelayRpc("https://relay.example.com", "a" * 32)
+        captured = {}
+        cid = "ab" * 32
+
+        def fake_request(method, path, body=None):
+            captured["method"] = method
+            captured["path"] = path
+            captured["body"] = body
+            return {"ok": True,
+                    "coins": [{"coin_id": cid, "amount_mojos": 2_000_000}],
+                    "not_found": ["ff" * 32]}
+
+        r._request = fake_request
+        out = r.coin_ids([cid])
+        assert captured["method"] == "POST"
+        assert captured["path"] == "/v1/coin_ids"
+        assert captured["body"] == {"coin_ids": [cid]}
+        assert out["coins"][0]["coin_id"] == cid
+        assert out["not_found"] == ["ff" * 32]
+
+    def test_bad_response_shape_rejected(self):
+        r = RelayRpc("https://relay.example.com", "a" * 32)
+        r._request = lambda *a, **k: {"ok": True, "coins": []}  # no not_found
+        with pytest.raises(RelayError):
+            r.coin_ids(["ab" * 32])
+        r._request = lambda *a, **k: {"ok": True}  # neither list
+        with pytest.raises(RelayError):
+            r.coin_ids(["ab" * 32])
+
+
+class TestBroadcastStatusValidation:
+    def setup_method(self):
+        self.r = RelayRpc("https://relay.example.com", "a" * 32)
+
+    def test_short_txid(self):
+        with pytest.raises(RelayError):
+            self.r.broadcast_status("ab" * 16)
+
+    def test_bad_txid_hex(self):
+        with pytest.raises(RelayError):
+            self.r.broadcast_status("zz" * 32)
+
+    def test_non_string(self):
+        with pytest.raises(RelayError):
+            self.r.broadcast_status(12345)
+
+
+class TestBroadcastStatusShape:
+    """GET /v1/broadcasts/{txid} request/response contract."""
+
+    def test_returns_record(self):
+        r = RelayRpc("https://relay.example.com", "a" * 32)
+        captured = {}
+        txid = "ab" * 32
+        record = {"txid": txid, "status": 1, "status_name": "SUCCESS",
+                  "error": None, "coin_spends": 2, "time": 1700000000}
+
+        def fake_request(method, path, body=None):
+            captured["method"] = method
+            captured["path"] = path
+            return {"ok": True, "broadcast": record}
+
+        r._request = fake_request
+        out = r.broadcast_status(txid)
+        assert captured["method"] == "GET"
+        assert captured["path"] == f"/v1/broadcasts/{txid}"
+        assert out == record
+
+    def test_bad_shape_rejected(self):
+        r = RelayRpc("https://relay.example.com", "a" * 32)
+        r._request = lambda *a, **k: {"ok": True}  # no broadcast key
+        with pytest.raises(RelayError):
+            r.broadcast_status("ab" * 32)
+
+    def test_404_propagates_for_caller(self):
+        """An unseen txid is a 404 RelayError — the caller decides
+        whether that means 'never submitted here' vs. 'wrong relay'."""
+        r = RelayRpc("https://relay.example.com", "a" * 32)
+
+        def fake_request(method, path, body=None):
+            raise RelayError(
+                f"relay GET {path} -> HTTP 404: "
+                '{"ok": false, "error": "txid not seen in broadcast log"}')
+
+        r._request = fake_request
+        with pytest.raises(RelayError, match="HTTP 404"):
+            r.broadcast_status("ab" * 32)

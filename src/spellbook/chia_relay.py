@@ -15,6 +15,8 @@ It NEVER receives seeds, private keys, or mnemonics.
 API (from docs/chia-relay.md):
   GET  /v1/status              -> {ok, network, peak_height, peers, ...}
   POST /v1/coins               {puzzle_hashes: [hex...]} -> {coins: [...]}
+  POST /v1/coin_ids            {coin_ids: [hex...]}
+                               -> {ok, coins: [...], not_found: [hex...]}
   POST /v1/broadcast           {spend_bundle: hex}
                                -> {ok, txid, expected_txid, status,
                                    status_name, error}
@@ -22,6 +24,10 @@ API (from docs/chia-relay.md):
                                              created_height, ...}}
                                (HTTP 404 {"ok": False, "error": ...} when the
                                coin is not known yet)
+  GET  /v1/broadcasts          -> {ok, broadcasts: [...]}
+  GET  /v1/broadcasts/{txid}   -> {ok, broadcast: {txid, status,
+                                                   status_name, error, ...}}
+                               (HTTP 404 when the relay never saw the txid)
 
 Mempool status is the Chia mempool-inclusion int (1=SUCCESS, 2=PENDING,
 3=FAILED); status_name is its string form. `expected_txid` is the
@@ -270,6 +276,55 @@ class RelayRpc:
         except ValueError:
             raise RelayError(f"bad coin id hex: {coin_id_hex!r}")
         return self._request("GET", f"/v1/coin/{coin_id_hex}")
+
+    def coin_ids(self, coin_id_hexes: list) -> dict:
+        """POST /v1/coin_ids — batch coin-state lookup (Sage get_coins_by_ids).
+
+        Returns {"coins": [...], "not_found": [hex...]}. Coins come back
+        in request order; unknown ids land in "not_found" (not an error).
+        """
+        if not isinstance(coin_id_hexes, list):
+            raise RelayError("coin_ids must be a list")
+        if not (1 <= len(coin_id_hexes) <= 50):
+            raise RelayError(
+                f"coin_ids must be a list of 1..50 items "
+                f"(got {len(coin_id_hexes)})")
+        for cid in coin_id_hexes:
+            if not isinstance(cid, str) or len(cid) != 64:
+                raise RelayError(f"bad coin id: {cid!r}")
+            try:
+                bytes.fromhex(cid)
+            except ValueError:
+                raise RelayError(f"bad coin id hex: {cid!r}")
+        out = self._request("POST", "/v1/coin_ids",
+                            {"coin_ids": coin_id_hexes})
+        coins = out.get("coins")
+        not_found = out.get("not_found")
+        if not isinstance(coins, list) or not isinstance(not_found, list):
+            raise RelayError(f"/v1/coin_ids gave bad shape: {out!r}")
+        return {"coins": coins, "not_found": not_found}
+
+    def broadcast_status(self, txid_hex: str) -> dict:
+        """GET /v1/broadcasts/{txid} — what did the relay see for this txid?
+
+        Returns the broadcast record {txid, status, status_name, error,
+        coin_spends, time}. Raises RelayError (with HTTP 404) when the
+        relay has never seen the txid — meaning it was NOT submitted
+        through this relay instance.
+        """
+        if not isinstance(txid_hex, str) or len(txid_hex) != 64:
+            raise RelayError(f"bad txid: {txid_hex!r}")
+        try:
+            txid_hex = txid_hex.strip().lower()
+            bytes.fromhex(txid_hex)
+        except ValueError:
+            raise RelayError(f"bad txid hex: {txid_hex!r}")
+        out = self._request("GET", f"/v1/broadcasts/{txid_hex}")
+        record = out.get("broadcast")
+        if not isinstance(record, dict):
+            raise RelayError(
+                f"/v1/broadcasts/{txid_hex[:16]}… gave bad shape: {out!r}")
+        return record
 
 
 def wait_for_confirmation(rpc: RelayRpc, coin_id_hex: str,

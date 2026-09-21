@@ -13,12 +13,28 @@ Endpoints (all require ``Authorization: Bearer <token>``):
 
 * ``GET  /v1/status``     — relay health: network, peers, peak, uptime
 * ``POST /v1/coins``      — {puzzle_hashes: [hex32...]} (1..50) -> {coins: [...]}
+* ``POST /v1/coin_ids``   — {coin_ids: [hex32...]} (1..50) -> {coins, not_found}
 * ``POST /v1/broadcast``  — {spend_bundle: hex} -> {txid, status, error}
 * ``GET  /v1/coin/{id}``  — single coin state (confirmation tracking)
 * ``GET  /v1/broadcasts`` — recent broadcast log (drill reconciliation)
+* ``GET  /v1/broadcasts/{txid}`` — broadcast record for one txid (404 if unseen)
 
 Fail-closed: malformed input -> 400, no peers -> 503, bad token -> 401,
 rate exceeded -> 429.  Nothing is retried blindly.
+
+What the relay deliberately does NOT expose (Sage features that need
+key custody, wallet databases, or local signing):
+
+* key management (get_keys, import_key, login/logout) — never leaves Sage
+* anything signing (send_*, sign_coin_spends, sign_message_*, make_offer,
+  take_offer, clawback, DID/option issuance) — the daemon builds and
+  signs locally (chia_sign.py) and the relay only broadcasts
+* wallet-DB reads (get_cats, get_nfts, get_transactions, derivations) —
+  Sage's local database; the relay is a peer client, not a wallet
+
+The relay covers Sage's *network* surface: coin states by puzzle hash or
+coin id, mempool submission with an ack, transaction lookup by txid from
+the broadcast log, and chain status/peak.
 """
 
 from __future__ import annotations
@@ -48,7 +64,7 @@ from streamable import (
 
 log = logging.getLogger("relay.server")
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 # --- limits ---------------------------------------------------------------
 MAX_PUZZLE_HASHES = 50
@@ -292,6 +308,54 @@ async def handle_coin(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "coin": coin_to_json(cs)})
 
 
+async def handle_coin_ids(request: web.Request) -> web.Response:
+    state: State = request.app["state"]
+    body = await _read_json(request)
+    if not isinstance(body, dict):
+        return err("body must be a JSON object")
+    bad = check_forbidden_fields(body)
+    if bad:
+        return err(f"field {bad!r} not accepted: this relay never handles key material")
+    if set(body.keys()) != {"coin_ids"}:
+        return err("body must be exactly {coin_ids: [...]}")
+    ids = body["coin_ids"]
+    if not isinstance(ids, list) or not (1 <= len(ids) <= MAX_PUZZLE_HASHES):
+        return err(f"coin_ids must be a list of 1..{MAX_PUZZLE_HASHES} items")
+    try:
+        id_bytes = [_hex32(i, f"coin_ids[{n}]") for n, i in enumerate(ids)]
+    except StreamableError as e:
+        return err(str(e))
+
+    try:
+        states = await state.manager.get_coins_by_ids(id_bytes)
+    except NoPeersError:
+        return err("no peers connected", 503)
+    except (PeerError, StreamableError, asyncio.TimeoutError) as e:
+        log.warning("get_coins_by_ids failed: %s", e)
+        return err(f"peer request failed: {type(e).__name__}", 502)
+
+    found = {cs.coin.coin_id().hex(): coin_to_json(cs) for cs in states}
+    coins = [found[cid] for cid in (b.hex() for b in id_bytes) if cid in found]
+    not_found = [cid for cid in (b.hex() for b in id_bytes) if cid not in found]
+    return web.json_response({"ok": True, "coins": coins, "not_found": not_found})
+
+
+async def handle_broadcast_tx(request: web.Request) -> web.Response:
+    """Broadcast record for one txid — the relay-side answer to
+    Sage's ``get_transaction``: what mempool ack did we see for this
+    bundle, and did we ever see it at all."""
+    state: State = request.app["state"]
+    raw = request.match_info["txid"]
+    try:
+        txid = _hex32(raw, "txid").hex()
+    except StreamableError as e:
+        return err(str(e))
+    for record in state.broadcast_log:
+        if record["txid"] == txid:
+            return web.json_response({"ok": True, "broadcast": record})
+    return err("txid not seen in broadcast log", 404)
+
+
 async def handle_broadcast(request: web.Request) -> web.Response:
     state: State = request.app["state"]
     body = await _read_json(request)
@@ -410,9 +474,11 @@ def create_app(config: Optional[dict] = None) -> web.Application:
     app.router.add_get("/health", handle_health)
     app.router.add_get("/v1/status", handle_status)
     app.router.add_post("/v1/coins", handle_coins)
+    app.router.add_post("/v1/coin_ids", handle_coin_ids)
     app.router.add_post("/v1/broadcast", handle_broadcast)
     app.router.add_get("/v1/coin/{coin_id}", handle_coin)
     app.router.add_get("/v1/broadcasts", handle_broadcasts)
+    app.router.add_get("/v1/broadcasts/{txid}", handle_broadcast_tx)
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
     return app

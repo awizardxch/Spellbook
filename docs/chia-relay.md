@@ -86,8 +86,11 @@ on the daemon side; nothing is ever retried blindly.
 |---|---|---|---|
 | GET | `/v1/status` | — | `{ok, network, peak_height, peers, watched_addresses, uptime_s}` |
 | POST | `/v1/coins` | `{puzzle_hashes: [hex…]}` (≤ 50) | `{coins: [{coin_id, parent_coin_info, puzzle_hash, amount_mojos, created_height, spent_height\|null}]}` |
+| POST | `/v1/coin_ids` | `{coin_ids: [hex…]}` (≤ 50) | `{coins: [...], not_found: [hex…]}` — batch coin lookup (Sage `get_coins_by_ids`) |
 | POST | `/v1/broadcast` | `{spend_bundle_hex}` | `{ok, txid, status}` — status is the mempool inclusion ack |
 | GET | `/v1/coin/{coin_id}` | — | `{coin_id, spent_height\|null, created_height}` — confirmation tracking |
+| GET | `/v1/broadcasts` | — | `{broadcasts: [...]}` — recent broadcast log |
+| GET | `/v1/broadcasts/{txid}` | — | `{broadcast: {txid, status, status_name, error, coin_spends, time}}` — txid lookup (Sage `get_transaction` equivalent); 404 when the relay never saw the txid |
 
 ### 3.1 Semantics
 
@@ -106,6 +109,42 @@ on the daemon side; nothing is ever retried blindly.
   is set (change) or a target height passes (payment confirmed). The
   daemon's existing `BroadcastUnknown` semantics apply unchanged: a
   spend that left the machine is never re-submitted blindly.
+- **`/v1/coin_ids`** — batch version of the above (≤ 50 ids, request
+  order preserved). Unknown ids are reported in `not_found`, not an
+  error — the relay equivalent of Sage's `get_coins_by_ids`, and the
+  call that reconciles multi-input spends (e.g. both wallet inputs of a
+  drill tx) in one round trip.
+- **`/v1/broadcasts/{txid}`** — the relay's answer to Sage's
+  `get_transaction`: what mempool ack did this relay see for the txid
+  (status, status_name, error, coin_spends, time)? A 404 means this
+  relay instance never saw the bundle — which itself is reconciliation
+  signal (never submitted here ≠ never submitted anywhere; the daemon
+  treats it as unknown fate, never as proof of non-broadcast).
+
+### 3.1a What the relay deliberately does NOT expose
+
+Audited against the pinned Sage v0.13.1 RPC surface
+(`sage-api` request types). Everything below stays on the daemon/Sage
+side — keys and wallet databases never cross the HTTPS boundary:
+
+- **Key custody** — `login`/`logout`, `get_keys`, `import_key`,
+  keychain access. Never leaves Sage.
+- **Signing** — `send_xch`/`send_cat`/`transfer_nfts`, `bulk_*`,
+  `multi_send`, `issue_cat`, NFT/DID/option minting, `make_offer`,
+  `take_offer`, `cancel_offer`, `combine`, `split`, `sign_coin_spends`,
+  `sign_message_*`, clawback finalization. The daemon builds and signs
+  locally (`chia_sign.py`); the relay only broadcasts the finished
+  bundle and structurally validates it.
+- **Wallet-DB reads** — `get_cats`, `get_nfts`, `get_dids`,
+  `get_transactions`, `get_pending_transactions`, derivations,
+  `check_address`. These come from Sage's local wallet database, not
+  from chain data — the relay is a peer client, not a wallet.
+
+What the relay **does** cover is Sage's entire *network* surface:
+coins by puzzle hash, coins by id (single + batch), mempool submission
+with an ack, txid lookup over the broadcast log, and chain
+status/peak. Nothing else in the pinned Sage request list is reachable
+from a pure network client.
 
 ### 3.2 Security
 

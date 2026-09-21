@@ -528,16 +528,27 @@ class PeerManager:
             wanted = set(puzzle_hashes)
             return [cs for cs in self._coins.values() if cs.coin.puzzle_hash in wanted]
 
+    async def get_coins_by_ids(self, coin_ids: List[bytes]) -> List[CoinState]:
+        """Subscribe + fetch current CoinStates for the given coin ids.
+
+        Coin ids already in the cache are returned without touching a
+        peer; only the missing ones go out over the wire.  Unknown ids
+        are simply absent from the result (no error) — the caller
+        reconciles found vs. requested.
+        """
+        wanted = list(coin_ids)
+        async with self._cache_lock:
+            missing = [cid for cid in wanted if cid not in self._coins]
+        if missing:
+            peer = self._pick_peer()
+            states = await peer.register_for_coin_updates(missing, 0)
+            await self._ingest_coin_states(states)
+        async with self._cache_lock:
+            return [self._coins[cid] for cid in wanted if cid in self._coins]
+
     async def get_coin(self, coin_id: bytes) -> Optional[CoinState]:
-        async with self._cache_lock:
-            hit = self._coins.get(coin_id)
-        if hit is not None:
-            return hit
-        peer = self._pick_peer()
-        states = await peer.register_for_coin_updates([coin_id], 0)
-        await self._ingest_coin_states(states)
-        async with self._cache_lock:
-            return self._coins.get(coin_id)
+        hits = await self.get_coins_by_ids([coin_id])
+        return hits[0] if hits else None
 
     async def broadcast(self, spend_bundle: bytes) -> dict:
         peer = self._pick_peer()

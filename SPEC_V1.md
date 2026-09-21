@@ -381,6 +381,20 @@ covers both networks:
   cases (queued→approved transfer, auto-approved dust, per-spend/velocity
   denials, live balances, ledger sighash) validate the exact wallet the
   agent will keep using.
+- **Relay v1.1 read surface (2026-09-21):** audited against the pinned
+  Sage v0.13.1 RPC (`sage-api` request types) for everything a pure
+  network client can legitimately offer. Additions: `POST /v1/coin_ids`
+  (batch coin-state lookup, Sage `get_coins_by_ids` — reconciles
+  multi-input spends in one round trip) and `GET /v1/broadcasts/{txid}`
+  (txid lookup over the broadcast log, Sage `get_transaction`
+  equivalent; a 404 means this relay never saw the bundle — unknown fate,
+  never proof of non-broadcast). Deliberately absent, permanently:
+  key custody (`login`, `get_keys`, `import_key`), all signing and spend
+  construction (`send_*`, `sign_coin_spends`, `sign_message_*`,
+  `make_offer`/`take_offer`, minting, clawback), and wallet-DB reads
+  (`get_cats`, `get_nfts`, `get_transactions`, derivations) — keys and
+  wallet databases never cross the HTTPS boundary; the daemon builds
+  and signs locally and the relay only broadcasts.
 
 ### 3b. Chia asset model — XCH, CATs, NFTs (added 2026-09-21, per Speechless)
 
