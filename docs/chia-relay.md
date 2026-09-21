@@ -58,8 +58,8 @@ sources plus a live handshake:
 
 ## 2. Decision
 
-Run Chia network access as a second Railway service —
-**`spellbook-chia-relay`** — next to `forge-responder`. The daemon keeps
+Run Chia network access as a second Railway service — live at
+**`https://spellbook-production.up.railway.app`** — next to `forge-responder`. The daemon keeps
 keys and BLS signing local; the relay only ever sees public addresses /
 puzzle hashes and already-signed spend bundles. Same trust model as
 pointing a wallet at any public full node.
@@ -168,7 +168,7 @@ Config:
 
 ```json
 "chia": {
-  "relay_url": "https://spellbook-chia-relay.up.railway.app",
+  "relay_url": "https://spellbook-production.up.railway.app",
   "relay_token": "env:SPELLBOOK_RELAY_TOKEN"
 }
 ```

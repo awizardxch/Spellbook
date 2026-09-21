@@ -67,21 +67,30 @@ class AgentClient(_BaseClient):
     def request_spend(self, *, chain: str, destination: str, asset: str = "native",
                       amount_wei: int | None = None,
                       amount_mojos: int | None = None,
+                      amount_lamports: int | None = None,
                       purpose: str = "") -> dict:
         """Ask the daemon for a plain-transfer spend.
 
         Returns the daemon's decision: {"decision": "approved"|"queued"|"denied",
         ...}. "queued" includes a queue_id for the human to review; "denied"
         includes a reason. v1 is plain transfers only — no contract calls.
+
+        Exactly one amount kwarg: amount_wei (EVM), amount_mojos (Chia), or
+        amount_lamports (Solana).
         """
         params: dict = {"chain": chain, "destination": destination,
                         "asset": asset, "purpose": purpose}
-        if (amount_wei is None) == (amount_mojos is None):
-            raise ValueError("pass exactly one of amount_wei / amount_mojos")
+        amounts = sum(x is not None for x in
+                      (amount_wei, amount_mojos, amount_lamports))
+        if amounts != 1:
+            raise ValueError(
+                "pass exactly one of amount_wei / amount_mojos / amount_lamports")
         if amount_wei is not None:
             params["amount_wei"] = amount_wei
-        else:
+        elif amount_mojos is not None:
             params["amount_mojos"] = amount_mojos
+        else:
+            params["amount_lamports"] = amount_lamports
         return self._call("request_spend", params)
 
     def queue(self) -> list[dict]:

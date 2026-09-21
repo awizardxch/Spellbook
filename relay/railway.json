@@ -1,12 +1,1 @@
-{
-  "$schema": "https://railway.app/railway.schema.json",
-  "build": {
-    "builder": "DOCKERFILE",
-    "dockerfilePath": "Dockerfile"
-  },
-  "deploy": {
-    "restartPolicyMaxRetries": 10,
-    "restartPolicyType": "ON_FAILURE",
-    "startCommand": "python server.py"
-  }
-}
+{"$schema":"https://railway.app/railway.schema.json","build":{"builder":"DOCKERFILE","dockerfilePath":"Dockerfile"},"deploy":{"healthcheckPath":"/health","healthcheckTimeout":30,"restartPolicyMaxRetries":10,"restartPolicyType":"ON_FAILURE","startCommand":"python server.py"}}

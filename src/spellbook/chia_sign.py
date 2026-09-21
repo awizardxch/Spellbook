@@ -532,10 +532,15 @@ def _ser_option(b: bytes | None) -> bytes:
 
 
 def coin_spend_bytes(coin: tuple, puzzle_reveal: bytes, solution: bytes) -> bytes:
-    """Streamable CoinSpend: coin(parent, puzzle_hash, amount) + puzzle_reveal + solution."""
+    """Streamable CoinSpend: coin(parent, puzzle_hash, amount) + puzzle_reveal + solution.
+
+    Consensus framing: Program fields are BARE self-delimiting CLVM with NO
+    length prefix (verified against chia-protocol's Program::parse). A u32
+    prefix here makes peers fail parsing and kill the connection.
+    """
     parent, puzzle_hash, amount = coin
     return (parent + puzzle_hash + _ser_u64(amount)
-            + _ser_bytes(puzzle_reveal) + _ser_bytes(solution))
+            + puzzle_reveal + solution)
 
 
 def spend_bundle_bytes(coin_spends: list, aggregated_signature: bytes) -> bytes:

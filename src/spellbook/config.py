@@ -39,6 +39,19 @@ spellbook.json (all fields optional unless noted):
                           (txch1 vs xch1), so the paper backup covers both.
   socket_group          : Unix group allowed to connect to the socket (optional —
                           without it the socket is 0700, daemon user only)
+  solana                : {"network": "devnet" | "mainnet-beta" (default
+                          "devnet" — the active network),
+                          "rpc_url": str (optional — defaults to the
+                          network's public HTTPS endpoint),
+                          "mainnet_submit_enabled": bool (default false)} —
+                          direct JSON-RPC to a public node (no relay; the
+                          endpoint sees public addresses, balances, and
+                          already-signed transactions only). A spend for the
+                          non-active network is refused before any policy
+                          evaluation (fail closed); spends for
+                          solana-mainnet additionally need
+                          mainnet_submit_enabled. Amounts are lamports
+                          (asset "SOL").
   allowed_request_uids  : [uid, ...] allowed to use the request token (optional —
                           when set, the kernel peer UID is ENFORCED, not observed)
   allowed_approve_uids  : [uid, ...] allowed to use the approve token (optional)

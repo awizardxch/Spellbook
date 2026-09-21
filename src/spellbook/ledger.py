@@ -40,7 +40,10 @@ class Ledger:
         row = canonical_row(time.time(), requester_muse, request_bytes, sighash, decision)
         # Canonical JSON: sorted keys, no whitespace (matches vectors/ convention).
         line = json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
-        with open(self.path, "a") as f:
+        # Create mode 0600 at birth (os.open mode applies only on O_CREAT) so a
+        # fresh ledger never starts life group/world-readable under a lax umask.
+        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a") as f:
             f.write(line)
             f.flush()
             os.fsync(f.fileno())

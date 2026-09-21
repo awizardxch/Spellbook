@@ -155,6 +155,12 @@ export default function Home() {
           <span className="pill pending">
             <span className="dot" /> EVM mainnet — gated, later
           </span>
+          <span className="pill">
+            <span className="dot" /> Solana devnet — live now
+          </span>
+          <span className="pill pending">
+            <span className="dot" /> Solana mainnet-beta — gated, later
+          </span>
         </div>
         <div className="grid2" style={{ marginTop: 26 }}>
           <div className="glass">
@@ -175,6 +181,17 @@ export default function Home() {
               Standard secp256k1 keys, plain transfers on testnets (e.g.
               Robinhood Chain testnet). Mainnet is gated the same way as
               Chia mainnet.
+            </p>
+          </div>
+          <div className="glass">
+            <span className="icon">◎</span>
+            <h3>Solana</h3>
+            <p>
+              Ed25519 keys, plain SOL transfers. Devnet is the default —
+              the daemon talks to public HTTPS JSON-RPC directly, so there
+              is no relay to deploy; mainnet-beta stays gated behind
+              explicit human authorization. Backs up as base58 for Phantom
+              import.
             </p>
           </div>
         </div>

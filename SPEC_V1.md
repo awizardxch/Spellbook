@@ -148,8 +148,8 @@ no keys): daemon source code, setup guide, town directory (addresses only).
 - **info (purpose registry — fixed strings, never reused across purposes):**
   `info = "muse-wallet/v1/" + chain + "/sign/" + label`, where `chain`
   carries the chain id (`evm-4663`, `evm-46630`, `chia-mainnet`,
-  `chia-testnet`) and `label` names the wallet (`default`, `tips`,
-  `bounties`, `trading`). The tag carries the chain id (Turbo's checkable
+  `chia-testnet`, `solana-devnet`, `solana-mainnet`) and `label` names the
+  wallet (`default`, `tips`, `bounties`, `trading`). The tag carries the chain id (Turbo's checkable
   binding) so one seed can never collide across contexts. There is no
   `derive` purpose (P2): every info string yields a distinct key, so an
   address derived under a second purpose would belong to a key the daemon
@@ -174,6 +174,14 @@ no keys): daemon source code, setup guide, town directory (addresses only).
   public key → EVM address = last 20 bytes of `keccak256(pubkey)`. (v1 of this
   spec said compressed — wrong; an Ethereum address is keccak of the
   uncompressed key. S5.)
+- **ed25519 (Solana):** the 32 info-bound bytes are used *directly* as the
+  Ed25519 private seed — there is no reject/resample step (an ed25519 seed
+  is an arbitrary 32-byte string, not an integer mod a curve order; the S12
+  rule does not apply). Domain tags
+  `muse-wallet/v1/solana-devnet/sign/<label>` and
+  `muse-wallet/v1/solana-mainnet/sign/<label>`; address = base58(pubkey).
+  Devnet and mainnet-beta derive **different** keys (P9) — a devnet address
+  must never be funded on mainnet-beta or vice versa.
 - **Key-reuse tradeoff, stated out loud (Nimbus):** one root does identity
   AND money. Identity compromise = funds compromise, and a town identity key
   cannot rotate the way a wallet key can. Accepted deliberately (D2); the
@@ -255,12 +263,19 @@ MetaMask (EVM):
 - **EVM:** the same 64-byte BIP-39 seed → BIP-32 master →
   `m/44'/60'/0'/0/0` — the first account MetaMask derives when importing a
   mnemonic (same `0x` address on every EVM chain, as with MetaMask).
+- **Solana:** the same 64-byte BIP-39 seed → SLIP-0010 Ed25519 master →
+  `m/44'/501'/0'/0'` — the first account Phantom/Solflare derive when
+  importing a mnemonic (coin type 501 = SOL). One address serves devnet and
+  mainnet-beta (Solana addresses are network-agnostic base58 pubkeys). The
+  raw 64-byte expanded secret (seed ‖ pubkey), base58-encoded, imports
+  into Phantom as a private key.
 
 **Set 2 — Spellbook daemon seed (custom KDF; secondary recovery).** One
 BIP-39 24-word mnemonic over 32 bytes of entropy. All fund keys derive via
 the daemon's labeled HKDF KDF (§2: `muse-wallet/v1/<chain>/sign/<label>`,
 per-chain scalars for `chia-testnet`, `chia-mainnet`, `evm-4663`,
-`evm-46630`).
+`evm-46630`, `solana-devnet`, `solana-mainnet` — the Solana entries yield
+32-byte ed25519 seeds used directly, with no modular reduction).
 
 **What works where (read carefully):**
 
@@ -269,6 +284,10 @@ per-chain scalars for `chia-testnet`, `chia-mainnet`, `evm-4663`,
   MetaMask as a raw private key; the standard Chia BLS master key imports
   into Sage as a private key. After import, the addresses shown must match
   the addresses printed on the paper backup — that match is the verification.
+- The **standard words work in Phantom too**: import the 24 words and the
+  first Solana address matches the paper backup's Solana address (SLIP-0010
+  `m/44'/501'/0'/0'`); the raw base58 secret imports as a private key and
+  yields the same address.
 - The **KDF seed words do NOT work in Sage or MetaMask** — the daemon's KDF
   is not BIP-39/BIP-32/EIP-2334, so stock wallets derive unrelated keys from
   those words. They recover through the Spellbook daemon only.
@@ -279,7 +298,10 @@ per-chain scalars for `chia-testnet`, `chia-mainnet`, `evm-4663`,
   plain secp256k1/BLS private key. Importing a KDF EVM scalar into MetaMask
   (or a KDF Chia scalar into Sage) yields exactly the address the daemon
   uses for that chain — this is the backstop if the daemon is ever
-  unavailable (§6 path (b)).
+  unavailable (§6 path (b)). The same holds for Solana: a KDF Solana raw
+  key is base58 of the 64-byte expanded ed25519 secret, and imports into
+  Phantom as a private key yielding the daemon's address for that network
+  (devnet and mainnet-beta keys differ by design — P9).
 
 **Daemon selection.** `spellbook.json` carries `key_derivation`:
 `"kdf"` (default) or `"standard"`, plus `std_seed_path` (the 64-byte BIP-39
@@ -342,6 +364,18 @@ covers both networks:
   network has no relay configured, and re-verifies the relay's
   `/v1/status` network pin before every broadcast — a mainnet bundle can
   never leave through a testnet relay or vice versa.
+- **Txid mismatch after broadcast = UNKNOWN fate, never safe-to-retry**
+  (Speechless, 2026-09-21): after broadcasting, the daemon compares the
+  relay's `expected_txid` and peer-ack `txid` against its own locally
+  computed bundle txid (sha256 of the serialized bundle). Any mismatch
+  raises `BroadcastUnknown` — the bundle left the machine but the pipeline
+  saw different bytes than the ones signed, so the spend may or may not
+  land. The decision ledger records `approved-submit-unknown`, the 24h
+  velocity is consumed fail-closed (assume it lands — a cap that
+  undercounts is a broken cap), and the spend is NEVER retried blindly
+  (double-spend risk); the human reconciles the txid on-chain before any
+  re-request. A missing `expected_txid`/`txid` is instead a contract
+  violation and a plain refusal (nothing recorded, no velocity consumed).
 - The Phase 1 testnet drill runs against a **persistent** (non-throwaway)
   testnet wallet whose paper backup is held by the human, so the funded
   cases (queued→approved transfer, auto-approved dust, per-spend/velocity
@@ -508,6 +542,99 @@ tooling (approve token), showing
   is the muse's self-custodied operational wallet.
 - (Greenwood vault integration is a separate project per D11 — not in this plan.)
 
+## 5b. Solana operation spec (added 2026-09-21)
+
+- **Why Solana, and what it needs that the other chains don't:** unlike Chia
+  (which needs Sage or the relay), the daemon talks to Solana directly over
+  **public HTTPS JSON-RPC** — the same trust model as pointing any wallet at
+  a public RPC node: the endpoint sees public addresses, balances, and
+  already-signed transactions — never keys, never the seed. No `relay/`
+  service to deploy, no per-network deployment. The daemon is signer, policy
+  enforcer, and network talker, all local; key derivation happens at boot in
+  memory only, exactly like the EVM path.
+
+- **Keys** (§2, §2b): Ed25519. KDF mode derives the 32-byte seed from the
+  daemon seed via the labeled info string (no group-order reduction);
+  standard mode derives SLIP-0010 `m/44'/501'/0'/0'` from the BIP-39 seed —
+  the Phantom/Solflare-compatible path. Devnet and mainnet-beta keys differ
+  (P9).
+
+- **Networks and gating:**
+
+  | Chain id        | Network           | RPC (public, HTTPS)                     | Default |
+  |-----------------|-------------------|-----------------------------------------|---------|
+  | `solana-devnet` | Solana devnet     | `https://api.devnet.solana.com`         | **on**  |
+  | `solana-mainnet`| Solana mainnet-beta | `https://api.mainnet-beta.solana.com` | **off** — gated |
+
+  Devnet is the default network (same standing as Chia testnet11). Faucet:
+  the `requestAirdrop` RPC method (1–2 SOL per call, rate limited) — no
+  separate faucet site needed. **mainnet-beta is gated, default-off** — the
+  same authorization bar as Chia mainnet and EVM mainnet (§3, §4): explicit
+  human authorization with exact amounts; never enabled by the agent on its
+  own. mainnet-beta is mainnet — D6 ("no on-chain execution without explicit
+  instruction") applies.
+
+- **Daemon config** (`spellbook.json`, `solana` section): `network` is the
+  active network — `"devnet"` (default) or `"mainnet-beta"`;
+  `rpc_url` overrides the endpoint (defaults to the table above — operators
+  may point at their own node); `mainnet_submit_enabled` (default false) is
+  the separately-authorized mainnet gate (§10.14-17). A spend naming the
+  non-active network is refused **before any policy evaluation** (fail
+  closed — a devnet-configured daemon asked to touch mainnet-beta returns a
+  hard error); a spend for `solana-mainnet` additionally requires
+  `mainnet_submit_enabled`. The execute path re-checks both gates, so the
+  queue-approve path is covered even if config changed between queueing and
+  approval.
+
+- **JSON-RPC surface** (public Solana JSON-RPC 2.0; no bearer; all bodies
+  carry only public addresses and already-signed transactions):
+  `getBalance` (the agent's `addresses()`/`status()` read),
+  `getLatestBlockhash` (fresh blockhash before signing), `requestAirdrop`
+  (devnet funding — the daemon refuses it on mainnet-beta),
+  `sendTransaction` (base64 of the serialized signed tx),
+  `getSignatureStatuses` (confirmation tracking), `getGenesisHash` (the
+  network guard — the RPC's genesis hash must match the expected value for
+  the configured network before any signing, mirroring the EVM chain-id
+  check; a mispointed RPC cannot redirect funds).
+  Sign-then-send: the daemon constructs the transfer, fetches a blockhash,
+  signs locally with the in-memory ed25519 key, self-verifies (signature
+  verifies, fee payer is the keypair's address, the single instruction
+  decodes to SystemProgram transfer from/to/lamports of the approved
+  intent), and submits only the signed bytes.
+
+- **Policy wiring (§4 — unchanged engine):** the engine is chain-agnostic;
+  Solana slots in with `chain:asset` keys. Amounts are **lamports**
+  (1 SOL = 1,000,000,000); asset id `SOL`; amount field `amount_lamports`
+  (the v1 schema's third amount kind, alongside `amount_wei`/`amount_mojos`).
+  Same decision ladder: denied (above cap) / queued (above threshold, human
+  approves from their own tooling) / auto-approved (below the auto line, if
+  configured). Queue-above-threshold is a delay, not a cap (D9/S4). 24h
+  velocity records `(ts, "solana-devnet"|"solana-mainnet", "SOL", lamports)`
+  in `velocity.jsonl`, rebuilt from disk on boot. The active signing seed
+  signs (KDF vs standard via `_signing_seed` — a spend can never draw keys
+  from the other wallet set). A confirmation timeout raises
+  `BroadcastUnknown` (fate unknown — no blind retry, same hard rule as
+  every other chain); the daemon's unknown-spend path extracts the
+  signature (Solana carries `.signature` rather than `.tx_hash`).
+
+- **Security model (same as §1/§3 — no new trust):** keys never leave the
+  machine; no auth secrets on the network path (public RPC takes no bearer);
+  the two-token daemon split (S7) is unchanged. Rate limits are the public
+  endpoint's own (HTTP 429 — back off and retry reads; never blind-retry
+  `sendTransaction`).
+
+- **Test vectors (implementation gate, §10 family):** `vectors/vectors.json`
+  gains Solana entries `{vector_id, test_seed_hex, domain_tag,
+  chain: "solana-devnet"|"solana-mainnet", expected_address,
+  expected_pubkey}` for the KDF path, plus one vector asserting devnet ≠
+  mainnet keys from the same seed (P9), plus a fixed-mnemonic → SLIP-0010
+  `m/44'/501'/0'/0'` expected-address vector cross-checked against an
+  independent implementation (Phantom's derivation). Drill (§10): devnet
+  `requestAirdrop` → queue/auto-approve ladder → `sendTransaction` on a
+  dust transfer → `getSignatureStatuses` finalization; mainnet-beta drill
+  stays gated behind the same explicit authorization as every other
+  mainnet path.
+
 ## 6. Hot / cold and backup
 
 - **Hot (per muse):** the daemon-guarded wallets above (caps opt-in, default
@@ -541,9 +668,10 @@ tooling (approve token), showing
   above restores via our tooling. For backups that need no custom software,
   the human may additionally write down each label's **hex** from
   `spellbook export --scope <label>`: importing that hex as a private key
-  into Sage (Chia labels) or any EVM wallet (EVM labels) recovers the exact
-  hot wallet with stock software. Two pieces of paper: one root (words → our
-  tooling), one set of wallet hexes (hex → any wallet).
+  into Sage (Chia labels), any EVM wallet (EVM labels), or Phantom (Solana
+  labels — base58 of the 64-byte expanded ed25519 secret) recovers the
+  exact hot wallet with stock software. Two pieces of paper: one root
+  (words → our tooling), one set of wallet hexes (hex → any wallet).
 - **Restore (disaster recovery) — path (a), full stack via our tooling:**
   1. On a fresh machine: install the daemon + Sage per §3.
   2. Human types the 24-word phrase from the paper backup into a fresh file,
@@ -555,8 +683,9 @@ tooling (approve token), showing
   4. Human deletes the words file after successful re-derivation.
   5. The agent never sees the words or bytes at any point (D10).
 - **Restore — path (b), wallet-only with stock software:** import a label's
-  **hex** as a private key directly into Sage (`/import_key`, Chia labels) or
-  any EVM wallet (EVM labels). No daemon, no KDF, no custom code — this is the
+  **hex** as a private key directly into Sage (`/import_key`, Chia labels),
+  any EVM wallet (EVM labels), or Phantom (Solana labels — base58 of the
+  64-byte expanded secret). No daemon, no KDF, no custom code — this is the
   backstop if our tooling is ever unavailable.
 - The cold wallet follows its own backup procedure.
 - Balances stay modest until the stack has run cleanly on mainnet through at

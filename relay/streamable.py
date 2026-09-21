@@ -140,6 +140,93 @@ def dec_bool(r: _Reader) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# CLVM programs — consensus framing (NO length prefix)
+# ---------------------------------------------------------------------------
+# Chia's Streamable encodes Program fields as bare, self-delimiting CLVM —
+# there is no uint32 length prefix (this matches chia-blockchain's Python
+# Streamable and the Rust chia-protocol/clvmr `Program::parse`, which reads
+# via `serialized_length_from_bytes`).  A previous revision of this file
+# wrongly length-prefixed programs; peers then misparsed the bundle and
+# dropped the connection, so this framing is load-bearing.
+#
+# Atom encoding (mirrors clvmr serialized_length_from_bytes):
+#   0xff         cons cell: 0xff <first> <rest>
+#   0xfe         back-reference (with encoded path) — REJECTED by this gate;
+#                our encoder never emits them and the relay fails closed on
+#                exotic encodings rather than forwarding them.
+#   0x80 |<=0x7f single-byte atom (0x80 is also nil)
+#   else         size-prefixed atom: the leading 1-bits of the first byte
+#                count the size-field bytes; the low bits plus following
+#                bytes are the big-endian blob size.
+
+def _clvm_atom_total(buf: bytes, pos: int) -> int:
+    """Total bytes (size prefix + blob) of the atom starting at pos."""
+    if pos >= len(buf):
+        raise StreamableError("truncated CLVM program")
+    b0 = buf[pos]
+    if b0 == 0xFF:
+        raise StreamableError("0xff starts a cons cell, not an atom")
+    if b0 == 0xFE:
+        raise StreamableError("CLVM back-references are not accepted")
+    if b0 == 0x80 or b0 < 0x80:
+        return 1
+    n = 0
+    b = b0
+    while b & 0x80:
+        n += 1
+        b = (b << 1) & 0xFF
+    if n > 8 or pos + n > len(buf):
+        raise StreamableError("truncated CLVM atom size prefix")
+    size = b0 & (0xFF >> n)
+    for i in range(1, n):
+        size = (size << 8) | buf[pos + i]
+    total = n + size
+    if pos + total > len(buf):
+        raise StreamableError("truncated CLVM atom blob")
+    return total
+
+
+def clvm_program_length(buf: bytes, pos: int = 0) -> int:
+    """Length in bytes of the one serialized CLVM program starting at pos."""
+    start = pos
+    pending = 1
+    while pending > 0:
+        if pos >= len(buf):
+            raise StreamableError("truncated CLVM program")
+        b0 = buf[pos]
+        if b0 == 0xFF:
+            pos += 1
+            pending += 1  # two children replace the one expected sexp
+        elif b0 == 0xFE:
+            raise StreamableError("CLVM back-references are not accepted")
+        elif b0 == 0x80 or b0 < 0x80:
+            pos += 1
+            pending -= 1
+        else:
+            pos += _clvm_atom_total(buf, pos)
+            pending -= 1
+    return pos - start
+
+
+def enc_program(b: bytes) -> bytes:
+    """Encode a Program with consensus framing: raw CLVM, no length prefix."""
+    if not isinstance(b, (bytes, bytearray)):
+        raise StreamableError(f"expected bytes, got {type(b).__name__}")
+    raw = bytes(b)
+    if clvm_program_length(raw, 0) != len(raw):
+        raise StreamableError("program bytes contain trailing garbage")
+    return raw
+
+
+def dec_program(r: _Reader, max_len: int = 2**32 - 1) -> bytes:
+    """Decode one Program with consensus framing (self-delimiting CLVM)."""
+    length = clvm_program_length(r._data, r._pos)
+    if length > max_len:
+        raise StreamableError(f"CLVM program length {length} exceeds limit {max_len}")
+    return r.read(length)
+
+
+# ---------------------------------------------------------------------------
 # str / bytes / fixed bytes
 # ---------------------------------------------------------------------------
 
@@ -297,18 +384,18 @@ def dec_optional_str(r: _Reader) -> Optional[str]:
 @dataclass(frozen=True)
 class CoinSpend:
     coin: Coin
-    puzzle_reveal: bytes  # Program, length-prefixed
-    solution: bytes       # Program, length-prefixed
+    puzzle_reveal: bytes  # Program, consensus framing (bare CLVM, NO length prefix)
+    solution: bytes       # Program, consensus framing (bare CLVM, NO length prefix)
 
 
 def enc_coin_spend(cs: CoinSpend) -> bytes:
-    return enc_coin(cs.coin) + enc_bytes_var(cs.puzzle_reveal) + enc_bytes_var(cs.solution)
+    return enc_coin(cs.coin) + enc_program(cs.puzzle_reveal) + enc_program(cs.solution)
 
 
 def dec_coin_spend(r: _Reader, max_program: int) -> CoinSpend:
     coin = dec_coin(r)
-    reveal = dec_bytes_var(r, max_program)
-    solution = dec_bytes_var(r, max_program)
+    reveal = dec_program(r, max_program)
+    solution = dec_program(r, max_program)
     return CoinSpend(coin, reveal, solution)
 
 

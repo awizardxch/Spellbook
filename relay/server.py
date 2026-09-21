@@ -155,6 +155,18 @@ async def security_middleware(request: web.Request, handler):
     if request.method == "OPTIONS":
         return _cors_response(web.Response(status=204), cfg)
 
+    # Unauthenticated liveness probe for the platform health check.
+    # Deliberately non-sensitive: no peer, balance, or config details.
+    if request.path == "/health" and request.method == "GET":
+        try:
+            resp = await handler(request)
+        except web.HTTPException:
+            raise
+        except Exception:  # noqa: BLE001
+            log.exception("unhandled error")
+            resp = err("internal error", 500)
+        return _cors_response(resp, cfg)
+
     # --- bearer auth (constant-time) ------------------------------------
     auth = request.headers.get("Authorization", "")
     scheme, _, presented = auth.partition(" ")
@@ -196,6 +208,15 @@ def _cors_response(resp: web.Response, cfg: dict) -> web.Response:
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
+async def handle_health(request: web.Request) -> web.Response:
+    """Unauthenticated liveness probe (platform health checks).
+
+    Non-sensitive by design: just enough for Railway/K8s to know the
+    process is alive.  Everything operational stays behind bearer auth.
+    """
+    return web.json_response({"ok": True, "service": "spellbook-chia-relay"})
+
 
 async def handle_status(request: web.Request) -> web.Response:
     state: State = request.app["state"]
@@ -386,6 +407,7 @@ def create_app(config: Optional[dict] = None) -> web.Application:
     cfg = config or load_config()
     app = web.Application(middlewares=[security_middleware], client_max_size=MAX_BODY_BYTES)
     app["state"] = State(cfg)
+    app.router.add_get("/health", handle_health)
     app.router.add_get("/v1/status", handle_status)
     app.router.add_post("/v1/coins", handle_coins)
     app.router.add_post("/v1/broadcast", handle_broadcast)

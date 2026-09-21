@@ -31,7 +31,8 @@ import subprocess
 import sys
 import time
 
-from spellbook import chia, evm, kdf, sign as spellsign
+from spellbook import chia, chia_relay, evm, kdf, sign as spellsign
+from spellbook import solana as solana_mod
 from spellbook.config import load_config, load_policy
 from spellbook.ledger import Ledger
 from spellbook.policy import evaluate
@@ -49,7 +50,7 @@ APPROVE_ROUTES = {
 # v1 transfer schema — plain transfers only (S13). Unknown fields are
 # rejected; anything shaped like a contract call is denied, not coerced.
 SPEND_FIELDS = {"chain", "destination", "asset", "purpose"}
-AMOUNT_FIELDS = {"amount_mojos", "amount_wei"}
+AMOUNT_FIELDS = {"amount_mojos", "amount_wei", "amount_lamports"}
 
 VELOCITY_WINDOW_S = 24 * 3600
 
@@ -117,6 +118,13 @@ class Daemon:
         # sole talker to Sage RPC; `sage rpc start` must be running against
         # the same data dir (the installer/drill starts it).
         self.chia_cfg = self.cfg.get("chia", {})
+        # Solana wiring (SPEC §10 Solana): {"network": "devnet" |
+        # "mainnet-beta" (default "devnet"), "rpc_url": str (optional —
+        # defaults to the network's public endpoint),
+        # "mainnet_submit_enabled": bool (default false)}. Direct HTTPS
+        # JSON-RPC to a public node — no relay to deploy; the endpoint sees
+        # public addresses, balances, and already-signed transactions only.
+        self.solana_cfg = self.cfg.get("solana", {})
         # The Sage RPC child process, if we started one. The daemon owns the
         # whole Chia execution path (O10): it spawns `sage rpc start` against
         # the configured data home and talks to it over local mTLS. If Sage
@@ -262,8 +270,94 @@ class Daemon:
         d = kdf.derive_labeled(self.seed, chain, "default")
         return bytes.fromhex(d["scalar_hex"])
 
+    def _solana_keypair(self, chain):
+        """solders Keypair for a Solana chain under the configured derivation.
+
+        KDF mode: the custom labeled seed (32 bytes from the daemon seed via
+        solana.custom_seed — same domain-separation family as §2, no
+        modular reduction since ed25519 seeds are arbitrary bytes).
+        Standard mode: SLIP-0010 m/44'/501'/0'/0' of the BIP-39 seed — the
+        key Phantom/Solflare derives from the same mnemonic.
+        Spends use the active signing seed only: in standard mode the 64-byte
+        BIP-39 seed, in KDF mode the 32-byte daemon seed — never the other
+        wallet set, and a missing active seed fails closed even when the
+        other set is present (via _signing_seed).
+        """
+        seed = self._signing_seed()
+        if seed is None:
+            raise solana_mod.SolanaError("no seed configured — cannot sign")
+        if self.key_derivation == "standard":
+            return solana_mod.standard_keypair(seed)
+        return solana_mod.custom_keypair(seed, chain, "default")
+
+    def _active_solana_chain(self) -> str:
+        """The chain id the configured Solana network maps to.
+
+        solana.network defaults to "devnet"; "mainnet-beta" is the only
+        other accepted value. Anything else is a config error and fails
+        closed here rather than pointing at an unintended network.
+        """
+        net = self.solana_cfg.get("network", "devnet")
+        if net == "devnet":
+            return "solana-devnet"
+        if net == "mainnet-beta":
+            return "solana-mainnet"
+        raise solana_mod.SolanaError(
+            f"bad solana.network {net!r} — expected 'devnet' or 'mainnet-beta'")
+
+    def _execute_solana_spend(self, params: dict) -> dict:
+        """Build, sign, and broadcast an approved native SOL transfer (§10 Solana).
+
+        Flow: network-mismatch check against the configured active network
+        (fail closed), mainnet gate (§10.14-17), active-seed key derivation,
+        genesis-hash check on the RPC (a mispointed RPC cannot redirect
+        funds), fresh blockhash, local sign with pre-broadcast
+        self-verification, sendTransaction, and confirmation tracking.
+
+        Returns {"submitted": True, "tx_hash": <signature>, "slot": ...}.
+        Raises solana_mod.SolanaError on any failure — a spend that never
+        left the machine records nothing and consumes no velocity; a
+        confirmation timeout raises BroadcastUnknown (fate unknown — the
+        human reconciles the signature on-chain before any re-request).
+        Spends use the "default" label's key (v1).
+        """
+        chain = params["chain"]
+        if chain not in solana_mod.NETWORKS:
+            raise solana_mod.SolanaError(f"unknown Solana chain {chain!r}")
+        active = self._active_solana_chain()
+        if chain != active:
+            raise solana_mod.SolanaError(
+                f"network mismatch: daemon is configured for {active}, "
+                f"spend requested {chain} — refusing")
+        info = solana_mod.NETWORKS[chain]
+        if not info["testnet"] and not self.solana_cfg.get("mainnet_submit_enabled"):
+            raise solana_mod.SolanaError(
+                "mainnet submission refused for solana-mainnet — needs the "
+                "separately-authorized mainnet_submit_enabled flag (§10.14-17)")
+        if params.get("amount_wei") is not None or params.get("amount_mojos") is not None:
+            raise solana_mod.SolanaError(
+                "wei/mojos on a Solana chain — schema misuse, refusing")
+        dest = params.get("destination", "")
+        amount = params["amount_lamports"]
+        kp = self._solana_keypair(chain)
+        rpc = solana_mod.SolanaRpc(
+            chain, url=self.solana_cfg.get("rpc_url") or info["url"])
+        built = solana_mod.sign_transfer(kp, dest, amount, rpc)
+        # The approved intent, re-checked against the built tx's decoded
+        # fields. Explicit checks, not assert: fail-closed under -O too.
+        if (built["from"] != solana_mod.address_of_keypair(kp)
+                or built["to"] != dest
+                or built["lamports"] != amount):
+            raise solana_mod.SolanaError(
+                "signed tx intent mismatch — approved intent violated, "
+                "refusing to broadcast")
+        sig = rpc.send_transaction(built["raw_b64"])
+        st = rpc.wait_signature(sig)
+        return {"submitted": True, "tx_hash": sig,
+                "slot": st.get("slot"), "from": built["from"]}
+
     def _execute_spend(self, params: dict) -> dict:
-        """Build, sign, and broadcast an approved EVM transfer (SPEC §10).
+        """Build, sign, and broadcast an approved transfer (SPEC §10).
 
         Returns {"submitted": True, "tx_hash": ..., "block": ...} on success,
         {"submitted": False, "note": ...} when no chain is configured, and
@@ -274,6 +368,8 @@ class Daemon:
         chain = params["chain"]
         if chain in chia.NETWORKS:
             return self._execute_chia_spend(params)
+        if chain in solana_mod.NETWORKS:
+            return self._execute_solana_spend(params)
         if chain not in evm.CHAINS:
             return {"submitted": False,
                     "note": f"chain submission not configured for {chain}"}
@@ -288,8 +384,8 @@ class Daemon:
                 "separately-authorized mainnet_submit_enabled flag (§10.14-17)")
         if self._signing_seed() is None:
             raise evm.EvmError("no seed configured — cannot sign")
-        if params.get("amount_mojos") is not None:
-            raise evm.EvmError("mojos on an EVM chain — schema misuse, refusing")
+        if params.get("amount_mojos") is not None or params.get("amount_lamports") is not None:
+            raise evm.EvmError("mojos/lamports on an EVM chain — schema misuse, refusing")
         dest = params.get("destination", "")
         if not evm.is_address(dest):
             raise evm.EvmError(f"bad destination address: {dest!r}")
@@ -463,9 +559,9 @@ class Daemon:
                 "separately-authorized mainnet_submit_enabled flag (§10.14-17)")
         if self._signing_seed() is None:
             raise chia_relay.RelayError("no seed configured — cannot sign")
-        if params.get("amount_wei") is not None:
+        if params.get("amount_wei") is not None or params.get("amount_lamports") is not None:
             raise chia_relay.RelayError(
-                "wei on a Chia chain — schema misuse, refusing")
+                "wei/lamports on a Chia chain — schema misuse, refusing")
         dest = params.get("destination", "")
         prefix = chia.PREFIXES[network]
         if not isinstance(dest, str) or not dest.startswith(prefix):
@@ -581,21 +677,37 @@ class Daemon:
         # deterministically sha256 of its serialized bytes — we compute it
         # locally and require BOTH the relay's expected_txid (sha256 of the
         # bytes the relay received) and the peer mempool ack txid to equal
-        # it. Any divergence means the pipeline saw a different bundle
-        # than the one we signed; recording success would be wrong, so we
-        # raise before anything is recorded or any velocity consumed.
-        # A missing expected_txid is also a refusal: the documented
-        # contract always returns it.
+        # it. A missing expected_txid/txid is a contract violation and a
+        # refusal (RelayError — nothing is recorded, no velocity consumed).
+        # A MISMATCH is different: the bundle left the machine but the
+        # pipeline saw different bytes than the ones we signed, so the
+        # spend's fate is UNKNOWN. Per Speechless (2026-09-21) a mismatch is
+        # never safe-to-retry — raise BroadcastUnknown so the daemon's
+        # unknown-spend path ledgers approved-submit-unknown and consumes
+        # velocity fail-closed (assume it lands; a cap that undercounts is
+        # a broken cap). The human reconciles the txid on-chain before any
+        # re-request; a blind retry could double-spend.
         local_txid = hashlib.sha256(bytes.fromhex(bundle_hex)).hexdigest()
         expected_txid = res.get("expected_txid")
-        if not expected_txid or expected_txid != local_txid:
+        if not expected_txid:
             raise chia_relay.RelayError(
+                "relay broadcast returned no expected_txid — refusing "
+                "(contract violation; bundle identity unverified)")
+        if expected_txid != local_txid:
+            raise chia_relay.BroadcastUnknown(
+                local_txid,
                 f"relay expected_txid {expected_txid!r} != locally computed "
-                f"bundle txid {local_txid[:16]}… — refusing")
-        if res.get("txid") != local_txid:
+                f"bundle txid {local_txid[:16]}… — fate unknown, do not retry")
+        txid = res.get("txid")
+        if not txid:
             raise chia_relay.RelayError(
-                f"relay peer-ack txid {res.get('txid')!r} != locally computed "
-                f"bundle txid {local_txid[:16]}… — refusing")
+                "relay broadcast returned no txid — refusing "
+                "(contract violation; bundle identity unverified)")
+        if txid != local_txid:
+            raise chia_relay.BroadcastUnknown(
+                local_txid,
+                f"relay peer-ack txid {txid!r} != locally computed "
+                f"bundle txid {local_txid[:16]}… — fate unknown, do not retry")
         # txid here is the mempool ack; the stable ledger reference is the
         # created coin id (first CREATE_COIN output).
         coin_id = None
@@ -650,8 +762,8 @@ class Daemon:
                 "separately-authorized mainnet_submit_enabled flag (§10.14-17)")
         if self._signing_seed() is None:
             raise chia.SageError("no seed configured — cannot sign")
-        if params.get("amount_wei") is not None:
-            raise chia.SageError("wei on a Chia chain — schema misuse, refusing")
+        if params.get("amount_wei") is not None or params.get("amount_lamports") is not None:
+            raise chia.SageError("wei/lamports on a Chia chain — schema misuse, refusing")
         dest = params.get("destination", "")
         prefix = chia.PREFIXES[network]
         if not isinstance(dest, str) or not dest.startswith(prefix):
@@ -699,7 +811,22 @@ class Daemon:
         if (not fields.issubset(SPEND_FIELDS | AMOUNT_FIELDS)
                 or "chain" not in p or len(amounts) != 1):
             return {"ok": False, "error": "schema violation: v1 is plain transfers only"}
-        amount = p.get("amount_mojos", p.get("amount_wei"))
+        # Solana network-mismatch is a hard error at request time: a
+        # devnet-configured daemon asked to touch mainnet-beta (or vice
+        # versa) refuses before any policy evaluation or queueing. The
+        # execute-time check in _execute_solana_spend is the second layer
+        # (it also guards the queue-approve path if config changed
+        # between queueing and approval).
+        if p["chain"] in solana_mod.NETWORKS:
+            try:
+                active = self._active_solana_chain()
+            except solana_mod.SolanaError as e:
+                return {"ok": False, "error": str(e)}
+            if p["chain"] != active:
+                return {"ok": False, "error":
+                        f"network mismatch: daemon is configured for {active}, "
+                        f"refusing {p['chain']}"}
+        amount = p.get("amount_mojos", p.get("amount_wei", p.get("amount_lamports")))
         if not isinstance(amount, int) or amount <= 0:
             return {"ok": False, "error": "amount must be a positive integer in base units"}
         # Note: contract-call-shaped requests never reach here — "calldata"/"data"
@@ -727,18 +854,23 @@ class Daemon:
         self.ledger.append(muse_id, canon, None, "executing")
         try:
             ex = self._execute_spend(p)
-        except (evm.BroadcastUnknown, chia.BroadcastUnknown) as e:
+        except (evm.BroadcastUnknown, chia.BroadcastUnknown,
+                chia_relay.BroadcastUnknown, solana_mod.BroadcastUnknown) as e:
             # The spend left the machine; its fate is unknown. Ledger the
             # reference as unresolved and consume velocity fail-closed
             # (assume it lands — a cap that undercounts is a broken cap).
             # The human reconciles the hash on-chain before re-requesting.
-            ref = getattr(e, "tx_hash", None) or getattr(e, "reference", None)
+            # Solana's BroadcastUnknown carries .signature instead of
+            # .tx_hash — check both before the generic .reference.
+            ref = (getattr(e, "tx_hash", None) or getattr(e, "signature", None)
+                   or getattr(e, "reference", None))
             self._record_velocity(p["chain"], asset, amount)
             self.ledger.append(muse_id, canon, ref,
                                "approved-submit-unknown:" + str(e))
             return {"ok": True, "decision": "approved-submit-unknown",
                     "tx_hash": ref, "note": str(e)}
-        except (evm.EvmError, chia.SageError) as e:
+        except (evm.EvmError, chia.SageError, chia_relay.RelayError,
+                solana_mod.SolanaError) as e:
             self.ledger.append(muse_id, canon, None,
                                "approved-submit-failed:" + str(e))
             return {"ok": False, "decision": "approved-submit-failed",
@@ -748,7 +880,7 @@ class Daemon:
             self.ledger.append(muse_id, canon, ex["tx_hash"], "approved")
             return {"ok": True, "decision": "approved",
                     "tx_hash": ex["tx_hash"],
-                    "block": ex.get("block", ex.get("tx_height"))}
+                    "block": ex.get("block", ex.get("tx_height", ex.get("slot")))}
         self.ledger.append(muse_id, canon, None, "approved")
         return {"ok": True, "decision": "approved", "note": ex["note"]}
 
@@ -762,7 +894,8 @@ class Daemon:
                 "chain": p.get("chain"),
                 "destination": p.get("destination"),
                 "asset": p.get("asset", "native"),
-                "amount": p.get("amount_mojos", p.get("amount_wei")),
+                "amount": p.get("amount_mojos",
+                                p.get("amount_wei", p.get("amount_lamports"))),
                 "purpose": p.get("purpose", ""),
                 "muse_id": item.get("muse_id"),
                 "queued_at": item.get("queued_at"),
@@ -780,7 +913,7 @@ class Daemon:
         self._save_queue()
         params = item["params"]
         asset = params.get("asset", "native")
-        amount = params.get("amount_mojos", params.get("amount_wei"))
+        amount = params.get("amount_mojos", params.get("amount_wei", params.get("amount_lamports")))
         canon = json.dumps(params, sort_keys=True).encode()
         # Same pre-execution intent line as the auto-approve path: the queue
         # item is already popped (one approval = one execution attempt), so
@@ -788,15 +921,18 @@ class Daemon:
         self.ledger.append(muse_id, canon, None, "executing")
         try:
             ex = self._execute_spend(params)
-        except (evm.BroadcastUnknown, chia.BroadcastUnknown) as e:
-            ref = getattr(e, "tx_hash", None) or getattr(e, "reference", None)
+        except (evm.BroadcastUnknown, chia.BroadcastUnknown,
+                chia_relay.BroadcastUnknown, solana_mod.BroadcastUnknown) as e:
+            ref = (getattr(e, "tx_hash", None) or getattr(e, "signature", None)
+                   or getattr(e, "reference", None))
             self._record_velocity(params["chain"], asset, amount)
             self.ledger.append(muse_id, canon, ref,
                                "approved-submit-unknown:" + str(e))
             return {"ok": True, "queue_id": qid, "tx_hash": ref,
                     "decision": "approved-submit-unknown",
                     "note": str(e)}
-        except (evm.EvmError, chia.SageError) as e:
+        except (evm.EvmError, chia.SageError, chia_relay.RelayError,
+                solana_mod.SolanaError) as e:
             # Approved but never executed: the human's approval is consumed,
             # the failure is ledgered, nothing is recorded as spent. The
             # agent reports it; the human re-requests if they still want it.
@@ -808,7 +944,7 @@ class Daemon:
             self.ledger.append(muse_id, canon, ex["tx_hash"], "approved-by-human")
             return {"ok": True, "queue_id": qid,
                     "tx_hash": ex["tx_hash"],
-                    "block": ex.get("block", ex.get("tx_height"))}
+                    "block": ex.get("block", ex.get("tx_height", ex.get("slot")))}
         self.ledger.append(muse_id, canon, None, "approved-by-human")
         return {"ok": True, "queue_id": qid, "note": ex["note"]}
 
@@ -895,6 +1031,28 @@ class Daemon:
                 }
             except Exception as e:  # best effort — Sage down is not a daemon failure
                 balances["chia-testnet"] = {"error": str(e)}
+        if signing_seed is not None:
+            # Solana: direct HTTPS JSON-RPC (no relay, no Sage). Devnet is
+            # the default active network; mainnet-beta requires the
+            # explicit flag (the gate is enforced at spend time — balances
+            # simply read the configured active network).
+            try:
+                active = self._active_solana_chain()
+            except Exception:
+                active = None
+            if active is not None:
+                try:
+                    info = solana_mod.NETWORKS[active]
+                    kp = self._solana_keypair(active)
+                    addr = solana_mod.address_of_keypair(kp)
+                    rpc = solana_mod.SolanaRpc(
+                        active, url=self.solana_cfg.get("rpc_url") or info["url"])
+                    balances[active] = {
+                        "address": addr,
+                        "balance_lamports": rpc.get_balance_lamports(addr),
+                    }
+                except Exception as e:  # best effort — a down RPC is not a daemon failure
+                    balances[active] = {"error": str(e)}
         out["balances"] = balances
         return out
 
@@ -923,6 +1081,14 @@ class Daemon:
                 elif chain == "chia-mainnet":
                     per_label[chain] = chia_sign.receive_address(
                         master_sk, 0, "mainnet")
+            # Solana standard path: SLIP-0010 m/44'/501'/0'/0' — the address
+            # Phantom/Solflare show on mnemonic import. Solana addresses
+            # are network-agnostic (base58 pubkey), so devnet and
+            # mainnet-beta share one address in standard mode.
+            sol_kp = solana_mod.standard_keypair(self.std_seed)
+            sol_addr = solana_mod.address_of_keypair(sol_kp)
+            per_label["solana-devnet"] = sol_addr
+            per_label["solana-mainnet"] = sol_addr
             return {"ok": True, "addresses": {"default": per_label}}
         out = {}
         for label in self.cfg.get("labels", ["default"]):
@@ -932,6 +1098,13 @@ class Daemon:
                     continue
                 d = kdf.derive_labeled(self.seed, chain, label)
                 per_label[chain] = d.get("address", d["pubkey_hex"])
+            # Solana is not in kdf.CHAINS (derive_labeled reduces mod a
+            # group order, which is invalid for ed25519) — derive
+            # per-network keys via the Solana module instead. Devnet and
+            # mainnet-beta keys differ by design (P9).
+            for schain in ("solana-devnet", "solana-mainnet"):
+                per_label[schain] = solana_mod.address_of_keypair(
+                    solana_mod.custom_keypair(self.seed, schain, label))
             out[label] = per_label
         return {"ok": True, "addresses": out}
 

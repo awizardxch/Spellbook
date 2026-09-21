@@ -230,3 +230,40 @@ class TestWaitForConfirmation:
         ])
         coin = chia_relay.wait_for_confirmation(rpc, self.CID, poll_s=0)
         assert coin["spent_height"] == 7
+
+
+class TestProxyEgress:
+    """RelayRpc honors https_proxy with no_proxy bypass (sandbox egress)."""
+
+    def _rpc(self, url):
+        return chia_relay.RelayRpc(url, "t" * 32, timeout=5)
+
+    def test_no_proxy_env_direct_connection(self, monkeypatch):
+        monkeypatch.delenv("https_proxy", raising=False)
+        monkeypatch.delenv("HTTPS_PROXY", raising=False)
+        monkeypatch.delenv("all_proxy", raising=False)
+        monkeypatch.delenv("ALL_PROXY", raising=False)
+        rpc = self._rpc("https://relay.example:8443")
+        conn = rpc._connection()
+        assert isinstance(conn, chia_relay.http.client.HTTPSConnection)
+        assert conn.host == "relay.example" and conn.port == 8443
+
+    def test_remote_host_tunnels_through_proxy(self, monkeypatch):
+        monkeypatch.setenv("https_proxy", "http://user:pw@proxy.internal:3128")
+        monkeypatch.setenv("no_proxy", "localhost,127.0.0.1")
+        rpc = self._rpc("https://spellbook-production.up.railway.app")
+        conn = rpc._connection()
+        # Connection targets the proxy...
+        assert conn.host == "proxy.internal" and conn.port == 3128
+        # ...with a CONNECT tunnel to the real relay host.
+        assert conn._tunnel_host == "spellbook-production.up.railway.app"
+        assert conn._tunnel_port == 443
+
+    def test_no_proxy_bypass_stays_direct(self, monkeypatch):
+        monkeypatch.setenv("https_proxy", "http://proxy.internal:3128")
+        monkeypatch.setenv("no_proxy", "localhost,127.0.0.1")
+        rpc = self._rpc("http://127.0.0.1:18789")
+        conn = rpc._connection()
+        assert isinstance(conn, chia_relay.http.client.HTTPConnection)
+        assert conn.host == "127.0.0.1" and conn.port == 18789
+        assert conn._tunnel_host is None

@@ -305,6 +305,17 @@ cfg = {
         "relay_urls": {"testnet11": "", "mainnet": ""},
         "mainnet_submit_enabled": False,
     } if chia else {}),
+    # Solana wiring (direct HTTPS JSON-RPC — no relay, no Sage needed):
+    # `network` is the active network — "devnet" default; "mainnet-beta" is
+    # gated behind solana.mainnet_submit_enabled (separate authorization,
+    # same bar as chia/evm mainnet). `rpc_url` empty = the default public
+    # endpoint for the active network. A spend naming the non-active network
+    # is refused before any policy evaluation.
+    "solana": {
+        "network": "devnet",
+        "rpc_url": "",
+        "mainnet_submit_enabled": False,
+    },
     "socket_group": "spellbook-clients",
     "musebook_signing_mode": "disabled",   # S1: inert until Speechless decides
     "allowed_request_uids": [agent_uid],
@@ -383,6 +394,14 @@ for chain, net in (('chia-testnet', 'testnet11'), ('chia-mainnet', 'mainnet')):
     sk = bytes.fromhex(d['scalar_hex'])
     print('  ' + chain + ' raw BLS key -> Sage: ' + d['scalar_hex'])
     print('    address ' + chia_sign.receive_address(sk, 0, net))
+from spellbook import solana as solana_mod
+for chain in ('solana-devnet', 'solana-mainnet'):
+    kp = solana_mod.custom_keypair(seed, chain, 'default')
+    print('  ' + chain + ' raw ed25519 secret -> Phantom import (base58 of 64-byte secret):')
+    print('    ' + solana_mod.phantom_backup_secret(kp))
+    print('    address ' + solana_mod.address_of_keypair(kp))
+print('  Solana KDF keys differ per network by design (P9) and recover through')
+print('  the daemon only - stock wallets derive unrelated keys from these words.')
 ")"
 
 cat <<EOF

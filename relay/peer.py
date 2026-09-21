@@ -123,6 +123,7 @@ class ChiaPeer:
         self._handshake_result: Optional[Handshake] = None
         self._closed = asyncio.Event()
         self._peer_protocol_version: Optional[str] = None
+        self._close_info: Optional[str] = None
 
     # -- properties ------------------------------------------------------
     @property
@@ -156,6 +157,7 @@ class ChiaPeer:
 
         self._closed.clear()
         self._handshake_done.clear()
+        self._close_info = None
         self._reader_task = asyncio.create_task(self._reader(), name=f"peer-reader-{self.label}")
 
         # Send our pinned handshake (no message id, like a real wallet).
@@ -222,6 +224,18 @@ class ChiaPeer:
                     await self._dispatch(message)
                 elif ws_msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED,
                                      aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.ERROR):
+                    if ws_msg.type == aiohttp.WSMsgType.CLOSE:
+                        # The peer told us why it is hanging up: the close code
+                        # and reason are the primary diagnostic when a broadcast
+                        # is rejected (e.g. code=1002 reason='1' means the
+                        # peer's API handler raised while processing our frame).
+                        self._close_info = f"code={ws_msg.data} reason={ws_msg.extra!r}"
+                        log.warning("%s: peer closed connection: %s",
+                                    self.label, self._close_info)
+                    elif ws_msg.type == aiohttp.WSMsgType.ERROR:
+                        self._close_info = f"ws error: {self._ws.exception()}"
+                        log.warning("%s: websocket error: %s",
+                                    self.label, self._ws.exception())
                     break
         except asyncio.CancelledError:
             pass
@@ -230,7 +244,9 @@ class ChiaPeer:
         finally:
             self._closed.set()
             if self._pending is not None and not self._pending.future.done():
-                self._pending.future.set_exception(PeerError(f"{self.label}: connection lost"))
+                detail = f" ({self._close_info})" if self._close_info else ""
+                self._pending.future.set_exception(
+                    PeerError(f"{self.label}: connection lost{detail}"))
                 self._pending = None
 
     async def _dispatch(self, message: Message) -> None:

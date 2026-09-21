@@ -18,11 +18,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from streamable import (
     Coin, CoinSpend, CoinState, Handshake, Message, SpendBundle,
     StreamableError,
+    clvm_program_length,
     coin_id, dec_bytes_var, dec_coin_state, dec_handshake, dec_message,
-    dec_new_peak_wallet, dec_respond_to_coin_updates, dec_respond_to_ph_updates,
+    dec_new_peak_wallet, dec_program, dec_respond_to_coin_updates,
+    dec_respond_to_ph_updates,
     dec_str, dec_transaction_ack, dec_u16, dec_u32, dec_u64, dec_u8,
     enc_bool, enc_bytes_fixed, enc_bytes_var, enc_coin, enc_coin_spend,
-    enc_coin_state, enc_handshake, enc_list, enc_message, enc_str,
+    enc_coin_state, enc_handshake, enc_list, enc_message, enc_program, enc_str,
     enc_u8, enc_u16, enc_u32, enc_u64, enc_u128,
     enc_register_for_coin_updates, enc_register_for_ph_updates,
     enc_send_transaction, enc_spend_bundle, int_to_bytes,
@@ -220,8 +222,10 @@ def _sample_bundle_bytes() -> bytes:
     parent = bytes.fromhex("aa" * 32)
     ph = bytes.fromhex("bb" * 32)
     coin = enc_coin(Coin(parent, ph, 1000))
-    reveal = enc_bytes_var(b"\xff\x01")
-    solution = enc_bytes_var(b"\x02")
+    # Programs use consensus framing: bare CLVM, NO uint32 length prefix
+    # (chia's Program::parse reads via serialized_length_from_bytes).
+    reveal = b"\xff\x01\x80"   # cons(0x01, nil)
+    solution = b"\x80"         # nil
     sig = bytes.fromhex("cc" * 96)
     return enc_u32(1) + coin + reveal + solution + sig
 
@@ -243,6 +247,41 @@ def test_spend_bundle():
     check_raises("bundle trailing byte", lambda: parse_spend_bundle(raw + b"\x00"))
     check_raises("bundle short sig", lambda: parse_spend_bundle(raw[:-1]))
     check_raises("bundle garbage", lambda: parse_spend_bundle(b"\xff" * 200))
+
+    # The old (pre-fix) layout length-prefixed programs; the canonical gate
+    # must reject it fail-closed instead of forwarding it to peers.
+    parent = bytes.fromhex("aa" * 32)
+    ph = bytes.fromhex("bb" * 32)
+    legacy = (enc_u32(1) + enc_coin(Coin(parent, ph, 1000))
+              + enc_bytes_var(b"\xff\x01\x80") + enc_bytes_var(b"\x80")
+              + bytes.fromhex("cc" * 96))
+    check_raises("bundle legacy length-prefixed programs rejected",
+                 lambda: parse_spend_bundle(legacy))
+
+
+def test_clvm_program_framing():
+    # single-byte atoms / nil
+    check("clvm len nil", clvm_program_length(b"\x80"), 1)
+    check("clvm len small atom", clvm_program_length(b"\x05"), 1)
+    check("clvm len 0x7f", clvm_program_length(b"\x7f"), 1)
+    # size-prefixed atoms: 0x83 -> 3-byte blob; 0xc4 0x01 -> 0x101-byte blob
+    check("clvm len sized atom", clvm_program_length(b"\x83abc"), 4)
+    check("clvm len 2-byte size", clvm_program_length(b"\xc1\x01" + b"z" * 0x101), 2 + 0x101)
+    # cons cells nest
+    check("clvm len cons", clvm_program_length(b"\xff\x01\x80"), 3)
+    check("clvm len nested", clvm_program_length(b"\xff\xff\x01\x80\x02"), 5)
+    check("clvm len stops at program end",
+          clvm_program_length(b"\x80\x80\x80"), 1)
+    check_raises("clvm truncated cons", lambda: clvm_program_length(b"\xff\x01"))
+    check_raises("clvm truncated atom", lambda: clvm_program_length(b"\x83ab"))
+    check_raises("clvm backref rejected", lambda: clvm_program_length(b"\xfe\x00"))
+    check_raises("clvm empty", lambda: clvm_program_length(b""))
+    # enc/dec round-trip with consensus framing (no length prefix)
+    prog = b"\xff\x02\xff\xff\x04\x80\x80"  # cons(0x02, cons(cons(0x04, nil), nil))
+    check("program enc is verbatim", enc_program(prog), prog)
+    check("program dec", dec_program(_Reader(prog + b"\x80")), prog)
+    check_raises("program enc rejects trailing garbage",
+                 lambda: enc_program(b"\x80\x80"))
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +357,7 @@ TESTS = [
     test_handshake,
     test_coin,
     test_spend_bundle,
+    test_clvm_program_framing,
     test_wallet_protocol,
     test_coin_state_update,
 ]

@@ -114,9 +114,10 @@ export default function Onboard() {
             <span className="icon">🧪</span>
             <h3>Testnet11 first</h3>
             <p>
-              Testnet11 is the default network. Mainnet submission requires
-              explicit human authorization with exact amounts — it is not
-              something you enable on your own.
+              Testnet11 is the default Chia network (Solana defaults to
+              devnet). Mainnet submission requires explicit human
+              authorization with exact amounts — it is not something you
+              enable on your own.
             </p>
           </div>
         </div>

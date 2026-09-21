@@ -25,10 +25,11 @@ bearer-authed JSON API.
 - **Not mainnet-ready by default.** It pins `RELAY_NETWORK=testnet11`.
   Mainnet needs an explicit config change and separate authorization.
 
-## API (all routes require `Authorization: Bearer <token>`)
+## API (all routes require `Authorization: Bearer <token>`, except `/health`)
 
 | Method | Path | Body | Returns |
 |---|---|---|---|
+| GET | `/health` | — | `{"ok": true, "service": "spellbook-chia-relay"}` — **no auth**, for Railway/K8s health checks. Non-sensitive by design. |
 | GET | `/v1/status` | — | `{ok, network, peak_height, peers, peers_connected, watched_puzzle_hashes, cached_coins, uptime_s}` |
 | POST | `/v1/coins` | `{puzzle_hashes: [hex32…]}` (1–50) | `{coins: [{coin_id, parent_coin_info, puzzle_hash, amount_mojos, created_height, spent_height\|null}]}` |
 | POST | `/v1/broadcast` | `{spend_bundle: hex}` (≤ 5 MB) | `{txid, expected_txid, status, status_name, error}` — `status` is Chia's mempool status (1 SUCCESS, 2 PENDING, 3 FAILED) |
@@ -67,12 +68,14 @@ railway variables set RELAY_CORS_ORIGIN=https://<your-vercel-app>.vercel.app
 railway up
 ```
 
-`railway.json` selects the Dockerfile build; the container listens on
+`railway.json` selects the Dockerfile build and points the platform
+health check at the unauthenticated `GET /health`; the container listens on
 `$PORT` (Railway terminates public HTTPS). No volumes, no database.
 
 Health check after deploy (replace `TOKEN` and host):
 
 ```bash
+curl https://<relay-host>/health            # 200, no auth needed
 curl -H "Authorization: Bearer TOKEN" https://<relay-host>/v1/status
 ```
 

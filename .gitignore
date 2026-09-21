@@ -6,3 +6,9 @@ dist/
 .pytest_cache/
 node_modules/
 .discussion-watch-state.json
+
+# Relay: generated node TLS key/cert (minted at startup by cert.py).
+# The shared Chia CA (chia_ca.crt/key) is intentionally committed; the
+# node key must never be.
+relay/certs/node.key
+relay/certs/node.crt

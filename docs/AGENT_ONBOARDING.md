@@ -22,7 +22,7 @@ Run `install.sh` on the machine that will run the daemon. It provisions:
 - two bearer tokens: a **request token** (yours, the agent) and an
   **approval token** (the human's). Both print once; the request token
   lives in your environment, never in chat, logs, or code.
-- the paper backup (§5), shown **once**, on the terminal, never logged.
+- the paper backup (§6), shown **once**, on the terminal, never logged.
 
 Client:
 
@@ -114,11 +114,68 @@ two after startup.
 - **Chia mainnet** — gated, not enabled by default. Addresses `xch1…`.
 - **EVM** — testnets now (e.g. Robinhood Chain testnet 46630), mainnet
   gated behind the same authorization as Chia mainnet.
+- **Solana** — **devnet is the default** (public HTTPS JSON-RPC, no relay —
+  see §5), mainnet-beta gated behind the same authorization as every other
+  mainnet. Addresses are base58 pubkeys.
 
 One seed covers the whole stack; networks differ only in derivation
-label and address encoding (`txch1` vs `xch1` vs `0x`).
+label and address encoding (`txch1` vs `xch1` vs `0x` vs base58).
 
-## 5. Paper-backup model (two mnemonic sets)
+## 5. Solana RPC
+
+Solana needs **no relay service**. The daemon talks directly to public
+HTTPS JSON-RPC endpoints — the same trust model as pointing a wallet at
+any public full node: the endpoint sees public addresses, balances, and
+already-signed transactions, never keys. This is for your daemon/agent
+code, not for a browser.
+
+- **Endpoints** (operator-overridable; public ones need no auth):
+  - devnet (default): `https://api.devnet.solana.com`
+  - mainnet-beta (gated, off by default): `https://api.mainnet-beta.solana.com`
+- **Auth:** none — no bearer token. The relay's `RELAY_BEARER_TOKEN` is a
+  Chia-relay thing; Solana RPC takes no credentials.
+- **Devnet vs mainnet gating:** the daemon refuses mainnet-beta traffic
+  unless that install was explicitly authorized for mainnet with exact
+  amounts. Devnet is the default. `requestAirdrop` is devnet-only — the
+  daemon refuses it on mainnet-beta before it leaves the machine.
+
+### JSON-RPC methods the daemon uses
+
+All JSON-RPC 2.0: `{"jsonrpc":"2.0","id":<n>,"method":<m>,"params":[...]}`.
+Bodies carry only public addresses and already-signed transactions — the
+private key never appears in a request.
+
+| Method | Shape | Use |
+|---|---|---|
+| `getLatestBlockhash` | `params: []` → `{value: {blockhash, lastValidBlockHeight}}` | fresh blockhash before signing |
+| `getBalance` | `params: ["<base58 addr>"]` → `{value: <lamports>}` | balances for `addresses()` |
+| `requestAirdrop` | `params: ["<base58 addr>", <lamports>]` (devnet only) | devnet funding — the faucet is built in |
+| `sendTransaction` | `params: ["<base64 signed tx>"]` → `"<base58 sig>"` | submit a locally-signed transfer |
+| `getSignatureStatuses` | `params: [["<base58 sig>"], {"searchTransactionHistory": true}]` → `{value: [{confirmationStatus, err}]}` | finalization tracking |
+
+Rules of the road: fetch `getLatestBlockhash`, sign **locally**, then
+`sendTransaction` the signed bytes. A failed `sendTransaction` is a hard
+stop — never blind-retry, a retry can double-send. A `confirmationStatus`
+of `finalized` with `err: null` is the green light.
+
+### AgentClient (Solana)
+
+```python
+agent.addresses()   # {"default": {..., "solana-devnet": "<base58 pubkey>"}}
+
+r = agent.request_spend(chain="solana-devnet", destination="<base58 addr>",
+                        amount_lamports=1_000_000, purpose="devnet drill")
+r["decision"]       # "approved" | "queued" | "denied"
+```
+
+Exactly one amount kwarg per call: `amount_lamports` for Solana
+(`amount_wei` for EVM, `amount_mojos` for Chia). 1 SOL = 1,000,000,000
+lamports. Policy keys in `policy.json` are `chain:asset` pairs —
+`"solana-devnet:SOL"` / `"solana-mainnet:SOL"` — wired into the same
+per-spend cap / 24h velocity / queue-above-threshold ladder as every
+other chain.
+
+## 6. Paper-backup model (two mnemonic sets)
 
 `install.sh` prints the backup **once**, on the terminal, never logged:
 
@@ -136,7 +193,7 @@ label and address encoding (`txch1` vs `xch1` vs `0x`).
 Rule: write both sets down on paper, offline, at install. Verify after
 any import by comparing the shown addresses.
 
-## 6. Pointer files
+## 7. Pointer files
 
 - This document: `docs/AGENT_ONBOARDING.md`
   (raw: `https://raw.githubusercontent.com/awizardxch/Spellbook/main/docs/AGENT_ONBOARDING.md`)

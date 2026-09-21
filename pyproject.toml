@@ -12,6 +12,7 @@ dependencies = [
     "py_ecc>=7.0.0",          # BLS12-381 — Chia master-key derivation + BLS signatures
     "pycryptodome>=3.20.0",   # Keccak-256 — EVM addresses
     "pynacl>=1.5.0",          # Ed25519 — identity signing behind the S1 gate
+    "solders>=0.21.0",        # Solana — Ed25519 keypairs, transaction build/sign (no relay needed)
 ]
 
 [project.optional-dependencies]

@@ -33,8 +33,10 @@ Fail-closed: any transport error, non-2xx status, or schema mismatch
 raises RelayError. Nothing is retried blindly.
 """
 
+import base64
 import http.client
 import json
+import os
 import ssl
 import time
 import urllib.parse
@@ -85,6 +87,59 @@ class RelayRpc:
         if self._secure:
             self._ctx = ssl.create_default_context()
 
+    def _proxy_bypassed(self) -> bool:
+        """True when no_proxy/NO_PROXY covers this relay host."""
+        no_proxy = os.environ.get("no_proxy") or os.environ.get("NO_PROXY") or ""
+        host = (self._host or "").lower()
+        for entry in no_proxy.split(","):
+            entry = entry.strip().lower().strip("[]")
+            if not entry:
+                continue
+            if entry == "*" or host == entry or host.endswith("." + entry.lstrip(".")):
+                return True
+        return False
+
+    def _connection(self):
+        """Build the HTTP(S) connection, tunneling through the egress
+        proxy when one is configured (https_proxy/HTTPS_PROXY/all_proxy)
+        and the relay host is not in no_proxy.
+
+        Agents and daemons often run behind a mandatory egress proxy;
+        without this, remote relay hosts are unreachable while the
+        local relay (127.0.0.1, covered by no_proxy) keeps working.
+        """
+        if not self._proxy_bypassed():
+            proxy = (os.environ.get("https_proxy")
+                     or os.environ.get("HTTPS_PROXY")
+                     or os.environ.get("all_proxy")
+                     or os.environ.get("ALL_PROXY"))
+        else:
+            proxy = None
+        if not proxy:
+            if self._secure:
+                return http.client.HTTPSConnection(
+                    self._host, self._port, timeout=self._timeout,
+                    context=self._ctx)
+            return http.client.HTTPConnection(
+                self._host, self._port, timeout=self._timeout)
+        p = urllib.parse.urlparse(proxy)
+        tunnel_headers = {}
+        if p.username:
+            creds = (urllib.parse.unquote(p.username) + ":"
+                     + urllib.parse.unquote(p.password or ""))
+            tunnel_headers["Proxy-Authorization"] = (
+                "Basic " + base64.b64encode(creds.encode()).decode())
+        if self._secure:
+            conn = http.client.HTTPSConnection(
+                p.hostname, p.port or 3128, timeout=self._timeout,
+                context=self._ctx)
+        else:
+            conn = http.client.HTTPConnection(
+                p.hostname, p.port or 3128, timeout=self._timeout)
+        conn.set_tunnel(self._host, self._port,
+                        tunnel_headers or None)
+        return conn
+
     def _request(self, method: str, path: str,
                  body: dict | None = None) -> dict:
         payload = json.dumps(body or {}).encode() if body is not None else None
@@ -92,13 +147,7 @@ class RelayRpc:
             "Authorization": f"Bearer {self._token}",
             "Content-Type": "application/json",
         }
-        if self._secure:
-            conn = http.client.HTTPSConnection(
-                self._host, self._port, timeout=self._timeout,
-                context=self._ctx)
-        else:
-            conn = http.client.HTTPConnection(
-                self._host, self._port, timeout=self._timeout)
+        conn = self._connection()
         try:
             conn.request(method, path, body=payload, headers=headers)
             resp = conn.getresponse()
