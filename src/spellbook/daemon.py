@@ -369,6 +369,155 @@ class Daemon:
         return expected_fp, rpc.wallet_address(expected_fp, network)
 
     def _execute_chia_spend(self, params: dict) -> dict:
+        """Dispatch to the Sage or relay Chia spend path.
+
+        If `chia.relay_url` is set in spellbook.json, the relay path is
+        used: keys stay local (chia_sign.py), the relay only broadcasts.
+        Otherwise the Sage RPC path is used (default, unchanged).
+        """
+        if self.chia_cfg.get("relay_url"):
+            return self._execute_chia_spend_via_relay(params)
+        return self._execute_chia_spend_via_sage(params)
+
+    def _execute_chia_spend_via_relay(self, params: dict) -> dict:
+        """Build, sign (locally), and broadcast an approved XCH transfer
+        via the spellbook-chia-relay.
+
+        Flow: derive the KDF wallet key locally, compute our puzzle hashes
+        (indices 0..N), fetch coins from the relay, select coins covering
+        amount+fee, build + sign the spend bundle with chia_sign.py (keys
+        never leave this machine), broadcast via the relay, and return the
+        created coin id as the ledger reference.
+
+        Returns {"submitted": True, "tx_hash": <coin id>, ...}.
+        Raises chia_relay.RelayError on any failure — a spend that never
+        left the machine records nothing and consumes no velocity.
+        """
+        from spellbook import chia_relay, chia_sign
+        chain = params["chain"]
+        network = chia.NETWORKS[chain]
+        if chain == "chia-mainnet" and not self.chia_cfg.get(
+                "mainnet_submit_enabled"):
+            raise chia_relay.RelayError(
+                "mainnet submission refused for chia-mainnet — needs the "
+                "separately-authorized mainnet_submit_enabled flag (§10.14-17)")
+        if self.seed is None:
+            raise chia_relay.RelayError("no seed configured — cannot sign")
+        if params.get("amount_wei") is not None:
+            raise chia_relay.RelayError(
+                "wei on a Chia chain — schema misuse, refusing")
+        dest = params.get("destination", "")
+        prefix = chia.PREFIXES[network]
+        if not isinstance(dest, str) or not dest.startswith(prefix):
+            raise chia_relay.RelayError(
+                f"bad destination for {chain}: expected a {prefix}... address")
+        amount = params["amount_mojos"]
+        fee = int(self.chia_cfg.get("fee_mojos", 0))
+
+        relay_url = self.chia_cfg["relay_url"]
+        token = self.chia_cfg.get("relay_token") or os.environ.get(
+            "SPELLBOOK_RELAY_TOKEN", "")
+        if token.startswith("env:"):
+            token = os.environ.get(token[4:], "")
+        rpc = chia_relay.RelayRpc(relay_url, token)
+
+        # Verify the relay is on the expected network before touching keys.
+        st = rpc.status()
+        if st.get("network") != network:
+            raise chia_relay.RelayError(
+                f"relay network {st.get('network')!r} != expected {network!r} "
+                "— refusing")
+
+        # Derive our wallet key and addresses locally. The KDF label matches
+        # the Sage path ("default") so both transports use the same wallet.
+        d = kdf.derive_labeled(self.seed, chain, "default")
+        master_sk = bytes.fromhex(d["scalar_hex"])
+        # Scan the first N derivation indices for coins.
+        scan_n = int(self.chia_cfg.get("relay_scan_indices", 10))
+        puzzle_hashes = []
+        index_for_ph = {}
+        for i in range(scan_n):
+            wsk = chia_sign.wallet_sk(master_sk, i)
+            spk = chia_sign.synthetic_pk(chia_sign.pk_bytes(wsk))
+            ph = chia_sign.puzzle_hash_for_synthetic_pk(spk)
+            puzzle_hashes.append(ph.hex())
+            index_for_ph[ph.hex()] = i
+
+        coins = rpc.coins(puzzle_hashes)
+        unspent = [c for c in coins if c.get("spent_height") is None]
+        # Sort by amount descending for simple largest-first selection.
+        unspent.sort(key=lambda c: int(c.get("amount_mojos", 0)),
+                     reverse=True)
+        need = amount + fee
+        selected = []
+        total = 0
+        for c in unspent:
+            selected.append(c)
+            total += int(c["amount_mojos"])
+            if total >= need:
+                break
+        if total < need:
+            raise chia_relay.RelayError(
+                f"insufficient balance via relay: have {total} mojos, "
+                f"need {need}")
+
+        # Build outputs: destination + change back to our first address.
+        change_ph_hex = puzzle_hashes[0]
+        change = total - amount - fee
+        dest_ph = chia_sign.puzzle_hash_for_address(dest)
+        outputs = [(dest_ph, amount)]
+        if change > 0:
+            outputs.append((bytes.fromhex(change_ph_hex), change))
+        elif change < 0:
+            raise chia_relay.RelayError("negative change — refusing")
+
+        # Build and sign one spend per selected coin (keys stay local).
+        spends = []
+        for c in selected:
+            ph_hex = c["puzzle_hash"]
+            idx = index_for_ph.get(ph_hex)
+            if idx is None:
+                raise chia_relay.RelayError(
+                    f"coin puzzle hash {ph_hex[:16]}… not in our key set "
+                    "— refusing")
+            coin = (bytes.fromhex(c["parent_coin_info"]),
+                    bytes.fromhex(ph_hex),
+                    int(c["amount_mojos"]))
+            # Split outputs across spends: first spend pays dest+change,
+            # subsequent spends just consolidate to our change address.
+            # (Simple single-spend path: use the first coin if it covers.)
+            spends.append(chia_sign.build_standard_spend(
+                master_sk, idx, coin, outputs, network))
+            # For now only single-coin spends are supported; multi-coin
+            # needs output splitting across spends.
+            break
+        if len(selected) > 1:
+            raise chia_relay.RelayError(
+                "multi-coin selection not yet supported via relay — "
+                "fund a single coin covering the amount")
+
+        bundle_hex = chia_sign.build_spend_bundle(spends).hex()
+        res = rpc.broadcast(bundle_hex)
+        status = res.get("status", "")
+        if status == "FAILED":
+            raise chia_relay.RelayError(
+                f"relay broadcast FAILED: {res.get('error', res)!r}")
+        # txid here is the mempool ack; the stable ledger reference is the
+        # created coin id (first CREATE_COIN output).
+        coin_id = None
+        for c in selected[:1]:
+            # Recompute the expected created coin id for the destination
+            # output: sha256(parent || puzzle_hash || amount).
+            cid = chia_sign.coin_id(
+                bytes.fromhex(c["parent_coin_info"]),
+                dest_ph, amount)
+            coin_id = cid.hex()
+            break
+        return {"submitted": True, "tx_hash": res.get("txid"),
+                "coin_id": coin_id, "from": puzzle_hashes[0],
+                "mempool_status": status}
+
+    def _execute_chia_spend_via_sage(self, params: dict) -> dict:
         """Build, sign, and submit an approved XCH transfer via Sage RPC.
 
         Flow: switch Sage to the right network, ensure the KDF-derived BLS
