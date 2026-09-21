@@ -171,12 +171,21 @@ export function shortHash(hex: string, n = 10): string {
 // relay API client
 // ---------------------------------------------------------------------------
 
+export interface RelayPeer {
+  host: string;
+  port: number;
+  connected: boolean;
+  protocol_version: string;
+}
+
 export interface RelayStatus {
   ok: boolean;
   network: string;
-  peak_height: number;
-  peers: number;
-  watched_addresses: number;
+  peak_height: number | null;
+  peers: RelayPeer[];
+  peers_connected: number;
+  watched_puzzle_hashes: number;
+  cached_coins: number;
   uptime_s: number;
 }
 

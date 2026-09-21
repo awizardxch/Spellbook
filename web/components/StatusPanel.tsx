@@ -81,11 +81,18 @@ export default function StatusPanel({ relayUrl, setRelayUrl, token, setToken, on
           <dt>network</dt>
           <dd>{status.network}</dd>
           <dt>peak height</dt>
-          <dd>{status.peak_height}</dd>
+          <dd>{status.peak_height ?? "—"}</dd>
           <dt>peers</dt>
-          <dd>{status.peers}</dd>
+          <dd>
+            {status.peers_connected}
+            {status.peers.length > 0 && (
+              <span className="sub" style={{ display: "block", marginTop: 4 }}>
+                {status.peers.map((p) => `${p.host}:${p.port}`).join(", ")}
+              </span>
+            )}
+          </dd>
           <dt>watched addresses</dt>
-          <dd>{status.watched_addresses}</dd>
+          <dd>{status.watched_puzzle_hashes}</dd>
           <dt>uptime</dt>
           <dd>{fmtUptime(status.uptime_s)}</dd>
         </dl>
