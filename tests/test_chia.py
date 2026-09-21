@@ -261,11 +261,16 @@ class _FakeSage:
         self.data_dir = data_dir
         self.keys = {}          # fingerprint -> key_hex
         self.balance = 10 ** 12
+        self.balances = {}      # fingerprint -> balance (selection-aware)
+        self.addresses = {}     # fingerprint -> address
+        self.selected = None    # fingerprint Sage currently has logged in
         self.import_returns = None  # override fingerprint on import
         self.sent = []
+        self.networks = []
 
     def set_network(self, name):
         self.network = name
+        self.networks.append(name)
 
     def get_keys(self):
         return [{"fingerprint": fp} for fp in self.keys]
@@ -282,11 +287,19 @@ class _FakeSage:
 
     def login(self, fingerprint):
         assert fingerprint in self.keys
+        self.selected = fingerprint
 
     def wallet_address(self, fingerprint, network_id):
-        return "txch1senderaddress"
+        return self.addresses.get(fingerprint, "txch1senderaddress")
 
     def sync_status(self):
+        # Sage reports the *selected* wallet — mirror that, so tests can
+        # prove a foreign selected wallet never leaks into status reads.
+        if self.selected is not None:
+            return {"selectable_balance": self.balances.get(self.selected,
+                                                            self.balance),
+                    "receive_address": self.addresses.get(
+                        self.selected, "txch1senderaddress")}
         return {"selectable_balance": self.balance,
                 "receive_address": "txch1senderaddress"}
 
@@ -387,6 +400,49 @@ def test_daemon_chia_request_spend_end_to_end(tmp_path, monkeypatch):
     assert resp["tx_hash"] == "0xcoin1"
     # velocity was consumed on the approved chain
     assert d.spent_last_24h("chia-testnet", "native") == 1_000_000
+
+
+def test_rt_status_ignores_foreign_selected_wallet(tmp_path, monkeypatch):
+    """Regression: Sage reports whichever wallet was logged in last. A
+    foreign wallet left selected (e.g. the drill script logging into the
+    destination wallet to derive its address) must not change the
+    balance/address rt_status reports for the daemon's own wallet."""
+    d, seed_hex = _daemon_with_seed(tmp_path, monkeypatch)
+    fake = _FakeSage("x")
+    foreign_fp = 42424242
+    fake.keys[foreign_fp] = "00" * 32
+    fake.balances[foreign_fp] = 777_000_000_000
+    fake.addresses[foreign_fp] = "txch1foreignwallethere"
+    fake.selected = foreign_fp  # Sage left logged into the foreign wallet
+    monkeypatch.setattr(chia, "SageRpc", lambda *a, **k: fake)
+    out = d.rt_status({}, "muse_test")
+    assert out["ok"] is True
+    bal = out["balances"]["chia-testnet"]
+    assert "error" not in bal, bal
+    derived = _kdf.derive_labeled(bytes.fromhex(seed_hex), "chia-testnet",
+                                  "default")
+    daemon_fp = chia.chia_fingerprint(derived["pubkey_hex"])
+    assert fake.selected == daemon_fp  # status re-selected the daemon wallet
+    assert bal["balance_mojos"] == fake.balance  # daemon's, not 777e9
+    assert bal["address"] == "txch1senderaddress"
+    assert bal["address"] != "txch1foreignwallethere"
+
+
+def test_rt_status_imports_daemon_key_before_any_spend(tmp_path, monkeypatch):
+    """O10: the agent surfaces its balance/address independently of ever
+    submitting a spend — status imports the KDF wallet when missing."""
+    d, seed_hex = _daemon_with_seed(tmp_path, monkeypatch)
+    fake = _FakeSage("x")  # no keys imported yet
+    monkeypatch.setattr(chia, "SageRpc", lambda *a, **k: fake)
+    out = d.rt_status({}, "muse_test")
+    bal = out["balances"]["chia-testnet"]
+    assert "error" not in bal, bal
+    derived = _kdf.derive_labeled(bytes.fromhex(seed_hex), "chia-testnet",
+                                  "default")
+    daemon_fp = chia.chia_fingerprint(derived["pubkey_hex"])
+    assert fake.keys.get(daemon_fp) == derived["scalar_hex"]
+    assert fake.selected == daemon_fp
+    assert bal["balance_mojos"] == fake.balance
 
 
 def test_wait_for_outgoing_timeout_is_broadcast_unknown():

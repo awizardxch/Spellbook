@@ -333,6 +333,41 @@ class Daemon:
         raise chia.SageError(
             "sage rpc did not answer on its port within 45s — see sage-rpc.log")
 
+    def _chia_wallet(self, rpc, chain):
+        """Select the daemon-owned KDF wallet for `chain` on Sage.
+
+        Switches Sage to the chain's network, imports the KDF-derived BLS
+        key when missing (verifying the fingerprint locally — never trusting
+        the RPC's word for which key it imported), and logs in. Returns
+        (fingerprint, address).
+
+        Every balance read goes through here. Sage's /get_sync_status
+        reports whichever wallet was logged in last, so a foreign wallet
+        left selected by earlier tooling (e.g. a drill script that logged
+        into the destination wallet to derive its address) would otherwise
+        make status report someone else's balance as the agent's. O10
+        requires the agent to surface its own balance/address, so status
+        selects — and if needed imports — the daemon's own wallet first.
+        """
+        network = chia.NETWORKS[chain]
+        rpc.set_network(network)
+        d = kdf.derive_labeled(self.seed, chain, "default")
+        expected_fp = chia.chia_fingerprint(d["pubkey_hex"])
+        have = set()
+        for k in rpc.get_keys():
+            try:
+                have.add(int(k.get("fingerprint")))
+            except (TypeError, ValueError):
+                continue
+        if expected_fp not in have:
+            got = rpc.import_key("spellbook-default", d["scalar_hex"])
+            if got != expected_fp:
+                raise chia.SageError(
+                    f"imported fingerprint {got} != KDF-derived {expected_fp} "
+                    "— refusing to use an unexpected key")
+        rpc.login(expected_fp)
+        return expected_fp, rpc.wallet_address(expected_fp, network)
+
     def _execute_chia_spend(self, params: dict) -> dict:
         """Build, sign, and submit an approved XCH transfer via Sage RPC.
 
@@ -372,23 +407,7 @@ class Daemon:
                 f"Sage data dir {data_dir} missing after startup — refusing")
         rpc = chia.SageRpc(data_dir,
                            port=int(self.chia_cfg.get("rpc_port", 9257)))
-        rpc.set_network(network)
-        d = kdf.derive_labeled(self.seed, chain, "default")
-        expected_fp = chia.chia_fingerprint(d["pubkey_hex"])
-        have = set()
-        for k in rpc.get_keys():
-            try:
-                have.add(int(k.get("fingerprint")))
-            except (TypeError, ValueError):
-                continue
-        if expected_fp not in have:
-            got = rpc.import_key("spellbook-default", d["scalar_hex"])
-            if got != expected_fp:
-                raise chia.SageError(
-                    f"imported fingerprint {got} != KDF-derived {expected_fp} "
-                    "— refusing to spend from an unexpected key")
-        rpc.login(expected_fp)
-        sender = rpc.wallet_address(expected_fp, network)
+        expected_fp, sender = self._chia_wallet(rpc, chain)
         fee = int(self.chia_cfg.get("fee_mojos", 0))
         bal = chia.amount_to_int(rpc.sync_status()["selectable_balance"])
         if bal < amount + fee:
@@ -600,9 +619,14 @@ class Daemon:
                                         "com.rigidnetwork.sage")
                 rpc = chia.SageRpc(
                     data_dir, port=int(self.chia_cfg.get("rpc_port", 9257)))
+                # Select the daemon's own wallet first: Sage reports the
+                # *selected* wallet, which may be a foreign one left logged
+                # in by earlier tooling. Never report another wallet's
+                # balance/address as the agent's (O10).
+                _, addr = self._chia_wallet(rpc, "chia-testnet")
                 st = rpc.sync_status()
                 balances["chia-testnet"] = {
-                    "address": st.get("receive_address"),
+                    "address": addr,
                     "balance_mojos": chia.amount_to_int(
                         st.get("selectable_balance", 0)),
                 }
