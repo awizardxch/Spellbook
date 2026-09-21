@@ -7,6 +7,8 @@ spellbook.json (all fields optional unless noted):
                           but derives no addresses)
   labels                : [label, ...] to derive addresses for (default ["default"])
   chia_enabled          : bool (default true; false with install.sh --no-sage)
+  sage_bin              : path to the verified sage CLI binary built from the
+                          pinned commit (install.sh §2); null with --no-sage
   socket_group          : Unix group allowed to connect to the socket (optional —
                           without it the socket is 0700, daemon user only)
   allowed_request_uids  : [uid, ...] allowed to use the request token (optional —

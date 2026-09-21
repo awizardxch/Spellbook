@@ -143,7 +143,8 @@ def phase_daemon():
 
 ONCHAIN_CHECKLIST = """\
 phase C (on-chain drill) — EVM path on Robinhood Chain testnet (46630).
-Sage/XCH steps stay pending on the pinned-commit verification (open #7).
+Sage/XCH steps: pinned-commit build path implemented 2026-09-20; live drill
+run still pending.
   [x] 10.3  fund throwaway EVM address (faucet), request small-wei spend
   [x] 10.4  below-threshold auto-approve submits; queued spend approved via
             the approve token (human-client stand-in), daemon submits
@@ -171,8 +172,8 @@ def phase_onchain_testnet():
 
     Throwaway seed, throwaway daemon, worthless testnet funds. Blocks waiting
     for the faucet (up to 30 min) — fund the printed address and it proceeds.
-    The Chia/Sage steps (§10 steps 1, 8 and the XCH half of 5-7) stay pending
-    on the Sage pinned-commit verification (open decision #7).
+    The Chia/Sage steps (§10 steps 1, 8 and the XCH half of 5-7) await a live
+    drill run; the pinned-commit build path (install.sh §2) is implemented.
     """
     tmp = tempfile.mkdtemp(prefix="spellbook-onchain-")
     req_token, app_token = secrets.token_hex(32), secrets.token_hex(32)

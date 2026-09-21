@@ -45,9 +45,9 @@ curl -fsSL -o install.sh \
 bash install.sh v0.1.0 --agent-user <agent-os-user> --human-user <your-login>
 ```
 
-Add `--no-sage` for an EVM-only install (the Sage pinned-commit verification
-is still being worked out — installs fail closed rather than accept an
-unverified binary). The installer:
+Add `--no-sage` for an EVM-only install (the default build compiles the
+Sage CLI from the pinned commit — needs a Rust toolchain and build time;
+an operator-supplied binary is accepted only with `SAGE_PIN_VERIFIED=1`). The installer:
 
 1. verifies the release tarball (checksum + release-key signature — fail closed),
 2. creates the dedicated `spellbook` OS user and the 0600/0700 layout,
@@ -116,7 +116,8 @@ testnet-guarded), agent client + CLI, installer, off-chain drill, and the
 §10 on-chain testnet drill — green on Robinhood Chain testnet 46630
 (2026-09-20).
 
-Next, each needing explicit authorization: Sage/XCH drill steps (blocked
-on pinned-commit verification, open decision #7), then — separately
+Next, each needing explicit authorization: Sage/XCH drill steps (the
+pinned-commit build path is implemented as of 2026-09-20; the live drill
+run is still pending), then — separately
 authorized — mainnet dust with Speechless-approved amounts. The O9
 single-device fallback still awaits a decision (§12a).

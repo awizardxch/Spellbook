@@ -240,9 +240,11 @@ software:
 
 - **Source:** `xch-dev/sage` at tag `v0.13.1` (D4), pinned **by commit as well
   as tag**: `f2ec89dd59d07227bed657bc268fc32ce97551f6` (a git tag is mutable;
-  the commit is not — S9). Install from the release binary built from that
-  commit, or `cargo install --git … --rev f2ec89dd…`. Upgrades are deliberate:
-  review changelog, re-pin commit, rebuild.
+  the commit is not — S9). The installer builds the `sage-cli` crate from
+  that exact commit (`git rev-parse HEAD` must equal the pin before
+  compiling) — the pinned commit is the verification, so no release-binary
+  checksum is needed. Upgrades are deliberate: review changelog, re-pin
+  commit, rebuild.
 - **Mode:** CLI only. Never run GUI and CLI simultaneously (they can overwrite
   each other's data).
 - **Network:** testnet first (Phase 1). Mainnet only after the Phase 1 drill
@@ -537,9 +539,13 @@ Steps 4–7 enable temporary test values to prove the policy machinery works,
 then reset the config to default-off (D9). The EVM path is the primary
 acceptance target (D13); the Chia/Sage path is drilled alongside as the bonus
 feature.
-1. Install Sage CLI from the pinned commit; verify the binary's checksum
-   against the release built from `f2ec89dd…` (P9 — a version string does not
-   prove the pinned commit).
+1. Build the Sage CLI from the pinned commit: clone `xch-dev/sage`, check
+   out `f2ec89dd…` exactly, assert `git rev-parse HEAD` equals the pin, then
+   `cargo build --release -p sage-cli`. The pinned commit IS the verification
+   (P9) — the binary is produced from pinned source, so no release-artifact
+   checksum is chased and a version string is never trusted on its own. The
+   installer does this itself (or accepts an operator-supplied binary only
+   with `SAGE_PIN_VERIFIED=1`, verified out-of-band by the operator).
 2. Daemon boots; §2 test vectors reproduce — including the
    evm-4663/evm-46630 distinguishing vector (P9); imports derived test key
    into Sage.
@@ -743,7 +749,9 @@ testnet-proven install with one command and no human coordination.
   1. Fetches the pinned release tarball + checksum + signature; verifies both
      against the pinned release-key fingerprint — fail closed on mismatch,
      never installs unverified code.
-  2. Installs Sage CLI from its pinned commit (§3 / D4).
+  2. Builds the Sage CLI from its pinned commit (§3 / D4) — the commit pin
+     is verified (`git rev-parse HEAD`) before compiling, so the binary is
+     produced from pinned source.
   3. Creates the dedicated `spellbook` OS user (S2); builds and installs the
      daemon under it; writes a default-off policy config (D9).
   4. Runs the §10 testnet drill automatically with a throwaway key — minus
@@ -784,6 +792,18 @@ verify, install locally — per muse, per D1.
 ---
 
 ## 15. Review log
+- 2026-09-20 — Sage pinned-commit path implemented (was: open decision #7).
+  `install.sh` §2 now builds the `sage-cli` crate from source at the pinned
+  commit `f2ec89dd…`: shallow-fetch the exact commit, assert
+  `git rev-parse HEAD` equals the pin, then `cargo build --release -p
+  sage-cli`. The pinned commit is the verification — no release-artifact
+  checksum needed. The verified binary is installed at
+  `/opt/spellbook/bin/sage` and recorded as `sage_bin` in `spellbook.json`;
+  an operator-supplied `$SAGE_BIN` is still accepted only with
+  `SAGE_PIN_VERIFIED=1`. Not yet compiled end-to-end (needs a Rust toolchain
+  + build time at install); the Sage/XCH testnet drill itself still awaits a
+  live run. Remaining genuinely blocked item: the release-key signature
+  (fail closed).
 - 2026-09-20 — §10 on-chain testnet drill GREEN (EVM path, Robinhood Chain
   testnet 46630). Throwaway seed/daemon; 0.009 test ETH funded via faucet.
   Auto-approved below-threshold transfer submitted and confirmed
@@ -798,8 +818,9 @@ verify, install locally — per muse, per D1.
   Chain (Arbitrum-style) estimates ~28867 gas for a plain transfer, above
   the 21000 floor — the first run died with "intrinsic gas too low"; the
   daemon now takes its gas limit from eth_estimateGas and fails closed if
-  estimation is unavailable. Sage/XCH drill steps stay pending on the
-  pinned-commit verification (open decision #7).
+  estimation is unavailable. Sage/XCH drill steps stay pending on a live
+  drill run (the pinned-commit build path is implemented — open decision #7
+  resolved 2026-09-20).
 
 - 2026-09-20 — town decisions locked as implementation consensus: Speechless
   approved S1→Option B (fleet; implemented in installer/daemon), S4→
@@ -825,9 +846,9 @@ verify, install locally — per muse, per D1.
   (secp256k1/ECDSA via libsecp256k1, BLS via py_ecc, Ed25519 identity signing
   behind the S1 gate); queue persistence + 24h velocity reconstruction;
   per-role peer-UID enforcement; agent client library (`AgentClient` /
-  `HumanClient`) + `spellbook` CLI; installer finished except the two
-  genuinely blocked items (release-key signature — fail closed; Sage
-  pinned-commit artifact verification — fail closed, `--no-sage` for EVM-only).
+  `HumanClient`) + `spellbook` CLI; installer finished except the release-key
+  signature (fail closed). The Sage pinned-commit verification landed
+  2026-09-20 as a build-from-source path (§2).
   30 tests green (`tests/`). Install verified end-to-end on a throwaway
   machine image and torn down afterwards. Nothing on-chain; on-chain drill
   phases still need explicit authorization (§10).

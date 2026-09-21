@@ -14,7 +14,13 @@
 #
 # What it does:
 #   1. Verifies the release tarball (checksum + release-key signature) — fail closed.
-#   2. Installs / checks Sage CLI from the pinned commit (SPEC §3/D4).
+#   2. Builds the Sage CLI from the pinned commit (SPEC §3/D4, §10 step 1):
+#      clones the Sage repo, checks out the exact pinned commit, asserts
+#      `git rev-parse HEAD` equals the pin, then compiles the `sage-cli`
+#      crate. The pinned commit IS the verification — the artifact is built
+#      from pinned source, so no release-artifact checksum is needed.
+#      (Override: an operator-supplied $SAGE_BIN is accepted only with
+#      SAGE_PIN_VERIFIED=1, i.e. verified out-of-band by the operator.)
 #   3. Creates the dedicated `spellbook` OS user (S2), the client group, and the
 #      0600/0700 layout. Generates the wallet seed ONCE and prints the paper
 #      backup mnemonic ONCE — write it down, it is never shown again.
@@ -32,6 +38,7 @@
 set -euo pipefail
 
 REPO="https://github.com/awizardxch/Spellbook"
+SAGE_REPO="${SAGE_REPO:-https://github.com/xch-dev/sage}"
 SAGE_COMMIT="f2ec89dd59d07227bed657bc268fc32ce97551f6"   # SPEC §3/D4
 SPELLBOOK_USER="spellbook"
 CLIENT_GROUP="spellbook-clients"
@@ -129,22 +136,47 @@ fi
 log "source: $SRC"
 
 # ---------------------------------------------------------------- 2. Sage CLI, pinned commit
+# SPEC §3/D4 + §10 step 1 (P9): the Sage CLI is BUILT FROM SOURCE at the
+# pinned commit. The pinned commit hash IS the verification: we clone the
+# repo, check out the exact commit, and assert `git rev-parse HEAD` equals
+# the pin before compiling. The artifact is produced from pinned source, so
+# there is no release-artifact checksum to chase — and a version string is
+# never trusted on its own.
 CHIA_ENABLED=true
+SAGE_BIN_STAGED=""   # path under $WORK; copied into ${PREFIX}/bin in §3
 if [ "$NO_SAGE" -eq 1 ]; then
   log "--no-sage: EVM-only install (Chia support can be added later)"
   CHIA_ENABLED=false
+elif [ -n "${SAGE_BIN:-}" ] && [ "$SAGE_PIN_VERIFIED" = "1" ]; then
+  # Operator-supplied binary, verified out-of-band by the operator.
+  [ -x "$SAGE_BIN" ] || fail "SAGE_BIN is not executable: $SAGE_BIN"
+  warn "SAGE_PIN_VERIFIED=1: trusting operator-supplied sage binary at ${SAGE_BIN}"
+  SAGE_BIN_STAGED="$SAGE_BIN"
+elif [ -n "${SAGE_BIN:-}" ]; then
+  fail "SAGE_BIN was given without SAGE_PIN_VERIFIED=1 — refusing to trust an unverified binary. Verify it out-of-band and re-run with SAGE_PIN_VERIFIED=1, or unset SAGE_BIN to build from the pinned commit."
 else
-  SAGE_BIN="${SAGE_BIN:-$(command -v sage || true)}"
-  [ -n "$SAGE_BIN" ] || fail "sage CLI not found: set \$SAGE_BIN or pass --no-sage for an EVM-only install"
-  SAGE_VERSION="$("$SAGE_BIN" --version 2>&1 | head -1)" || fail "sage --version failed"
-  log "found sage: ${SAGE_VERSION}"
-  # P9: a version string is not proof of the pinned commit. Until the release
-  # engineering maps ${SAGE_COMMIT} to a published artifact checksum, the pin
-  # cannot be verified — fail closed unless the operator verified out-of-band.
-  if [ "$SAGE_PIN_VERIFIED" != "1" ]; then
-    fail "Sage pinned-commit verification not yet implemented (SPEC §10 step 1, P9). Either verify the ${SAGE_COMMIT} artifact out-of-band and re-run with SAGE_PIN_VERIFIED=1, or install EVM-only with --no-sage."
-  fi
-  warn "SAGE_PIN_VERIFIED=1: proceeding on the operator's out-of-band verification."
+  need git; need cargo
+  log "building sage-cli from pinned commit ${SAGE_COMMIT} ..."
+  SAGE_SRC="${WORK}/sage-src"
+  git init -q "$SAGE_SRC"
+  git -C "$SAGE_SRC" remote add origin "$SAGE_REPO"
+  # Shallow-fetch just the pinned commit: less to download, hash still exact.
+  git -C "$SAGE_SRC" fetch --depth 1 origin "$SAGE_COMMIT" \
+    || fail "could not fetch Sage commit ${SAGE_COMMIT} from ${SAGE_REPO}"
+  git -C "$SAGE_SRC" checkout -q FETCH_HEAD
+  HEAD="$(git -C "$SAGE_SRC" rev-parse HEAD)"
+  [ "$HEAD" = "$SAGE_COMMIT" ] \
+    || fail "Sage checkout is ${HEAD}, not the pinned ${SAGE_COMMIT} — refusing to build"
+  log "Sage source verified at pinned commit ${HEAD}"
+  ( cd "$SAGE_SRC" && cargo build --release -p sage-cli ) \
+    || fail "sage-cli build failed — needs a Rust toolchain plus the Tauri prerequisites (https://v2.tauri.app/start/prerequisites/)"
+  [ -x "${SAGE_SRC}/target/release/sage" ] \
+    || fail "sage-cli build produced no target/release/sage binary"
+  SAGE_BIN_STAGED="${SAGE_SRC}/target/release/sage"
+fi
+if [ "$CHIA_ENABLED" = true ]; then
+  SAGE_VERSION="$("$SAGE_BIN_STAGED" --version 2>&1 | head -1)" || fail "sage --version failed"
+  log "sage ready: ${SAGE_VERSION}"
 fi
 
 # ---------------------------------------------------------------- 3. OS user + layout (S2)
@@ -168,6 +200,19 @@ log "creating ${PREFIX} ..."
 mkdir -p "${PREFIX}"
 chown "${SPELLBOOK_USER}:${SPELLBOOK_USER}" "${PREFIX}"
 chmod 0700 "${PREFIX}"
+
+# The verified sage binary lives at one canonical path under the prefix —
+# this is what the daemon will invoke (§10 step 1). Built from the pinned
+# commit in §2, or copied from the operator-verified SAGE_BIN override.
+SAGE_BIN_FINAL=""
+if [ "$CHIA_ENABLED" = true ]; then
+  mkdir -p "${PREFIX}/bin"
+  cp "$SAGE_BIN_STAGED" "${PREFIX}/bin/sage"
+  chown "${SPELLBOOK_USER}:${SPELLBOOK_USER}" "${PREFIX}/bin/sage"
+  chmod 0755 "${PREFIX}/bin/sage"
+  SAGE_BIN_FINAL="${PREFIX}/bin/sage"
+  log "installed verified sage binary at ${SAGE_BIN_FINAL}"
+fi
 
 VENV="${PREFIX}/venv"
 if [ ! -x "${VENV}/bin/python" ]; then
@@ -207,13 +252,15 @@ chown "${SPELLBOOK_USER}:${SPELLBOOK_USER}" "${PREFIX}/seed.key"
 chmod 0600 "${PREFIX}/seed.key"
 
 log "writing config ..."
-runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" - "$PREFIX" "$AGENT_UID" "$HUMAN_UID" "$CHIA_ENABLED" <<'EOF'
+runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" - "$PREFIX" "$AGENT_UID" "$HUMAN_UID" "$CHIA_ENABLED" "$SAGE_BIN_FINAL" <<'EOF'
 import json, sys
 prefix, agent_uid, human_uid, chia = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4] == "true"
+sage_bin = sys.argv[5] or None
 cfg = {
     "seed_path": f"{prefix}/seed.key",
     "labels": ["default"],
     "chia_enabled": chia,
+    "sage_bin": sage_bin,   # verified sage CLI (§10 step 1); null with --no-sage
     "socket_group": "spellbook-clients",
     "musebook_signing_mode": "disabled",   # S1: inert until Speechless decides
     "allowed_request_uids": [agent_uid],
