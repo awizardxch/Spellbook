@@ -43,7 +43,8 @@ from spellbook import tokens as token_auth
 
 REQUEST_ROUTES = {
     "request_spend", "queue_read", "status", "addresses",
-    "ledger_read", "sign_musebook_request",
+    "ledger_read", "sign_musebook_request", "chia_read",
+    "offer_make", "offer_take", "offer_cancel",
 }
 APPROVE_ROUTES = {
     "queue_approve", "queue_reject", "publish_directory_entry",
@@ -53,6 +54,73 @@ APPROVE_ROUTES = {
 # rejected; anything shaped like a contract call is denied, not coerced.
 SPEND_FIELDS = {"chain", "destination", "asset", "purpose"}
 AMOUNT_FIELDS = {"amount_mojos", "amount_wei", "amount_lamports"}
+
+# Offer intent schemas. make/take/cancel move or encumber funds, so they
+# travel the same queue/approval/ledger/velocity path as transfers, with
+# an explicit "intent" discriminator (S13: unknown shapes are rejected,
+# never coerced into transfers).
+OFFER_MAKE_FIELDS = {"intent", "chain", "offered", "requested", "fee_mojos",
+                     "purpose", "expires_at_second", "receive_address"}
+OFFER_TAKE_FIELDS = {"intent", "chain", "offer", "fee_mojos", "purpose",
+                     "_give"}
+OFFER_CANCEL_FIELDS = {"intent", "chain", "offer_id", "offer_ids",
+                       "fee_mojos", "purpose", "_offered"}
+
+# chia_read op allowlist: read-only or wallet-local offer ops only. Each
+# entry is (rpc_method, [param names]). Anything not listed here is
+# rejected by rt_chia_read, so the route can never become a generic RPC
+# passthrough (no spends, no signing, no key material, no issuance).
+_CHIA_READ_OPS = {
+    # offers (local records / decode only — NOT take/cancel)
+    "get_offers": ("get_offers", []),
+    "get_offer": ("get_offer", ["offer_id"]),
+    "get_offers_for_asset": ("get_offers_for_asset", ["asset_id"]),
+    "view_offer": ("view_offer", ["offer"]),
+    "import_offer": ("import_offer", ["offer"]),
+    "delete_offer": ("delete_offer", ["offer_id"]),
+    "combine_offers": ("combine_offers", ["offers"]),
+    # coins
+    "get_coins": ("get_coins", ["asset_id", "offset", "limit"]),
+    "get_coins_by_ids": ("get_coins_by_ids", ["coin_ids"]),
+    "get_are_coins_spendable": ("get_are_coins_spendable", ["coin_ids"]),
+    "get_spendable_coin_count": ("get_spendable_coin_count", ["asset_id"]),
+    # transactions
+    "get_transaction": ("get_transaction", ["transaction_id"]),
+    "get_pending_transactions": ("get_pending_transactions", []),
+    "recent_transactions": ("recent_transactions", ["limit"]),
+    # assets
+    "get_cats": ("get_cats", []),
+    "get_all_cats": ("get_all_cats", []),
+    "get_nfts": ("get_nfts", ["offset", "limit", "collection_id", "name"]),
+    "get_nft": ("get_nft", ["nft_id"]),
+    "get_nft_data": ("get_nft_data", ["nft_id"]),
+    "get_dids": ("get_dids", []),
+    "get_minter_did_ids": ("get_minter_did_ids", []),
+    "is_asset_owned": ("is_asset_owned", ["asset_id"]),
+    "get_options": ("get_options", ["offset", "limit"]),
+    "get_option": ("get_option", ["option_id"]),
+    # system / network
+    "get_version": ("get_version", []),
+    "get_network": ("get_network", []),
+    "get_networks": ("get_networks", []),
+    "get_peers": ("get_peers", []),
+    "get_xch_usd_price": ("get_xch_usd_price", []),
+    "check_address": ("check_address", ["address"]),
+    "get_derivations": ("get_derivations", ["offset", "limit", "hardened"]),
+    "get_database_stats": ("get_database_stats", []),
+    "sync_status": ("sync_status", []),
+}
+
+
+def _run_chia_read_op(daemon, rpc, op: str, p: dict):
+    """Dispatch one allowlisted chia_read op against the Sage RPC."""
+    method_name, param_names = _CHIA_READ_OPS[op]
+    method = getattr(rpc, method_name)
+    kwargs = {}
+    for name in param_names:
+        if name in p and p[name] is not None:
+            kwargs[name] = p[name]
+    return method(**kwargs)
 
 VELOCITY_WINDOW_S = 24 * 3600
 
@@ -85,6 +153,68 @@ def chia_asset_kind(asset: str) -> tuple:
     raise chia.SageError(
         f"bad chia asset {asset!r}: expected 'native', a 64-hex CAT asset "
         "id, or 'nft:<id>'")
+
+
+def _validate_offer_legs(items, side: str) -> list:
+    """Validate one side of an offer intent: [{asset, amount_mojos}].
+
+    Returns [(asset, amount)] with the asset in daemon form ("native" or
+    64-hex CAT). NFTs are rejected — the daemon's NFT path is
+    transfer-only. Raises chia.SageError on any malformed leg so bad
+    offers fail closed at request time.
+    """
+    if not isinstance(items, list) or not items:
+        raise chia.SageError(f"offer {side} must be a non-empty list")
+    out = []
+    for it in items:
+        if not isinstance(it, dict):
+            raise chia.SageError(f"offer {side} leg must be an object")
+        asset = it.get("asset", "native")
+        amount = it.get("amount_mojos")
+        try:
+            kind, ref = chia_asset_kind(asset)
+        except chia.SageError as e:
+            raise chia.SageError(f"offer {side}: {e}") from e
+        if kind == "nft":
+            raise chia.SageError(
+                f"offer {side}: NFTs not supported in offers")
+        if not isinstance(amount, int) or amount <= 0:
+            raise chia.SageError(
+                f"offer {side}: amount_mojos must be a positive integer")
+        out.append((asset if kind == "native" else ref, amount))
+    return out
+
+
+def _summary_legs(summary: dict, side: str) -> list:
+    """Convert a Sage OfferSummary's maker/taker legs to [(asset, amount)].
+
+    Sage's summary uses {"asset": {"asset_id": <hex>|null, "kind": ...},
+    "amount": ...}; asset_id null means XCH. NFT/DID/option legs raise —
+    the daemon only handles fungible legs.
+    """
+    legs = summary.get(side)
+    if not isinstance(legs, list):
+        raise chia.SageError(f"offer summary has no {side!r} legs: "
+                             f"{str(summary)[:200]}")
+    out = []
+    for leg in legs:
+        a = (leg or {}).get("asset") or {}
+        kind = (a.get("kind") or "token")
+        if kind != "token":
+            raise chia.SageError(
+                f"offer leg kind {kind!r} not supported (fungible only)")
+        asset_id = a.get("asset_id")
+        asset = "native" if not asset_id else str(asset_id).lower()
+        if asset != "native" and not _HEX64.fullmatch(asset):
+            raise chia.SageError(f"bad offer leg asset id {asset_id!r}")
+        try:
+            amount = chia.amount_to_int(leg.get("amount"))
+        except chia.SageError as e:
+            raise chia.SageError(f"bad offer leg amount: {e}") from e
+        if amount <= 0:
+            raise chia.SageError("offer leg amount must be positive")
+        out.append((asset, amount))
+    return out
 
 
 def _redacted(req: dict) -> str:
@@ -567,7 +697,18 @@ class Daemon:
         native-XCH only (it builds standard-puzzle spends via chia_sign).
         The asset was validated at request time; re-validating here is the
         execute-time second layer.
+
+        Offer intents always take the Sage path — offer construction,
+        taking, and cancellation are wallet-local Sage operations the
+        relay deliberately does not expose.
         """
+        intent = params.get("intent")
+        if intent == "offer_make":
+            return self._execute_offer_make_via_sage(params)
+        if intent == "offer_take":
+            return self._execute_offer_take_via_sage(params)
+        if intent == "offer_cancel":
+            return self._execute_offer_cancel_via_sage(params)
         kind, _ = chia_asset_kind(params.get("asset", "native"))
         if kind != "native":
             return self._execute_chia_spend_via_sage(params)
@@ -949,6 +1090,142 @@ class Daemon:
                 "coin_id": coin_id, "from": sender,
                 "tx_height": tx.get("height"), "nft_id": nft_ref}
 
+    def _execute_offer_make_via_sage(self, params: dict) -> dict:
+        """Create an approved offer via Sage RPC (off-chain — no broadcast).
+
+        Flow: guards, wallet selection, re-validation of the queued legs
+        (never trust the queue entry shape blindly), balance check for the
+        offered side, /make_offer, then verification — the offer record
+        must exist via /get_offer with an open status. Returns
+        {"submitted": False, "offer_id", "offer", ...}: nothing left the
+        machine, so velocity counts the encumbered legs and the ledger
+        records the offer_id as the reference. Raises chia.SageError on
+        any failure — a make that never completed records nothing.
+        """
+        chain = params["chain"]
+        self._chia_offer_guards(params, chain)
+        offered = _validate_offer_legs(params["offered"], "offered")
+        requested = _validate_offer_legs(params["requested"], "requested")
+        rpc, _, _ = self._chia_sage_rpc(chain)
+        fee = params.get("fee_mojos", 0)
+        self._check_offer_balances(rpc, offered, fee)
+        res = rpc.make_offer(
+            [{"asset": a, "amount_mojos": m} for a, m in offered],
+            [{"asset": a, "amount_mojos": m} for a, m in requested],
+            fee_mojos=fee,
+            receive_address=params.get("receive_address"),
+            expires_at_second=params.get("expires_at_second"))
+        offer_id = res["offer_id"]
+        rec = rpc.get_offer(offer_id)
+        if rec.get("status") not in ("pending", "active"):
+            raise chia.SageError(
+                f"offer {offer_id[:16]}… created but status is "
+                f"{rec.get('status')!r} — human must reconcile")
+        return {"submitted": False, "offer_id": offer_id,
+                "offer": res["offer"],
+                "note": f"offer {offer_id} created off-chain "
+                        f"(status {rec.get('status')})"}
+
+    def _execute_offer_take_via_sage(self, params: dict) -> dict:
+        """Take an approved offer via Sage RPC (on-chain spend of our side).
+
+        Flow: guards, wallet selection, re-view of the offer — it must
+        still be open AND its legs must equal the request-time terms (the
+        offer string is immutable, so this is belt-and-braces),
+        balance check for what we give, /take_offer with auto_submit,
+        then verification — the transaction must appear in Sage's pending
+        transactions. Raises chia.SageError on any failure, and
+        chia.BroadcastUnknown when the take may have broadcast but never
+        appeared (never retry, never reuse).
+        """
+        chain = params["chain"]
+        self._chia_offer_guards(params, chain)
+        offer = params["offer"]
+        rpc, _, _ = self._chia_sage_rpc(chain)
+        seen = rpc.view_offer(offer)
+        if seen.get("status") not in ("pending", "active"):
+            raise chia.SageError(
+                "offer is no longer takeable "
+                f"(status {seen.get('status')!r}) — refusing")
+        summary = seen.get("offer") or {}
+        give = _summary_legs(summary, "taker")
+        get = _summary_legs(summary, "maker")
+        want_give = [(it["asset"], it["amount_mojos"])
+                     for it in params["_give"]]
+        want_get = [(it["asset"], it["amount_mojos"])
+                    for it in params["_get"]]
+        if give != want_give or get != want_get:
+            raise chia.SageError(
+                "offer terms changed since approval — refusing to take")
+        fee = params.get("fee_mojos", 0)
+        self._check_offer_balances(rpc, give, fee)
+        res = rpc.take_offer(offer, fee_mojos=fee, auto_submit=True)
+        tx_id = res.get("transaction_id")
+        if not tx_id:
+            raise chia.SageError(
+                f"/take_offer gave no transaction_id: {str(res)[:200]}")
+        if not self._wait_pending_tx(rpc, tx_id,
+                                     timeout_s=self._sage_wait_timeout_s()):
+            raise chia.BroadcastUnknown(
+                tx_id, "take_offer submitted but the transaction never "
+                "appeared in pending transactions — broadcast, confirmation "
+                "unknown; do not retry blindly")
+        return {"submitted": True, "tx_hash": tx_id,
+                "give": params["_give"], "get": params["_get"]}
+
+    def _execute_offer_cancel_via_sage(self, params: dict) -> dict:
+        """Cancel approved offer(s) via Sage RPC (on-chain coin spends).
+
+        Flow: guards, wallet selection, re-verification that every offer
+        is still open, /cancel_offer(s) with auto_submit, then
+        verification — each offer record must flip to "cancelled". The
+        first spent input coin id is the ledger reference. Raises
+        chia.SageError on any failure, and chia.BroadcastUnknown when the
+        cancel may have broadcast but the records never flipped (never
+        retry, never reuse).
+        """
+        chain = params["chain"]
+        self._chia_offer_guards(params, chain)
+        ids = list(params["offer_ids"])
+        rpc, _, _ = self._chia_sage_rpc(chain)
+        for oid in ids:
+            rec = rpc.get_offer(oid)
+            if rec.get("status") not in ("pending", "active"):
+                raise chia.SageError(
+                    f"offer {oid[:16]}… is not open "
+                    f"(status {rec.get('status')!r}) — refusing")
+        fee = params.get("fee_mojos", 0)
+        if len(ids) == 1:
+            res = rpc.cancel_offer(ids[0], fee_mojos=fee, auto_submit=True)
+        else:
+            res = rpc.cancel_offers(ids, fee_mojos=fee, auto_submit=True)
+        inputs = ((res.get("summary") or {}).get("inputs") or [])
+        ref = inputs[0].get("coin_id") if inputs else ""
+        deadline = time.time() + self._sage_wait_timeout_s()
+        while time.time() < deadline:
+            if all((rpc.get_offer(oid) or {}).get("status") == "cancelled"
+                   for oid in ids):
+                break
+            time.sleep(5)
+        if not all((rpc.get_offer(oid) or {}).get("status") == "cancelled"
+                   for oid in ids):
+            raise chia.BroadcastUnknown(
+                ref, "cancel submitted but offer record(s) never flipped "
+                "to cancelled — broadcast, confirmation unknown; do not "
+                "retry blindly")
+        return {"submitted": True, "tx_hash": ref or ids[0],
+                "offer_ids": ids}
+
+    def _wait_pending_tx(self, rpc, tx_id: str, timeout_s: int) -> bool:
+        """True when tx_id shows up in Sage's pending transactions."""
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            for tx in rpc.get_pending_transactions():
+                if str(tx.get("transaction_id") or tx.get("id")) == tx_id:
+                    return True
+            time.sleep(5)
+        return False
+
     def _sage_wait_timeout_s(self) -> int:
         """Seconds to wait for the outgoing transaction to appear in
         Sage's /get_transactions after a send. Configurable via
@@ -1079,7 +1356,7 @@ class Daemon:
             # .tx_hash — check both before the generic .reference.
             ref = (getattr(e, "tx_hash", None) or getattr(e, "signature", None)
                    or getattr(e, "reference", None))
-            self._record_velocity(p["chain"], asset, amount)
+            self._record_velocity_entries(p)
             self.ledger.append(muse_id, canon, ref,
                                "approved-submit-unknown:" + str(e))
             return {"ok": True, "decision": "approved-submit-unknown",
@@ -1090,7 +1367,7 @@ class Daemon:
                                "approved-submit-failed:" + str(e))
             return {"ok": False, "decision": "approved-submit-failed",
                     "error": str(e)}
-        self._record_velocity(p["chain"], asset, amount)
+        self._record_velocity_entries(p)
         if ex["submitted"]:
             self.ledger.append(muse_id, canon, ex["tx_hash"], "approved")
             return {"ok": True, "decision": "approved",
@@ -1099,12 +1376,300 @@ class Daemon:
         self.ledger.append(muse_id, canon, None, "approved")
         return {"ok": True, "decision": "approved", "note": ex["note"]}
 
+    # ------------------------------------------------------------ offer intents
+    def _chia_offer_guards(self, params: dict, chain: str) -> None:
+        """Fail-fast checks shared by every offer intent.
+
+        Mainnet-without-flag and missing-seed refuse exactly like the
+        transfer path. There is no destination to prefix-check — offers
+        name assets, not addresses.
+        """
+        if chain == "chia-mainnet" and not self.chia_cfg.get(
+                "mainnet_submit_enabled"):
+            raise chia.SageError(
+                "mainnet submission refused for chia-mainnet — needs the "
+                "separately-authorized mainnet_submit_enabled flag (§10.14-17)")
+        if self._signing_seed() is None:
+            raise chia.SageError("no seed configured — cannot sign")
+        fee = params.get("fee_mojos", 0)
+        if not isinstance(fee, int) or fee < 0:
+            raise chia.SageError("fee_mojos must be a non-negative integer")
+
+    def _check_offer_balances(self, rpc, legs: list, fee_mojos: int) -> None:
+        """Fail closed when the wallet cannot fund the offer's give side.
+
+        legs are (asset, amount) with asset "native" or 64-hex CAT.
+        """
+        xch_need = fee_mojos
+        for asset, amount in legs:
+            if asset == "native":
+                xch_need += amount
+            else:
+                bal = chia.cat_balance(rpc, asset)
+                if bal < amount:
+                    raise chia.SageError(
+                        f"insufficient CAT balance: have {bal} mojos of "
+                        f"{asset[:16]}…, need {amount}")
+        if xch_need:
+            bal = chia.amount_to_int(rpc.sync_status()["selectable_balance"])
+            if bal < xch_need:
+                raise chia.SageError(
+                    f"insufficient XCH balance: have {bal} mojos, need "
+                    f"{xch_need}")
+
+    def _decide_fund_intent(self, entries: list) -> tuple:
+        """Policy over each (chain, asset, amount) leg of a fund-moving intent.
+
+        Any denied leg denies the intent; any queued leg queues it; all
+        approved executes. Destination is "" — offers name no destination,
+        so a configured destination allowlist denies them fail-closed.
+        """
+        queued_reasons = []
+        for (chain, asset, amount) in entries:
+            d = evaluate(self.policy, chain, asset, amount, "",
+                         self.spent_last_24h(chain, asset))
+            if d.verdict == "denied":
+                return ("denied", d.reason)
+            if d.verdict == "queued":
+                queued_reasons.append(f"{asset}: {d.reason}")
+        if queued_reasons:
+            return ("queued", "; ".join(queued_reasons))
+        return ("approved", "within policy")
+
+    def _velocity_entries(self, params: dict) -> list:
+        """(chain, asset, amount) legs whose movement counts toward velocity.
+
+        Transfers keep today's single-leg shape. offer_make counts the
+        encumbered offered legs; offer_take counts what we give (the
+        request-time _give legs, re-verified at execution); offer_cancel
+        counts nothing — the coins return to the wallet and the make
+        already counted them.
+        """
+        intent = params.get("intent")
+        chain = params["chain"]
+        if intent == "offer_make":
+            return [(chain, it["asset"], it["amount_mojos"])
+                    for it in params["offered"]]
+        if intent == "offer_take":
+            return [(chain, it["asset"], it["amount_mojos"])
+                    for it in params["_give"]]
+        if intent == "offer_cancel":
+            return []
+        asset = params.get("asset", "native")
+        amount = params.get("amount_mojos", params.get("amount_wei",
+                            params.get("amount_lamports")))
+        return [(chain, asset, amount)]
+
+    def _record_velocity_entries(self, params: dict) -> None:
+        for (chain, asset, amount) in self._velocity_entries(params):
+            self._record_velocity(chain, asset, amount)
+
+    def _run_fund_intent(self, params: dict, muse_id: str, entries: list,
+                         kind: str) -> dict:
+        """Shared queue/approve/deny/execute path for fund-moving intents.
+
+        Mirrors rt_request_spend's ledger discipline: queued/denied lines,
+        the pre-execution "executing" line, unknown-fate handling that
+        consumes velocity fail-closed, and per-leg velocity on success.
+        """
+        canon = json.dumps(params, sort_keys=True).encode()
+        verdict, reason = self._decide_fund_intent(entries)
+        if verdict == "queued":
+            qid = str(self.next_qid); self.next_qid += 1
+            self.queue[qid] = {"params": params, "muse_id": muse_id,
+                               "queued_at": time.time()}
+            self._save_queue()
+            self.ledger.append(muse_id, canon, None, f"queued:{qid}")
+            return {"ok": True, "decision": "queued", "queue_id": qid,
+                    "reason": reason}
+        if verdict == "denied":
+            self.ledger.append(muse_id, canon, None, "denied:" + reason)
+            return {"ok": True, "decision": "denied", "reason": reason}
+        self.ledger.append(muse_id, canon, None, "executing")
+        try:
+            ex = self._execute_spend(params)
+        except (evm.BroadcastUnknown, chia.BroadcastUnknown,
+                chia_relay.BroadcastUnknown, solana_mod.BroadcastUnknown) as e:
+            ref = (getattr(e, "tx_hash", None) or getattr(e, "signature", None)
+                   or getattr(e, "reference", None))
+            self._record_velocity_entries(params)
+            self.ledger.append(muse_id, canon, ref,
+                               "approved-submit-unknown:" + str(e))
+            return {"ok": True, "decision": "approved-submit-unknown",
+                    "tx_hash": ref, "note": str(e)}
+        except (evm.EvmError, chia.SageError, chia_relay.RelayError,
+                solana_mod.SolanaError) as e:
+            self.ledger.append(muse_id, canon, None,
+                               "approved-submit-failed:" + str(e))
+            return {"ok": False, "decision": "approved-submit-failed",
+                    "error": str(e)}
+        self._record_velocity_entries(params)
+        if ex.get("submitted"):
+            self.ledger.append(muse_id, canon, ex["tx_hash"], "approved")
+            return {"ok": True, "decision": "approved",
+                    "tx_hash": ex["tx_hash"],
+                    "block": ex.get("block", ex.get("tx_height", ex.get("slot")))}
+        self.ledger.append(muse_id, canon, ex.get("offer_id"), "approved")
+        out = {"ok": True, "decision": "approved", "note": ex.get("note", "")}
+        if ex.get("offer_id"):
+            out["offer_id"] = ex["offer_id"]
+        if ex.get("offer"):
+            out["offer"] = ex["offer"]
+        return out
+
+    def rt_offer_make(self, p: dict, muse_id: str) -> dict:
+        fields = set(p)
+        if (not fields.issubset(OFFER_MAKE_FIELDS) or "chain" not in p
+                or "offered" not in p or "requested" not in p):
+            return {"ok": False,
+                    "error": "schema violation: offer_make needs chain, "
+                             "offered[], requested[]"}
+        chain = p["chain"]
+        if chain not in chia.NETWORKS:
+            return {"ok": False,
+                    "error": f"offer_make is Chia-only, got {chain!r}"}
+        try:
+            self._chia_offer_guards(p, chain)
+            offered = _validate_offer_legs(p["offered"], "offered")
+            requested = _validate_offer_legs(p["requested"], "requested")
+            expires = p.get("expires_at_second")
+            if expires is not None and (
+                    not isinstance(expires, int) or expires <= 0):
+                raise chia.SageError(
+                    "expires_at_second must be a positive unix timestamp")
+            recv = p.get("receive_address")
+            if recv is not None and not isinstance(recv, str):
+                raise chia.SageError("receive_address must be a string")
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+        params = {"intent": "offer_make", "chain": chain,
+                  "offered": [{"asset": a, "amount_mojos": m}
+                              for a, m in offered],
+                  "requested": [{"asset": a, "amount_mojos": m}
+                                for a, m in requested],
+                  "fee_mojos": p.get("fee_mojos", 0),
+                  "purpose": p.get("purpose", "")}
+        if expires is not None:
+            params["expires_at_second"] = expires
+        if recv:
+            params["receive_address"] = recv
+        entries = [(chain, a, m) for a, m in offered]
+        return self._run_fund_intent(params, muse_id, entries, "offer_make")
+
+    def rt_offer_take(self, p: dict, muse_id: str) -> dict:
+        fields = set(p)
+        if (not fields.issubset(OFFER_TAKE_FIELDS) or "chain" not in p
+                or not p.get("offer")):
+            return {"ok": False,
+                    "error": "schema violation: offer_take needs chain, offer"}
+        chain = p["chain"]
+        if chain not in chia.NETWORKS:
+            return {"ok": False,
+                    "error": f"offer_take is Chia-only, got {chain!r}"}
+        if not isinstance(p["offer"], str):
+            return {"ok": False, "error": "offer must be the offer string"}
+        try:
+            self._chia_offer_guards(p, chain)
+            # Decode the offer now so policy sees real legs and the human
+            # sees real terms in the queue — never an opaque string alone.
+            rpc, _, _ = self._chia_sage_rpc(chain)
+            seen = rpc.view_offer(p["offer"])
+            if seen.get("status") not in ("pending", "active"):
+                raise chia.SageError(
+                    "offer is not takeable "
+                    f"(status {seen.get('status')!r})")
+            summary = seen.get("offer") or {}
+            give = _summary_legs(summary, "taker")
+            get = _summary_legs(summary, "maker")
+            self._check_offer_balances(
+                rpc, give, p.get("fee_mojos", 0))
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+        params = {"intent": "offer_take", "chain": chain,
+                  "offer": p["offer"],
+                  "fee_mojos": p.get("fee_mojos", 0),
+                  "purpose": p.get("purpose", ""),
+                  "_give": [{"asset": a, "amount_mojos": m} for a, m in give],
+                  "_get": [{"asset": a, "amount_mojos": m} for a, m in get]}
+        entries = [(chain, a, m) for a, m in give]
+        return self._run_fund_intent(params, muse_id, entries, "offer_take")
+
+    def rt_offer_cancel(self, p: dict, muse_id: str) -> dict:
+        fields = set(p)
+        if (not fields.issubset(OFFER_CANCEL_FIELDS) or "chain" not in p
+                or ("offer_id" not in p and "offer_ids" not in p)):
+            return {"ok": False,
+                    "error": "schema violation: offer_cancel needs chain and "
+                             "offer_id or offer_ids"}
+        chain = p["chain"]
+        if chain not in chia.NETWORKS:
+            return {"ok": False,
+                    "error": f"offer_cancel is Chia-only, got {chain!r}"}
+        ids = p.get("offer_ids") or [p.get("offer_id")]
+        if (not isinstance(ids, list) or not ids
+                or not all(isinstance(i, str) and i for i in ids)):
+            return {"ok": False, "error": "offer_id(s) must be non-empty strings"}
+        try:
+            self._chia_offer_guards(p, chain)
+            # Confirm each offer is ours and still open, so the human
+            # approves a real cancellation with real terms attached.
+            rpc, _, _ = self._chia_sage_rpc(chain)
+            offered_all = []
+            for oid in ids:
+                rec = rpc.get_offer(oid)
+                if not rec or rec.get("status") not in ("pending", "active"):
+                    raise chia.SageError(
+                        f"offer {oid[:16]}… is not open "
+                        f"(status {(rec or {}).get('status')!r}) — refusing")
+                legs = _summary_legs(rec.get("summary") or {}, "maker")
+                offered_all.append({"offer_id": oid, "offered": [
+                    {"asset": a, "amount_mojos": m} for a, m in legs]})
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+        params = {"intent": "offer_cancel", "chain": chain,
+                  "offer_ids": list(ids),
+                  "fee_mojos": p.get("fee_mojos", 0),
+                  "purpose": p.get("purpose", ""),
+                  "_offered": offered_all}
+        # Cancel is fund-preserving (coins return to the wallet) but
+        # irreversible UX — it always queues for a human, no amount policy.
+        canon = json.dumps(params, sort_keys=True).encode()
+        qid = str(self.next_qid); self.next_qid += 1
+        self.queue[qid] = {"params": params, "muse_id": muse_id,
+                           "queued_at": time.time()}
+        self._save_queue()
+        self.ledger.append(muse_id, canon, None, f"queued:{qid}")
+        return {"ok": True, "decision": "queued", "queue_id": qid,
+                "reason": "offer cancellation always requires human approval"}
+
+    # ------------------------------------------------------------ chia reads
+    def rt_chia_read(self, p: dict, muse_id: str) -> dict:
+        """Read-only (or wallet-local) Chia queries — never a spend.
+
+        {"chain": "chia-testnet", "op": "<op>", ...op args}. The op
+        allowlist below is the whole surface: anything else is rejected,
+        so this route cannot become a generic RPC passthrough.
+        """
+        chain = p.get("chain")
+        if chain not in chia.NETWORKS:
+            return {"ok": False,
+                    "error": f"chia_read is Chia-only, got {chain!r}"}
+        op = p.get("op")
+        if op not in _CHIA_READ_OPS:
+            return {"ok": False,
+                    "error": f"unknown chia_read op {op!r}"}
+        try:
+            rpc, _, _ = self._chia_sage_rpc(chain)
+            return {"ok": True, "result": _run_chia_read_op(self, rpc, op, p)}
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+
     def _decoded_queue(self):
         # Full decoded intent (to/value/chain/asset), never just a hash.
         out = []
         for qid, item in sorted(self.queue.items(), key=lambda kv: int(kv[0])):
             p = item["params"]
-            out.append({
+            entry = {
                 "queue_id": qid,
                 "chain": p.get("chain"),
                 "destination": p.get("destination"),
@@ -1114,7 +1679,36 @@ class Daemon:
                 "purpose": p.get("purpose", ""),
                 "muse_id": item.get("muse_id"),
                 "queued_at": item.get("queued_at"),
-            })
+            }
+            # Offer intents carry no single destination/asset/amount — the
+            # human must see the decoded legs, never an opaque hash.
+            intent = p.get("intent")
+            if intent == "offer_make":
+                entry.update({
+                    "kind": "offer_make",
+                    "offered": p.get("offered"),
+                    "requested": p.get("requested"),
+                    "fee_mojos": p.get("fee_mojos", 0),
+                    "expires_at_second": p.get("expires_at_second"),
+                    "destination": None, "asset": "offer", "amount": None,
+                })
+            elif intent == "offer_take":
+                entry.update({
+                    "kind": "offer_take",
+                    "give": p.get("_give"),
+                    "get": p.get("_get"),
+                    "fee_mojos": p.get("fee_mojos", 0),
+                    "destination": None, "asset": "offer", "amount": None,
+                })
+            elif intent == "offer_cancel":
+                entry.update({
+                    "kind": "offer_cancel",
+                    "offer_ids": p.get("offer_ids"),
+                    "offered": p.get("_offered"),
+                    "fee_mojos": p.get("fee_mojos", 0),
+                    "destination": None, "asset": "offer", "amount": None,
+                })
+            out.append(entry)
         return out
 
     def rt_queue_read(self, p: dict, muse_id: str) -> dict:
@@ -1127,8 +1721,6 @@ class Daemon:
         item = self.queue.pop(qid)
         self._save_queue()
         params = item["params"]
-        asset = params.get("asset", "native")
-        amount = params.get("amount_mojos", params.get("amount_wei", params.get("amount_lamports")))
         canon = json.dumps(params, sort_keys=True).encode()
         # Same pre-execution intent line as the auto-approve path: the queue
         # item is already popped (one approval = one execution attempt), so
@@ -1140,7 +1732,7 @@ class Daemon:
                 chia_relay.BroadcastUnknown, solana_mod.BroadcastUnknown) as e:
             ref = (getattr(e, "tx_hash", None) or getattr(e, "signature", None)
                    or getattr(e, "reference", None))
-            self._record_velocity(params["chain"], asset, amount)
+            self._record_velocity_entries(params)
             self.ledger.append(muse_id, canon, ref,
                                "approved-submit-unknown:" + str(e))
             return {"ok": True, "queue_id": qid, "tx_hash": ref,
@@ -1154,14 +1746,20 @@ class Daemon:
             self.ledger.append(muse_id, canon, None,
                                "approved-submit-failed:" + str(e))
             return {"ok": False, "queue_id": qid, "error": str(e)}
-        self._record_velocity(params["chain"], asset, amount)
+        self._record_velocity_entries(params)
         if ex["submitted"]:
             self.ledger.append(muse_id, canon, ex["tx_hash"], "approved-by-human")
             return {"ok": True, "queue_id": qid,
                     "tx_hash": ex["tx_hash"],
                     "block": ex.get("block", ex.get("tx_height", ex.get("slot")))}
-        self.ledger.append(muse_id, canon, None, "approved-by-human")
-        return {"ok": True, "queue_id": qid, "note": ex["note"]}
+        self.ledger.append(muse_id, canon, ex.get("offer_id"),
+                           "approved-by-human")
+        out = {"ok": True, "queue_id": qid, "note": ex.get("note", "")}
+        if ex.get("offer_id"):
+            out["offer_id"] = ex["offer_id"]
+        if ex.get("offer"):
+            out["offer"] = ex["offer"]
+        return out
 
     def rt_queue_reject(self, p: dict, muse_id: str) -> dict:
         qid = p.get("queue_id")

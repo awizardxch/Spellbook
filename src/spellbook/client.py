@@ -109,6 +109,57 @@ class AgentClient(_BaseClient):
         """Decision ledger rows (P6): read through the API, never the file."""
         return self._call("ledger_read")["rows"]
 
+    def chia_read(self, *, chain: str, op: str, **kwargs) -> dict:
+        """Read-only Chia query (the daemon allowlists `op`; anything else
+        is rejected server-side). Ops: get_offers, get_offer, view_offer,
+        get_coins, get_pending_transactions, sync_status, ..."""
+        params = {"chain": chain, "op": op}
+        params.update({k: v for k, v in kwargs.items() if v is not None})
+        return self._call("chia_read", params)["result"]
+
+    def offer_make(self, *, chain: str, offered: list, requested: list,
+                   fee_mojos: int = 0, purpose: str = "",
+                   expires_at_second: int | None = None,
+                   receive_address: str | None = None) -> dict:
+        """Request an offer intent: [{asset, amount_mojos}] on each side.
+
+        Asset is "native" (XCH) or a 64-hex CAT asset id. The daemon
+        validates, runs per-leg policy, and queues for human approval
+        (or executes immediately only when policy auto-approves).
+        """
+        params: dict = {"chain": chain, "offered": offered,
+                        "requested": requested, "fee_mojos": fee_mojos,
+                        "purpose": purpose}
+        if expires_at_second is not None:
+            params["expires_at_second"] = expires_at_second
+        if receive_address:
+            params["receive_address"] = receive_address
+        return self._call("offer_make", params)
+
+    def offer_take(self, *, chain: str, offer: str, fee_mojos: int = 0,
+                   purpose: str = "") -> dict:
+        """Request taking an offer string. The daemon decodes the offer at
+        request time so policy and the queue show real legs (give/get),
+        re-verifies terms at execution, and requires human approval."""
+        return self._call("offer_take", {"chain": chain, "offer": offer,
+                                         "fee_mojos": fee_mojos,
+                                         "purpose": purpose})
+
+    def offer_cancel(self, *, chain: str, offer_id: str | None = None,
+                     offer_ids: list | None = None, fee_mojos: int = 0,
+                     purpose: str = "") -> dict:
+        """Request on-chain cancellation of offer(s). Always queues for
+        human approval — the coins return to the wallet."""
+        params: dict = {"chain": chain, "fee_mojos": fee_mojos,
+                        "purpose": purpose}
+        if offer_ids:
+            params["offer_ids"] = offer_ids
+        elif offer_id:
+            params["offer_id"] = offer_id
+        else:
+            raise ValueError("pass offer_id or offer_ids")
+        return self._call("offer_cancel", params)
+
 
 class HumanClient(_BaseClient):
     """The human's client. Approve token only — separate tooling (O5)."""
@@ -134,3 +185,8 @@ class HumanClient(_BaseClient):
 
     def ledger(self) -> list[dict]:
         return self._call("ledger_read")["rows"]
+
+    def chia_read(self, *, chain: str, op: str, **kwargs) -> dict:
+        params = {"chain": chain, "op": op}
+        params.update({k: v for k, v in kwargs.items() if v is not None})
+        return self._call("chia_read", params)["result"]
