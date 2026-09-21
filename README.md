@@ -3,9 +3,11 @@
 Turn any agent's Ed25519 identity key into its own self-custodied wallets.
 One command, no third party holding anything.
 
-**Status:** spec only — no implementation yet. The canonical plan is
-[SPEC_V1.md](SPEC_V1.md). Nothing here is built, and nothing touches any
-chain, until the spec is approved and each phase gets an explicit go-ahead.
+**Status: v0.1.0 build.** The spec is [SPEC_V1.md](SPEC_V1.md); the daemon,
+the agent client library, the KDF, and the installer below are built and
+tested. **Nothing touches any chain yet** — the on-chain drill phases need
+explicit authorization (§10), and no release is published until Speechless
+tests first.
 
 - **Primary deliverable:** every agent's own native EVM wallet, derived from
   its existing Ed25519 key.
@@ -17,13 +19,101 @@ chain, until the spec is approved and each phase gets an explicit go-ahead.
 - **Policy in code, not prompts:** a local non-LLM daemon is the only process
   that holds secrets or signs. It enforces caps, allowlists, velocity limits,
   and a human-approval queue. Conversational agents only ever call its API.
-- **Agent-agnostic:** the only input is a 32-byte Ed25519 seed. Musebook
-  muses, Claude-based agents, anything — same derivation, same wallets.
+- **Agent-agnostic:** the only input is a 32-byte seed. Musebook muses,
+  Claude-based agents, anything — same derivation, same wallets.
 
-## Layout (planned)
+## The loop (O10)
+
+The wallet belongs to the **agent**; the **human** interacts with it from chat:
+
+```
+agent surfaces intent (read-only) → human approves (their own tooling)
+→ daemon executes → agent reports
+```
+
+The agent can request and relay but never approve — the two-token split is
+enforced by the daemon, not by convention.
+
+## Install (the agent's machine)
+
+Never `curl | bash`. Verify first, then run:
+
+```bash
+curl -fsSL -o install.sh \
+  https://raw.githubusercontent.com/awizardxch/Spellbook/v0.1.0/install.sh
+# check the sha256 against the pinned town thread, then:
+bash install.sh v0.1.0 --agent-user <agent-os-user> --human-user <your-login>
+```
+
+Add `--no-sage` for an EVM-only install (the Sage pinned-commit verification
+is still being worked out — installs fail closed rather than accept an
+unverified binary). The installer:
+
+1. verifies the release tarball (checksum + release-key signature — fail closed),
+2. creates the dedicated `spellbook` OS user and the 0600/0700 layout,
+3. generates the wallet seed **once** and prints the 24-word paper backup **once**,
+4. installs the daemon into an isolated venv, writes the default-off policy,
+5. runs the §10 **off-chain** drill with a throwaway key (KDF vectors +
+   daemon lifecycle) — install completes when the drill passes.
+
+## Use (the agent's package)
+
+```bash
+pip install spellbook            # once a release is published; until then: pip install git+https://github.com/awizardxch/Spellbook@v0.1.0
+```
+
+```python
+from spellbook.client import AgentClient, HumanClient
+
+# The agent: request token only. Surfaces intent, never approves.
+agent = AgentClient("/run/spellbook/spellbook.sock", request_token_hex)
+agent.request_spend(chain="evm-4663", destination="0x...",
+                    amount_wei=10**15, purpose="invoice #42")
+agent.queue()      # decoded intent: chain/destination/asset/amount/purpose
+agent.status()
+agent.addresses()  # {label: {chain: address}}
+agent.ledger()     # decision rows, read through the API never the file
+
+# The human: approve token only, on their own tooling (separate device).
+human = HumanClient("/run/spellbook/spellbook.sock", approve_token_hex)
+human.approve(queue_id)
+human.reject(queue_id)
+```
+
+Or the CLI: `spellbook status | queue | ledger | addresses | request-spend …`
+(request token via `$SPELLBOOK_REQUEST_TOKEN`) and
+`spellbook approve|reject <queue_id>` (approve token via
+`$SPELLBOOK_APPROVE_TOKEN`). Full guide: [docs/agent-quickstart.md](docs/agent-quickstart.md).
+
+## Layout
 
 - `SPEC_V1.md` — the build plan (canonical)
-- `daemon/` — the per-agent policy daemon (not yet written)
-- `install.sh` — one-line installer: verifies the release signature, installs
-  pinned Sage, builds the daemon, and self-proves on testnet before mainnet
-  is possible (not yet written)
+- `src/spellbook/` — the pip package
+  - `daemon.py` — `spellbookd`: Unix-socket policy daemon (token auth,
+    per-role peer-UID enforcement, policy engine, persistent queue, 24h
+    velocity, decision ledger, KDF-wired addresses)
+  - `kdf.py` — §2 KDF: HKDF-SHA256 + reject/resample, then audited curve
+    libs (libsecp256k1, py_ecc, Keccak). Third implementation reproducing
+    `vectors/vectors.json` byte-for-byte
+  - `sign.py` — signing primitives (ECDSA, BLS, Ed25519 identity signing
+    behind the S1 gate; fixed domain prefixes)
+  - `seed.py` — seed loading (0600, fail closed) + BIP-39 paper backup
+  - `client.py` — `AgentClient` / `HumanClient`: the two-token split as code
+  - `cli.py` — the `spellbook` operator CLI
+  - `drill.py` — the §10 off-chain drill runner
+  - `policy.py`, `ledger.py`, `tokens.py`, `config.py`
+- `tests/` — 30 tests: all 10 KDF vectors, signing, full daemon lifecycle
+- `vectors/` — canonical KDF vectors + the two independent generators
+- `install.sh` — verified installer (see above)
+- `docs/` — reviews and guides
+
+## What's real vs what's next
+
+Real: KDF (3rd impl, vectors green), signing primitives, daemon (auth,
+policy, persistent queue, velocity, ledger, addresses), agent client + CLI,
+installer, off-chain drill.
+
+Next, each needing explicit authorization: chain RPC (balances, tx
+build/submit via EVM node + Sage), the §10 on-chain testnet drill, then —
+separately authorized — mainnet dust. The S1/O5/O9/O2 town decisions still
+await Speechless's final approval (§12a).

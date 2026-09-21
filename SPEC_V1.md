@@ -778,3 +778,17 @@ verify, install locally — per muse, per D1.
   (§12a). New open items O8 (sibling double-spend, resolved by design),
   O9 (single-device fallback), O10 (human interacts with the agent's wallet
   from chat). Full record: `docs/reviews/2026-09-21-townhall-37143.md`.
+- 2026-09-20 — build v0.1.0: repo restructured into the pip-installable
+  `spellbook` package (`src/spellbook/`, console scripts `spellbookd` +
+  `spellbook`); the daemon's KDF is now the THIRD implementation reproducing
+  all 10 `vectors/vectors.json` vectors byte-for-byte from the published test
+  seed (test seed only — no real seed derived); signing primitives wired
+  (secp256k1/ECDSA via libsecp256k1, BLS via py_ecc, Ed25519 identity signing
+  behind the S1 gate); queue persistence + 24h velocity reconstruction;
+  per-role peer-UID enforcement; agent client library (`AgentClient` /
+  `HumanClient`) + `spellbook` CLI; installer finished except the two
+  genuinely blocked items (release-key signature — fail closed; Sage
+  pinned-commit artifact verification — fail closed, `--no-sage` for EVM-only).
+  30 tests green (`tests/`). Install verified end-to-end on a throwaway
+  machine image and torn down afterwards. Nothing on-chain; on-chain drill
+  phases still need explicit authorization (§10).

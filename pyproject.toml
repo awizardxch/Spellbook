@@ -1,0 +1,36 @@
+[project]
+name = "spellbook"
+version = "0.1.0"
+description = "Per-agent self-custodied wallets: a local non-LLM policy daemon plus the agent client library."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "awizardxch", email = "awizard.agent@gmail.com" }]
+keywords = ["wallet", "agent", "chia", "evm", "custody"]
+dependencies = [
+    "coincurve>=19.0.1",      # secp256k1 (libsecp256k1 bindings) — key derivation + ECDSA
+    "py_ecc>=7.0.0",          # BLS12-381 — Chia master-key derivation + BLS signatures
+    "pycryptodome>=3.20.0",   # Keccak-256 — EVM addresses
+    "pynacl>=1.5.0",          # Ed25519 — identity signing behind the S1 gate
+]
+
+[project.scripts]
+spellbookd = "spellbook.daemon:main"
+spellbook = "spellbook.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/awizardxch/Spellbook"
+Specification = "https://github.com/awizardxch/Spellbook/blob/main/SPEC_V1.md"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+spellbook = ["bip39-english.txt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
