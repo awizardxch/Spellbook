@@ -397,7 +397,8 @@ class PeerManager:
                 out.append((host.strip(), int(port) if port else self.config.peer_port))
             return out
         try:
-            infos = await asyncio.getaddrinfo(
+            loop = asyncio.get_running_loop()
+            infos = await loop.getaddrinfo(
                 self.config.introducer_host, self.config.peer_port,
                 type=socket.SOCK_STREAM,
             )
