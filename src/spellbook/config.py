@@ -9,6 +9,15 @@ spellbook.json (all fields optional unless noted):
   chia_enabled          : bool (default true; false with install.sh --no-sage)
   sage_bin              : path to the verified sage CLI binary built from the
                           pinned commit (install.sh §2); null with --no-sage
+  chia                  : {"sage_bin": str, "sage_data_home": str,
+                          "rpc_port": int (default 9257),
+                          "fee_mojos": int (default 0),
+                          "mainnet_submit_enabled": bool (default false)} —
+                          Sage wiring (§10 phase 1); {} or missing with
+                          --no-sage. The daemon spawns `sage rpc start` with
+                          XDG_DATA_HOME=sage_data_home when the RPC port is
+                          silent; Sage keeps its DB + mTLS certs at
+                          <sage_data_home>/com.rigidnetwork.sage.
   socket_group          : Unix group allowed to connect to the socket (optional —
                           without it the socket is 0700, daemon user only)
   allowed_request_uids  : [uid, ...] allowed to use the request token (optional —

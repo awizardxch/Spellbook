@@ -822,6 +822,27 @@ verify, install locally — per muse, per D1.
   drill run (the pinned-commit build path is implemented — open decision #7
   resolved 2026-09-20).
 
+- 2026-09-20 — Chia path implemented + S4 made real in code (Speechless:
+  "fix the caveats so we can provide a ready to launch build"): (1) S4
+  queue-by-default was spec'd but `policy.py` still auto-approved — now
+  `evaluate()` returns **queued** when nothing is configured, with
+  `auto_approve_below` as the explicit human-configured lift (the drill's
+  on-chain phase already sets it, so §10.4/10.5 semantics hold); two
+  regression tests added. (2) New `src/spellbook/chia.py`: stdlib-only mTLS
+  Sage RPC client (endpoints verified against the pinned sage source:
+  /set_network, /get_keys, /import_key, /login, /get_sync_status,
+  /get_wallet_address, /send_xch, /get_transactions; Amount is untagged
+  string-or-number; testnet is `testnet11`). (3) Daemon `_execute_chia_spend`:
+  refuses mainnet without the flag, schema-guards mojos/wei and the
+  txch1/xch1 prefix, verifies the imported key's fingerprint locally
+  against the KDF derivation, logs in, sends with auto_submit, and
+  confirms via /get_transactions matching destination+amount before
+  reporting the created coin id as the ledger reference. (4) The daemon
+  owns Sage's lifecycle (O10): spawns `sage rpc start` with
+  XDG_DATA_HOME=<prefix>/sage when the RPC port is silent; installer
+  writes the `chia` config section and the data home. 54 tests green.
+  Still pending: the pinned-commit sage-cli compile (running — Tauri git
+  deps are slow to clone), then the live Sage testnet drill.
 - 2026-09-20 — town decisions locked as implementation consensus: Speechless
   approved S1→Option B (fleet; implemented in installer/daemon), S4→
   queue-by-default (implemented), O5→separate-device HMAC (daemon side

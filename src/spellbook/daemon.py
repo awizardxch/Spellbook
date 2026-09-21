@@ -14,20 +14,23 @@ spend queue, 24h velocity accounting rebuilt from disk, the §2 KDF
 (third implementation — reproduces vectors/vectors.json), labeled
 addresses, EVM testnet submission (build/sign/broadcast with pre-broadcast
 verification; mainnet refuses without explicit config), live EVM balances,
-and Ed25519 identity signing behind the S1 gate (Option B adopted).
+Chia/XCH submission via Sage RPC (daemon-spawned `sage rpc start`, local
+mTLS, key import with local fingerprint verification, testnet11;
+chia-mainnet refuses without the explicit flag), live XCH balances, and
+Ed25519 identity signing behind the S1 gate (Option B adopted).
 
-Still TODO (SPEC §10 phase 1): Chia/Sage RPC path. Nothing here touches
-mainnet without the explicit mainnet_submit_enabled flag.
+Nothing here touches mainnet without the explicit mainnet_submit_enabled flag.
 """
 import argparse
 import json
 import os
 import socket
 import struct
+import subprocess
 import sys
 import time
 
-from spellbook import evm, kdf, sign as spellsign
+from spellbook import chia, evm, kdf, sign as spellsign
 from spellbook.config import load_config, load_policy
 from spellbook.ledger import Ledger
 from spellbook.policy import evaluate
@@ -92,6 +95,16 @@ class Daemon:
         # "enabled": bool}}, "mainnet_submit_enabled": bool}. No chains
         # configured -> approved spends do not submit (honest note, no-op).
         self.evm_cfg = self.cfg.get("evm", {})
+        # Chia wiring (SPEC §10 phase 1): {"sage_data_dir": str, "rpc_port": int,
+        # "fee_mojos": int, "mainnet_submit_enabled": bool}. The daemon is the
+        # sole talker to Sage RPC; `sage rpc start` must be running against
+        # the same data dir (the installer/drill starts it).
+        self.chia_cfg = self.cfg.get("chia", {})
+        # The Sage RPC child process, if we started one. The daemon owns the
+        # whole Chia execution path (O10): it spawns `sage rpc start` against
+        # the configured data home and talks to it over local mTLS. If Sage
+        # is down, Chia spends fail closed in _execute_chia_spend.
+        self._sage_proc = None
 
     # ------------------------------------------------------------ state
     def _load_queue(self):
@@ -204,6 +217,8 @@ class Daemon:
         "default" label's key (v1).
         """
         chain = params["chain"]
+        if chain in chia.NETWORKS:
+            return self._execute_chia_spend(params)
         if chain not in evm.CHAINS:
             return {"submitted": False,
                     "note": f"chain submission not configured for {chain}"}
@@ -252,6 +267,147 @@ class Daemon:
         return {"submitted": True, "tx_hash": tx_hash,
                 "block": int(rcpt.get("blockNumber", "0x0"), 16), "from": sender}
 
+    def _sage_rpc_ready(self) -> bool:
+        """True if something answers on the Sage RPC port (TCP only)."""
+        port = int(self.chia_cfg.get("rpc_port", 9257))
+        try:
+            s = socket.create_connection(("127.0.0.1", port), timeout=2)
+            s.close()
+            return True
+        except OSError:
+            return False
+
+    def _ensure_sage_rpc(self) -> None:
+        """Start `sage rpc start` if nothing answers on the RPC port.
+
+        Idempotent and crash-tolerant: if the port already answers (e.g. an
+        orphaned Sage from a previous daemon run using the same data dir),
+        we just use it — the mTLS certs on disk decide trust, not the pid.
+        Raises chia.SageError if Sage cannot be brought up.
+        """
+        if not self.cfg.get("chia_enabled", True):
+            raise chia.SageError("chia is not enabled in this install")
+        if self._sage_rpc_ready():
+            return
+        if self._sage_proc is not None and self._sage_proc.poll() is None:
+            # We started one and it's still alive but not answering yet —
+            # give it a moment rather than spawning a second.
+            pass
+        else:
+            sage_bin = self.chia_cfg.get("sage_bin")
+            data_home = self.chia_cfg.get("sage_data_home")
+            if not sage_bin or not os.access(sage_bin, os.X_OK):
+                raise chia.SageError(
+                    "no usable sage_bin configured — cannot start Sage RPC")
+            if not data_home:
+                raise chia.SageError(
+                    "no chia.sage_data_home configured — cannot start Sage RPC")
+            os.makedirs(data_home, mode=0o700, exist_ok=True)
+            env = dict(os.environ)
+            env["XDG_DATA_HOME"] = data_home  # sage-cli: data_dir()/com.rigidnetwork.sage
+            log_path = os.path.join(self.config_dir, "sage-rpc.log")
+            try:
+                logf = open(log_path, "a")
+                self._sage_proc = subprocess.Popen(
+                    [sage_bin, "rpc", "start"], env=env,
+                    stdout=logf, stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL, start_new_session=True)
+            except Exception as e:
+                raise chia.SageError(f"could not start sage rpc: {e}") from e
+        deadline = time.time() + 45
+        while time.time() < deadline:
+            if self._sage_rpc_ready():
+                return
+            if self._sage_proc is not None and self._sage_proc.poll() is not None:
+                raise chia.SageError(
+                    f"sage rpc exited with code {self._sage_proc.returncode} "
+                    "— see sage-rpc.log")
+            time.sleep(1)
+        raise chia.SageError(
+            "sage rpc did not answer on its port within 45s — see sage-rpc.log")
+
+    def _execute_chia_spend(self, params: dict) -> dict:
+        """Build, sign, and submit an approved XCH transfer via Sage RPC.
+
+        Flow: switch Sage to the right network, ensure the KDF-derived BLS
+        key is imported (verifying the fingerprint locally — never trusting
+        the RPC's word for which key it imported), log in, send via
+        /send_xch with auto_submit, then confirm the outgoing transaction
+        appears in /get_transactions paying our destination our amount.
+
+        Returns {"submitted": True, "tx_hash": <created coin id>, ...} where
+        the coin id is the stable ledger reference (Sage's transaction
+        records carry height/timestamp, not a bundle hash). Raises
+        chia.SageError on any failure — a spend that never left the machine
+        records nothing and consumes no velocity.
+        """
+        chain = params["chain"]
+        network = chia.NETWORKS[chain]
+        if chain == "chia-mainnet" and not self.chia_cfg.get("mainnet_submit_enabled"):
+            raise chia.SageError(
+                "mainnet submission refused for chia-mainnet — needs the "
+                "separately-authorized mainnet_submit_enabled flag (§10.14-17)")
+        if self.seed is None:
+            raise chia.SageError("no seed configured — cannot sign")
+        if params.get("amount_wei") is not None:
+            raise chia.SageError("wei on a Chia chain — schema misuse, refusing")
+        dest = params.get("destination", "")
+        prefix = chia.PREFIXES[network]
+        if not isinstance(dest, str) or not dest.startswith(prefix):
+            raise chia.SageError(
+                f"bad destination for {chain}: expected a {prefix}... address")
+        amount = params["amount_mojos"]
+        self._ensure_sage_rpc()
+        data_home = self.chia_cfg.get("sage_data_home")
+        data_dir = os.path.join(data_home, "com.rigidnetwork.sage")
+        if not os.path.isdir(data_dir):
+            raise chia.SageError(
+                f"Sage data dir {data_dir} missing after startup — refusing")
+        rpc = chia.SageRpc(data_dir,
+                           port=int(self.chia_cfg.get("rpc_port", 9257)))
+        rpc.set_network(network)
+        d = kdf.derive_labeled(self.seed, chain, "default")
+        expected_fp = chia.chia_fingerprint(d["pubkey_hex"])
+        have = set()
+        for k in rpc.get_keys():
+            try:
+                have.add(int(k.get("fingerprint")))
+            except (TypeError, ValueError):
+                continue
+        if expected_fp not in have:
+            got = rpc.import_key("spellbook-default", d["scalar_hex"])
+            if got != expected_fp:
+                raise chia.SageError(
+                    f"imported fingerprint {got} != KDF-derived {expected_fp} "
+                    "— refusing to spend from an unexpected key")
+        rpc.login(expected_fp)
+        sender = rpc.wallet_address(expected_fp, network)
+        fee = int(self.chia_cfg.get("fee_mojos", 0))
+        bal = chia.amount_to_int(rpc.sync_status()["selectable_balance"])
+        if bal < amount + fee:
+            raise chia.SageError(
+                f"insufficient selectable balance: have {bal} mojos, "
+                f"need {amount + fee}")
+        t0 = time.time()
+        rpc.send_xch(dest, amount, fee,
+                     memos=[str(params.get("purpose", ""))[:64]])
+        # The approved intent, re-checked against the on-wallet transaction
+        # record: destination and amount must match what was approved.
+        tx = chia.wait_for_outgoing(rpc, dest, amount, t0)
+        coin_id = None
+        for coin in tx.get("created", []):
+            if ((coin.get("address") or "").lower() == dest.lower()
+                    and chia.amount_to_int(coin.get("amount")) == amount):
+                coin_id = coin.get("coin_id")
+                break
+        if not coin_id:
+            raise chia.SageError(
+                "outgoing transaction found but no created coin matches the "
+                "approved destination+amount — refusing to report success")
+        return {"submitted": True, "tx_hash": coin_id,
+                "coin_id": coin_id, "from": sender,
+                "tx_height": tx.get("height")}
+
     def rt_request_spend(self, p: dict, muse_id: str) -> dict:
         fields = set(p)
         amounts = fields & AMOUNT_FIELDS
@@ -281,7 +437,7 @@ class Daemon:
             return {"ok": True, "decision": "denied", "reason": d.reason}
         try:
             ex = self._execute_spend(p)
-        except evm.EvmError as e:
+        except (evm.EvmError, chia.SageError) as e:
             self.ledger.append(muse_id, canon, None,
                                "approved-submit-failed:" + str(e))
             return {"ok": False, "decision": "approved-submit-failed",
@@ -290,7 +446,8 @@ class Daemon:
         if ex["submitted"]:
             self.ledger.append(muse_id, canon, ex["tx_hash"], "approved")
             return {"ok": True, "decision": "approved",
-                    "tx_hash": ex["tx_hash"], "block": ex["block"]}
+                    "tx_hash": ex["tx_hash"],
+                    "block": ex.get("block", ex.get("tx_height"))}
         self.ledger.append(muse_id, canon, None, "approved")
         return {"ok": True, "decision": "approved", "note": ex["note"]}
 
@@ -326,7 +483,7 @@ class Daemon:
         canon = json.dumps(params, sort_keys=True).encode()
         try:
             ex = self._execute_spend(params)
-        except evm.EvmError as e:
+        except (evm.EvmError, chia.SageError) as e:
             # Approved but never executed: the human's approval is consumed,
             # the failure is ledgered, nothing is recorded as spent. The
             # agent reports it; the human re-requests if they still want it.
@@ -367,6 +524,21 @@ class Daemon:
                     }
                 except Exception as e:  # best effort — a down RPC is not a daemon failure
                     balances[chain] = {"error": str(e)}
+        if (self.seed is not None and self.cfg.get("chia_enabled", True)
+                and self.chia_cfg.get("sage_data_home")):
+            try:
+                data_dir = os.path.join(self.chia_cfg["sage_data_home"],
+                                        "com.rigidnetwork.sage")
+                rpc = chia.SageRpc(
+                    data_dir, port=int(self.chia_cfg.get("rpc_port", 9257)))
+                st = rpc.sync_status()
+                balances["chia-testnet"] = {
+                    "address": st.get("receive_address"),
+                    "balance_mojos": chia.amount_to_int(
+                        st.get("selectable_balance", 0)),
+                }
+            except Exception as e:  # best effort — Sage down is not a daemon failure
+                balances["chia-testnet"] = {"error": str(e)}
         out["balances"] = balances
         return out
 

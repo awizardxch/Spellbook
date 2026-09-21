@@ -212,6 +212,13 @@ if [ "$CHIA_ENABLED" = true ]; then
   chmod 0755 "${PREFIX}/bin/sage"
   SAGE_BIN_FINAL="${PREFIX}/bin/sage"
   log "installed verified sage binary at ${SAGE_BIN_FINAL}"
+  # Sage's data home (DB + mTLS certs live under <home>/com.rigidnetwork.sage).
+  # The daemon starts `sage rpc start` with XDG_DATA_HOME pointed here, so a
+  # fresh install is ready to drill with no extra steps.
+  mkdir -p "${PREFIX}/sage"
+  chown "${SPELLBOOK_USER}:${SPELLBOOK_USER}" "${PREFIX}/sage"
+  chmod 0700 "${PREFIX}/sage"
+  log "sage data home at ${PREFIX}/sage"
 fi
 
 VENV="${PREFIX}/venv"
@@ -261,14 +268,26 @@ cfg = {
     "labels": ["default"],
     "chia_enabled": chia,
     "sage_bin": sage_bin,   # verified sage CLI (§10 step 1); null with --no-sage
+    # Chia/Sage wiring (§10 phase 1): the daemon spawns `sage rpc start`
+    # with XDG_DATA_HOME=sage_data_home, so Sage keeps its DB + mTLS certs
+    # at <sage_data_home>/com.rigidnetwork.sage. mainnet spends stay gated
+    # behind chia.mainnet_submit_enabled (separate authorization).
+    "chia": ({
+        "sage_bin": sage_bin,
+        "sage_data_home": f"{prefix}/sage",
+        "rpc_port": 9257,
+        "fee_mojos": 0,
+        "mainnet_submit_enabled": False,
+    } if chia else {}),
     "socket_group": "spellbook-clients",
     "musebook_signing_mode": "disabled",   # S1: inert until Speechless decides
     "allowed_request_uids": [agent_uid],
     "allowed_approve_uids": [human_uid],
 }
 open(f"{prefix}/spellbook.json", "w").write(json.dumps(cfg, indent=2, sort_keys=True))
-# D9: every knob default-off. The default daemon is a signer, not a policy
-# engine (S4) — the hot wallet must hold nothing the agent may not lose.
+# D9: every knob default-off; S4 (town-adopted): with no policy configured the
+# daemon queues every spend for human approval — a delay, not a cap. The
+# hot wallet must hold nothing the human hasn't decided to risk.
 open(f"{prefix}/policy.json", "w").write(json.dumps({}, indent=2))
 open(f"{prefix}/ledger.jsonl", "a").close()
 EOF

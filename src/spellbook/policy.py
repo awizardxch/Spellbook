@@ -1,9 +1,11 @@
-"""Spellbook policy evaluation — SPEC §4, D9.
+"""Spellbook policy evaluation — SPEC §4, D9 + S4.
 
-Defaults: EVERYTHING OFF. The default daemon is a signer, not a policy
-engine (S4). A prompt-injected agent with the request token can empty the
-hot wallet in one call under the default config — the hot wallet must hold
-nothing the agent may not lose, and the installer says so out loud.
+Defaults: EVERYTHING OFF (D9) — with the town-adopted S4 exception: **all
+spends queue for human approval until the human configures policy.** A
+prompt-injected agent with the request token could otherwise empty the hot
+wallet in one call. The queue is a *delay*, not a cap: no amounts are
+forbidden by default; the first spends are simply not instant. The human
+lifts the queue by configuring policy (e.g. auto_approve_below).
 
 Pure logic, no I/O. Amounts are in base units (mojos / wei).
 """
@@ -48,9 +50,18 @@ def evaluate(policy: Policy, chain: str, asset: str, amount: int,
         if auto is None or amount > auto:
             return Decision("denied", "destination not on allowlist")
 
+    # The human lifts the S4 queue by configuring policy: amounts at or
+    # below auto_approve_below are approved without human intervention.
+    if auto is not None and amount <= auto:
+        return Decision("approved",
+                        f"amount {amount} at/below auto-approve level {auto}")
+
     if threshold is not None and amount > threshold:
         return Decision("queued", f"amount {amount} exceeds approval threshold {threshold}")
 
-    # Default-off means: nothing configured -> approved (signer behavior).
-    # This is the deliberate D9 default, stated out loud.
-    return Decision("approved", "default signer behavior (no policy configured)")
+    # S4 (town-adopted, thread 37143): nothing configured -> queued, never
+    # auto-approved. The queue is a delay, not a cap (D9 clarifier) — no
+    # amounts are forbidden by default; spends simply aren't instant until
+    # the human configures policy (e.g. auto_approve_below).
+    return Decision("queued",
+                    "no policy configured — human approval required (S4)")

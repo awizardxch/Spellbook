@@ -46,7 +46,7 @@ def live():
     _write(os.path.join(tmp, "policy.json"), json.dumps({
         "per_spend_cap": {"evm-4663:native": 1000},
         "approval_threshold": {"evm-4663:native": 100},
-        "auto_approve_below": {"evm-4663:native": 10},
+        "auto_approve_below": {"evm-4663:native": 10, "evm-46630:native": 1000},
         "daily_velocity_cap": {"evm-46630:native": 100},
     }))
     _write(os.path.join(tmp, "ledger.jsonl"), "")
@@ -205,3 +205,37 @@ def test_cli_status(live):
                          capture_output=True, text=True, env=env, timeout=15)
     assert out.returncode == 0, out.stderr
     assert json.loads(out.stdout)["ok"] is True
+
+
+def test_s4_queue_by_default_no_policy(tmp_path):
+    """S4 regression (town-adopted, thread 37143): with no policy configured,
+    nothing is auto-approved — every spend queues for human approval."""
+    from spellbook.policy import Policy, evaluate
+    p = Policy()  # empty: {} policy.json
+    d = evaluate(p, "chia-testnet", "native", 1, "txch1abc", 0)
+    assert d.verdict == "queued" and "S4" in d.reason
+    d = evaluate(p, "evm-46630", "native", 1, "0xabc", 0)
+    assert d.verdict == "queued"
+    # ...but explicit human-configured auto_approve_below lifts the queue.
+    p2 = Policy(auto_approve_below={("chia-testnet", "native"): 100})
+    assert evaluate(p2, "chia-testnet", "native", 50, "txch1abc", 0).verdict == "approved"
+    assert evaluate(p2, "chia-testnet", "native", 101, "txch1abc", 0).verdict == "queued"
+    assert evaluate(p2, "chia-testnet", "native", 100, "txch1abc", 0).verdict == "approved"
+
+
+def test_s4_queue_by_default_end_to_end(tmp_path):
+    """Same guarantee through the live daemon: empty policy.json -> queued."""
+    from spellbook.daemon import Daemon
+    req = "aa" * 32
+    _write(tmp_path / "request.token", req)
+    _write(tmp_path / "approve.token", "bb" * 32)
+    _write(tmp_path / "policy.json", "{}")
+    _write(tmp_path / "spellbook.json", json.dumps({}))
+    _write(tmp_path / "ledger.jsonl", "")
+    d = Daemon(str(tmp_path))
+    resp = d.handle({"token": req, "route": "request_spend", "muse_id": "m",
+                     "params": {"chain": "chia-testnet",
+                                "destination": "txch1abc",
+                                "amount_mojos": 1000, "purpose": "t"}},
+                    peer_uid=UID)
+    assert resp["ok"] is True and resp["decision"] == "queued"
