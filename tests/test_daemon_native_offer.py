@@ -338,3 +338,79 @@ class TestNativeOfferReads:
         got = d.rt_chia_read({"chain": CHAIN, "op": "get_offers"}, "muse-test")
         assert got["ok"] is True
         assert any(r["offer_id"] == out["offer_id"] for r in got["result"])
+
+
+class TestOfferCoinEncumbrance:
+    """Coins committed to an open offer must never be selected again.
+
+    Regression: a self-take once re-selected the offer's own maker coin
+    as the taker input (make is off-chain, so the coin is still unspent),
+    producing a bundle that spends the same coin twice — rejected by the
+    mempool with INVALID_CONDITION.
+    """
+
+    def _make_open(self, d, fake, coins):
+        fake.coins_list = coins
+        res = _make_queued(d)
+        assert res["decision"] == "queued", res
+        return d._execute_chia_spend(d.queue[res["queue_id"]]["params"])
+
+    def test_open_offer_coin_ids_tracks_maker_coins(self, env):
+        d, fake = env
+        assert d._open_offer_coin_ids() == set()
+        made = self._make_open(d, fake, [_fund_coin(0, 1_000_000)])
+        rec = d._offer_load(made["offer_id"])
+        expect = {mc["coin_id"] for mc in rec["maker_coins"]}
+        assert expect, "maker coins not recorded"
+        assert d._open_offer_coin_ids() == expect
+        d._offer_mark(made["offer_id"], "taken", {})
+        assert d._open_offer_coin_ids() == set()
+
+    def test_make_skips_encumbered_coins(self, env):
+        d, fake = env
+        coins = [_fund_coin(0, 1_000_000), _fund_coin(1, 900_000)]
+        first = self._make_open(d, fake, coins)
+        first_coin = d._offer_load(first["offer_id"])["maker_coins"][0]["coin_id"]
+        second = self._make_open(d, fake, coins)
+        second_coin = d._offer_load(second["offer_id"])["maker_coins"][0]["coin_id"]
+        assert second_coin != first_coin, "second offer reused the encumbered coin"
+
+    def test_self_take_selects_different_coin(self, env):
+        d, fake = env
+        # Same on-chain state at make and take time (make broadcasts
+        # nothing), exactly like the live self-take that double-spent.
+        coins = [_fund_coin(0, 1_000_000), _fund_coin(1, 900_000)]
+        made = self._make_open(d, fake, coins)
+        maker_coin = d._offer_load(made["offer_id"])["maker_coins"][0]["coin_id"]
+        fake.coins_list = coins  # unchanged: nothing was broadcast
+        res = d.rt_offer_take({"chain": CHAIN, "offer": made["offer"],
+                               "fee_mojos": 0}, "muse-test")
+        assert res["ok"] and res["decision"] == "queued", res
+        out = d._execute_chia_spend(d.queue[res["queue_id"]]["params"])
+        assert out["submitted"] is True
+        spends, _sig = chia_offer.parse_solutions_bundle(
+            bytes.fromhex(fake.broadcast_body))
+        coin_ids = [sp.coin.coin_id().hex() for sp in spends]
+        assert len(coin_ids) == len(set(coin_ids)), \
+            "take bundle spends the same coin twice"
+        assert maker_coin in coin_ids, "maker side missing from bundle"
+        # The taker input is the other coin, not the encumbered maker coin.
+        taker_inputs = [cid for cid in coin_ids if cid != maker_coin
+                        and not cid.startswith("00" * 32)]
+        assert taker_inputs, "no taker input found"
+
+    def test_native_select_exclude(self, env):
+        d, fake = env
+        coins = [_fund_coin(0, 1_000_000), _fund_coin(1, 900_000)]
+        index_for_ph = {c["puzzle_hash"]: i for i, c in enumerate(coins)}
+        # Without exclusion the largest coin wins.
+        sel, _ = d._native_select(coins, index_for_ph, 100_000)
+        assert sel[0].amount == 1_000_000
+        # With the largest excluded, the smaller coin is selected.
+        sel, total = d._native_select(coins, index_for_ph, 100_000,
+                                      exclude={coins[0]["coin_id"]})
+        assert sel[0].amount == 900_000 and total == 900_000
+        # Excluding everything fails closed with an encumbrance note.
+        with pytest.raises(Exception, match="encumbered by open offers"):
+            d._native_select(coins, index_for_ph, 100_000,
+                             exclude={c["coin_id"] for c in coins})

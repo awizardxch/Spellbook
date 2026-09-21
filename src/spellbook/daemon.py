@@ -1193,9 +1193,14 @@ class Daemon:
         unspent.sort(key=lambda c: int(c.get("amount_mojos", 0)),
                      reverse=True)
         need = amount + fee
+        # Never spend a coin committed to an open offer — it is
+        # encumbered until the offer is taken, cancelled, or expires.
+        encumbered = self._open_offer_coin_ids()
         selected = []
         total = 0
         for c in unspent:
+            if c.get("coin_id") in encumbered:
+                continue
             selected.append(c)
             total += int(c["amount_mojos"])
             if total >= need:
@@ -1700,15 +1705,44 @@ class Daemon:
         unspent = [c for c in coins if c.get("spent_height") is None]
         return rpc, network, master_sk, unspent, index_for_ph, puzzle_hashes
 
-    def _native_select(self, unspent: list, index_for_ph: dict, need: int):
-        """Largest-first XCH input selection; returns ([XchInput], total)."""
+    def _open_offer_coin_ids(self) -> set:
+        """Coin ids encumbered by locally-stored open native offers.
+
+        A coin committed as a maker input to an open offer must not be
+        selected for any other spend (regular transfer, another offer's
+        make, or a take — including a self-take of that same offer,
+        whose maker coins are spent by the offer's own spends inside the
+        take bundle). Without this, the same coin can be selected twice
+        and the bundle is rejected as a double-spend.
+        """
+        encumbered = set()
+        for rec in self._offer_list_local():
+            if rec.get("status") != "open":
+                continue
+            for mc in rec.get("maker_coins") or []:
+                cid = mc.get("coin_id")
+                if cid:
+                    encumbered.add(cid)
+        return encumbered
+
+    def _native_select(self, unspent: list, index_for_ph: dict, need: int,
+                       exclude: set | None = None):
+        """Largest-first XCH input selection; returns ([XchInput], total).
+
+        ``exclude``: coin ids to skip (encumbered by open offers).
+        """
         from spellbook import chia_offer, chia_relay
+        excluded = exclude or set()
         ordered = sorted(unspent,
                          key=lambda c: int(c.get("amount_mojos", 0)),
                          reverse=True)
         selected = []
         total = 0
+        skipped = 0
         for c in ordered:
+            if c.get("coin_id") in excluded:
+                skipped += 1
+                continue
             ph_hex = c["puzzle_hash"]
             idx = index_for_ph.get(ph_hex)
             if idx is None:
@@ -1724,7 +1758,9 @@ class Daemon:
                 break
         if total < need:
             raise chia_relay.RelayError(
-                f"insufficient XCH via relay: have {total} mojos, need {need}")
+                f"insufficient XCH via relay: have {total} mojos, need {need}"
+                + (f" ({skipped} coins encumbered by open offers)"
+                   if skipped else ""))
         return selected, total
 
     def _relay_broadcast_strict(self, rpc, bundle_bytes: bytes) -> str:
@@ -1791,7 +1827,11 @@ class Daemon:
         (rpc, network, master_sk, unspent, index_for_ph,
          puzzle_hashes) = self._native_relay_coins(chain)
         need = sum(m for _, m in offered) + fee
-        inputs, _total = self._native_select(unspent, index_for_ph, need)
+        # Coins committed to other open offers are encumbered — a coin
+        # can back only one open offer at a time.
+        inputs, _total = self._native_select(
+            unspent, index_for_ph, need,
+            exclude=self._open_offer_coin_ids())
         change_ph = bytes.fromhex(puzzle_hashes[0])
         built = chia_offer.make_offer(
             master_sk, network,
@@ -1854,7 +1894,13 @@ class Daemon:
         (rpc, network, master_sk, unspent, index_for_ph,
          puzzle_hashes) = self._native_relay_coins(chain)
         need = sum(m for _, m in give) + fee
-        inputs, _total = self._native_select(unspent, index_for_ph, need)
+        # The offer's own maker coins are spent by the offer's spends
+        # inside the take bundle, and other open offers encumber their
+        # coins too — exclude all of them so the taker side can never
+        # re-select the same coin (double-spend inside the bundle).
+        inputs, _total = self._native_select(
+            unspent, index_for_ph, need,
+            exclude=self._open_offer_coin_ids())
         recv_ph = bytes.fromhex(puzzle_hashes[0])
         result = chia_offer.take_offer(
             master_sk, network, parsed,

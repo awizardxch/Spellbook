@@ -516,15 +516,19 @@ def create_coin_outputs(conditions: list) -> list[tuple[bytes, int]]:
     return out
 
 
-def asserted_puzzle_announcements(conditions: list) -> list[tuple[bytes, bytes]]:
-    """(puzzle_hash, message) for every ASSERT_PUZZLE_ANNOUNCEMENT."""
+def asserted_puzzle_announcements(conditions: list) -> list[bytes]:
+    """Announcement ids asserted by ASSERT_PUZZLE_ANNOUNCEMENT conditions.
+
+    Each condition carries a single argument: the announcement id
+    ``sha256(puzzle_hash + message)``.  Returns the list of ids.
+    """
     out = []
     for cond in conditions:
         opcode, args = _condition_args(cond)
         if opcode == _ASSERT_PUZZLE_ANNOUNCEMENT:
-            if len(args) < 2 or not isinstance(args[0], bytes) or len(args[0]) != 32:
+            if len(args) != 1 or not isinstance(args[0], bytes) or len(args[0]) != 32:
                 raise OfferError("bad ASSERT_PUZZLE_ANNOUNCEMENT condition")
-            out.append((args[0], args[1] if isinstance(args[1], bytes) else b""))
+            out.append(args[0])
     return out
 
 
@@ -533,9 +537,9 @@ def conditions_of_spend(spend: "CoinSpend") -> list:
     return parse_conditions(spend.solution)
 
 
-def assert_announcements_of_spends(spends: list["CoinSpend"]) -> set[tuple[bytes, bytes]]:
-    """Union of (puzzle_hash, message) asserted across spends."""
-    out: set[tuple[bytes, bytes]] = set()
+def assert_announcements_of_spends(spends: list["CoinSpend"]) -> set[bytes]:
+    """Announcement ids asserted across spends."""
+    out: set[bytes] = set()
     for spend in spends:
         out.update(asserted_puzzle_announcements(conditions_of_spend(spend)))
     return out
@@ -837,8 +841,20 @@ def announcement_for_asset(asset: str, nonce: bytes, payments: list[Payment]) ->
 
 
 def assert_puzzle_announcement_condition(ph: bytes, msg: bytes):
-    """ASSERT_PUZZLE_ANNOUNCEMENT condition s-expr."""
-    return cs._list([cs.int_to_bytes(_ASSERT_PUZZLE_ANNOUNCEMENT), ph, msg])
+    """ASSERT_PUZZLE_ANNOUNCEMENT condition s-expr.
+
+    Consensus format is a SINGLE argument: the announcement id
+    ``sha256(puzzle_hash + message)`` (chia/wallet/conditions.py:
+    ``AssertPuzzleAnnouncement.to_program``).  A two-argument
+    ``(ph, msg)`` form is malformed and the mempool rejects the bundle
+    with INVALID_CONDITION.
+    """
+    return cs._list(
+        [
+            cs.int_to_bytes(_ASSERT_PUZZLE_ANNOUNCEMENT),
+            hashlib.sha256(ph + msg).digest(),
+        ]
+    )
 
 # ---------------------------------------------------------------------------
 # Offer construction
@@ -1240,8 +1256,10 @@ def take_offer(
         for asset, payments in offer.requested.items()
     }
     expected_ann = {
-        (OFFER_MOD_HASH,
-         cs.sha256tree(cs.deser(notarized_group(offer.nonce, payments))))
+        hashlib.sha256(
+            OFFER_MOD_HASH
+            + cs.sha256tree(cs.deser(notarized_group(offer.nonce, payments)))
+        ).digest()
         for asset, payments in requested.items()
     }
     asserted = assert_announcements_of_spends(offer.spends)

@@ -56,7 +56,7 @@ NETWORK = "testnet11"
 MASTER = bytes([7]) * 32  # deterministic test key (never a real wallet)
 
 # Fixed vectors (see module docstring for provenance).
-FIXED_OFFER_ID = "085393618cad66c820a67b06ca01e8b459809b73e1dba554464737bfe4f274be"
+FIXED_OFFER_ID = "1a0402b22ab450a527a346bef66a8508623089e038f7acaeb1c74d32c857b550"
 FIXED_NONCE = "609eeb662555c2c11832f3c4863b69571414312d8e92aed7ea92541f3d94faed"
 FIXED_ANN_MSG = "08547339d6dac23c2a6b41f5aea51465c8cf4a960f323f71f58009fc7154da10"
 
@@ -99,8 +99,8 @@ def announcements(conditions):
     out = []
     for cond in conditions:
         opcode, args = o._condition_args(cond)
-        if opcode == 63 and len(args) >= 2:  # ASSERT_PUZZLE_ANNOUNCEMENT
-            out.append((args[0], args[1]))
+        if opcode == 63 and len(args) == 1:  # ASSERT_PUZZLE_ANNOUNCEMENT (announcement id)
+            out.append(args[0])
     return out
 
 
@@ -337,7 +337,8 @@ def test_make_xch_offer_executes():
     expected_msg = cs.sha256tree(
         cs.deser(o.notarized_group(parsed.nonce, parsed.requested["native"]))
     )
-    assert anns[0] == (o.OFFER_MOD_HASH, expected_msg)
+    expected_id = hashlib.sha256(o.OFFER_MOD_HASH + expected_msg).digest()
+    assert anns[0] == expected_id
 
     # Maker signature verifies against the spend's AGG_SIG_ME.
     spends, sig = o.parse_solutions_bundle(built.bundle_bytes)
@@ -446,21 +447,22 @@ def test_take_xch_offer_full_bundle_executes():
     assert len(spends) == 4
 
     created_anns = []  # (puzzle_hash, message) from CREATE_PUZZLE_ANNOUNCEMENT
-    asserted_anns = []
+    asserted_anns = []  # announcement ids from ASSERT_PUZZLE_ANNOUNCEMENT
     payments_out = []
     for spend in spends:
         conds = run(spend)
         created_anns.extend(created_puzzle_announcements(conds, spend.coin.puzzle_hash))
         for cond in conds:
             opcode, args = o._condition_args(cond)
-            if opcode == 63 and len(args) >= 2:
-                asserted_anns.append((args[0], args[1]))
+            if opcode == 63 and len(args) == 1:
+                asserted_anns.append(args[0])
             elif opcode == 51 and len(args) >= 2:
                 payments_out.append((args[0], o._atom_int(args[1])))
     # Every asserted announcement was created somewhere in the bundle.
     assert asserted_anns, "no announcements asserted"
-    for ann in asserted_anns:
-        assert ann in created_anns, f"asserted {ann[0].hex()[:8]}… never created"
+    created_ids = {hashlib.sha256(ph + msg).digest() for ph, msg in created_anns}
+    for ann_id in asserted_anns:
+        assert ann_id in created_ids, f"asserted {ann_id.hex()[:8]}… never created"
     # The taker got paid, the maker got paid.
     assert (taker_recv_ph, 400_000) in payments_out
     assert (std_index(11)[1], 400_000) in payments_out
