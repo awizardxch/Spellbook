@@ -23,7 +23,7 @@ policy engine, heavier machinery.
 | D6 | No on-chain execution without explicit instruction — testnet included. | standing |
 | D7 | The six-gate no-launch rule is unaffected: this project moves no tokens and launches nothing. | standing |
 | D8 | Keys: local signing only. Never pasted, uploaded, typed into, or sent anywhere — same posture as the aWizard Ed25519 Musebook key. | standing |
-| D9 | Thresholds and caps are per muse, set by that muse's human — never town-wide. **Default is no caps**: every policy knob ships disabled/opt-in. Approval is 1-of-1: a single user is the full controller of their individual wallet. (Multisig could change this later; not now.) | 2026-09-20, Speechless |
+| D9 | Thresholds and caps are per muse, set by that muse's human — never town-wide. **Default is no caps**: every policy knob ships disabled/opt-in. Approval is 1-of-1: a single user is the full controller of their individual wallet. (Multisig could change this later; not now.) **Clarifier (town review 2026-09-21):** S4's queue-by-default is a *delay*, not a cap — no amounts are forbidden by default; spends simply aren't instant until the human configures policy. | 2026-09-20, Speechless |
 | D10 | A human may ask for their private keys; the daemon may export them to the owner through a private channel only. Private keys are never posted, published, or written to any shared surface — ever. | 2026-09-20, Speechless |
 | D11 | Greenwood is a separate project and is not part of this plan. | 2026-09-20, Speechless |
 | D12 | The public distribution repo is named **`spellbook`** — https://github.com/awizardxch/Spellbook. | 2026-09-20, Speechless |
@@ -31,7 +31,7 @@ policy engine, heavier machinery.
   **native EVM wallet** — self-custodied, derived from the muse key. The
   Sage/Chia integration is a bonus feature on the same root. | 2026-09-20, Speechless |
 | D14 | Speechless is the first tester: the full install + testnet drill must
-  pass on Speechless's own machine before anything is announced to the town. | 2026-09-20, Speechless |
+  pass on Speechless's own machine before anything is announced to the town. **Scope clarifier (2026-09-20):** D14 does *not* gate pre-build review and scaffolding — spec discussion, KDF vectors, the daemon scaffold, and the installer scaffold were explicitly authorized to proceed. D14 gates: the §10 testnet drill (steps 1–13, needs Speechless's go-ahead), the mainnet dust test (steps 14–17, needs a separate go-ahead with amounts), and any promotion of the installer or announcement to the town. | 2026-09-20, Speechless |
 
 ## 1. Architecture (per muse — no shared services)
 
@@ -50,7 +50,9 @@ Policy daemon (per muse, dedicated OS user `spellbook` — S2)
   - derives secrets at boot, holds them in memory only
   - enforces caps / allowlist / velocity / human-approval queue in code
   - sole talker to Sage RPC (127.0.0.1:9257, mTLS) and to the EVM RPC endpoint
-  - sole signer of Musebook API requests (S1 — recommended, pending Speechless's call)
+  - sole signer of wallet operations; Musebook identity signing follows the
+    S1 call — behind the daemon for single-machine muses (A), with the
+    signer wherever it runs for multi-machine muses (B, town-converged)
   │
   ▼
 Conversational agents ──► daemon API only (request token). Never keys, certs,
@@ -78,9 +80,16 @@ run under the human's login user — on a machine where it does, a token file
 the human's CLI can read is a file the agent can read, and the two-token
 split collapses back into S7. The *approve* token lives readable-only-by the
 human's login user; where the agent and the human share an account, the
-approve token is never at rest — the human's tooling prompts for it per use
-(or derives it via the O5 HMAC key on a separate device). §10 step 12
-attempts to read the approve token as the agent's user; it must fail.
+approve token is never at rest — the human derives it via the O5 HMAC key
+on a separate device (town-converged, thread 37143; per-request named ids,
+ARION's field report: three approvals, zero autopilot). Prompt-per-use on
+the same screen is documented as rejected: it trains humans to click "yes"
+on autopilot within a week (Nimbus, Mikey, BSoKirbyV1). **Open (BSoKirbyV1):**
+the fallback for humans with no second device is undecided — the spec says
+it out loud rather than pretending the problem away; candidates are a
+human-typed per-use secret or no wallet until a second device exists.
+§10 step 12 attempts to read the approve token as the agent's user; it must
+fail.
 
 **Open input for the S1 decision (P8):** the sibling agent's location. The
 workspace notes say the Meta agent signs with the same seed "in parallel" —
@@ -88,17 +97,44 @@ if it runs on another machine, daemon-local signing cannot serve it and the
 separate-wallet-root alternative becomes the only complete option. Speechless
 to state where each process that signs as the muse runs before the S1 call.
 
+**Town review 2026-09-20/21 (thread 37143) — S1 converged.** Nimbus, Z,
+Mikey, ARION, and BSoKirbyV1 all land on Option B as the only complete
+answer the moment any signing happens off the daemon's machine — "design for
+the fleet, not the desk." ARION supplied the field datapoint: their signing
+process lives on a different host than the body it speaks for, and the key
+sits with the signer; a local daemon cannot serve that today, let alone on
+day two. **Adopted direction (pending Speechless's final call):** Option B
+(separate wallet root; identity key signs directory entries only; two papers)
+whenever any process signs as the muse from another machine. Option A (the
+constrained daemon route) stays valid only for strictly single-machine
+muses. Under B, D3 is unchanged — the daemon remains the only process that
+holds *wallet* secrets; what moves out is Musebook identity signing, which
+stays with the signer wherever it runs (UDP's per-context scoping: one
+keypair per world, a stolen key burns one room, not the house).
+
+**Sibling double-spend (BSoKirbyV1 — resolved by design).** If signing can
+happen from any machine, what stops two sibling agents double-spending the
+same wallet root? The directory binding says who the muse is, not which
+sibling signed first. Resolution: the per-label standalone keys (S5) — each
+sibling operates under its own labeled address, so there is no shared nonce
+pool to race. A shared root across machines therefore requires a per-sibling
+label registry (each sibling's label recorded in the directory entry);
+siblings never share a label.
+
 **Seed hygiene (S1, Mikey).** Today the aWizard seed also lives in the agent's
 environment (the Musebook client reads it from `.env` inside the agent's tool
 process) — the spec's isolation starts from that true location, not from
-where we wish it lived. The fix, recommended: Musebook signing moves behind
-the daemon via `POST /v1/sign_musebook_request` → `{signature}`; `musebook.mjs`
-and any sibling agent hold a request token, not the seed. Then D3 ("the
-daemon is the only process that holds secrets") is true by construction and
-one paper backup still covers everything. **This changes how aWizard signs
-Musebook posts today — pending Speechless's explicit call.** The honest
-alternative, documented: a separate wallet root (daemon-generated 32-byte
-seed; identity key signs directory entries only; two papers).
+where we wish it lived. Two candidate fixes: (A) Musebook signing moves
+behind the daemon via `POST /v1/sign_musebook_request` → `{signature}`;
+`musebook.mjs` and any sibling agent hold a request token, not the seed —
+valid only for strictly single-machine muses. (B) A separate wallet root
+(daemon-generated 32-byte seed; identity key signs directory entries only;
+two papers) — the town's converged answer for any muse that signs from more
+than one machine (thread 37143). **Choosing B exercises the D2 opt-out**
+(identity ≠ money: two papers, two blast radii); choosing A keeps D2 with
+one paper. Either way D3 holds: the daemon is the only process that holds
+wallet secrets. **This changes how aWizard signs Musebook posts today —
+pending Speechless's explicit call.**
 
 What is per-muse and never shared: muse key, derived secrets, Sage instance and
 `keys.bin`, mTLS certs, daemon process and its queue. What may be shared (holds
@@ -141,14 +177,17 @@ no keys): daemon source code, setup guide, town directory (addresses only).
 - **Key-reuse tradeoff, stated out loud (Nimbus):** one root does identity
   AND money. Identity compromise = funds compromise, and a town identity key
   cannot rotate the way a wallet key can. Accepted deliberately (D2); the
-  mitigation is the daemon-user boundary (§1/S2) plus moving Musebook signing
-  behind the daemon (S1 — recommended, pending Speechless's call), which
-  shrinks the seed's exposure to a single OS user. The documented opt-out: a
-  separate wallet root (daemon-generated 32-byte seed; the identity key signs
-  directory entries only; the human keeps two papers).
-- **Honesty row (ARION):** the 24 words ARE every chain's wallet.
-  Backup-compromise = total compromise. There is no separate "identity
-  backup" vs "funds backup" — one root, one blast radius.
+  mitigation is the daemon-user boundary (§1/S2) plus the S1 custody fix —
+  town-converged on Option B for multi-machine muses (thread 37143), which
+  separates identity from money entirely (two papers, two blast radii). For
+  strictly single-machine muses that keep Option A, the single root (one
+  paper) stands — and the daemon-user boundary is what keeps it honest.
+- **Honesty row (ARION):** under Option A the 24 words ARE every chain's
+  wallet. Backup-compromise = total compromise. There is no separate
+  "identity backup" vs "funds backup" — one root, one blast radius. Under
+  Option B (town-converged for multi-machine muses) the identity seed and
+  the wallet seed are separate backups with separate blast radii — the row
+  reads per-seed, not per-muse.
 - **Test vectors (implementation gate — Turbo, ARION, Zuckbot; P3):**
   `vectors/vectors.json` holds, per vector, `{vector_id, test_seed_hex,
   domain_tag, chain, expected_address, expected_pubkey}`, plus negative
@@ -275,13 +314,18 @@ mTLS cert, or submit transactions.
 **Policy config (per muse, file, daemon-user-owned, mode 600 — set by that
 muse's human, D9)**
 
-Defaults: **everything off** (D9) — and the spec says so plainly: the default
-daemon is a *signer*, not a policy engine, until the human writes a config
-(S4). A prompt-injected agent with the request token can empty the hot wallet
-in one call under the default config. The hot wallet should therefore hold
-nothing the agent may not lose, and the installer says so out loud. Each human
-may opt in to any subset of the knobs below; the daemon enforces whatever is
-configured, nothing more.
+Defaults: **everything off** (D9) — with one town-adopted exception (S4,
+thread 37143): **all spends queue for human approval until the human
+configures policy.** The town's reasoning (Nimbus, Z, Mikey, ARION,
+BSoKirbyV1): a prompt-injected agent with the request token can empty the
+hot wallet in one call, and that is the attack that actually happens in the
+wild. A queue is a *delay*, not a cap — D9 stands: no amounts are forbidden
+by default, the first spends are simply not instant. The queue lifts only by
+explicit signed human configuration (UDP/ARION: "the queue lifts because the
+lift was signed in advance, not because time passed") — never by the clock
+alone. The hot wallet should hold nothing the agent may not lose, and the
+installer says so out loud. Each human may opt in to any subset of the knobs
+below; the daemon enforces whatever is configured, nothing more.
 - `per_spend_cap` per chain/asset — any request above is denied outright
 - `approval_threshold` per chain/asset — requests above auto-approve level but
   below the cap are queued for the human (1-of-1 approval, D9)
@@ -301,9 +345,9 @@ configured, nothing more.
   ledger survives restarts — the velocity window and queue with it (§10
   step 11). Agents read it through `GET /v1/ledger`, never the file.
 
-**Human approval path (v1)** — dormant unless an `approval_threshold` is
-configured (default off, D9).
-- Queued spends surface to the human's own tooling (approve token), showing
+**Human approval path (v1)** — active by default (S4): every spend queues
+until the human configures policy. Queued spends surface to the human's own
+tooling (approve token), showing
   the **decoded intent** — never just a hash (Zuckbot's blind-signing fix).
   **v1 scope:** plain transfers only. The daemon decodes and displays `to`,
   `value`, `chain id`, asset — and verifies the built transaction matches
@@ -565,25 +609,84 @@ project starts.
 ## 12. Open questions (need answers before the phases they gate)
 
 - **O1** — moved to the deferred greenwood project (D11). Not in this plan.
-- **O2** (gates §7): Musebook key-rotation mechanics — can a muse rotate to a
-  new Ed25519 key under the same `muse_id`?
+- **O2** (gates §7): Musebook key-rotation mechanics — **town-converged
+  shape (thread 37143), pending Speechless's final approval.** Rotation is a
+  receipt, not a rename: the new key is bound by a rotation post signed with
+  the OLD key (Nimbus: "a new key without the old key's signature is just a
+  stranger with your name"), carrying old pubkey → new pubkey, effective
+  date, and a version number; the directory pins both entries (old frozen as
+  retired-at-v<n>, new live) so signatures made under the old key stay
+  verifiable forever and history never rewrites (Turbo). **Compromise case
+  (Turbo):** a pre-signed rotation rides with the paper backup and the human
+  publishes it out-of-band if the old key turns hostile. **Stolen-key hole
+  (BSoKirbyV1, UDP):** a thief holding the old key can sign a rotation row
+  too — "newest signature wins" is the thief winning. Adopted answer:
+  rotation needs a pre-committed second factor — a rotation key escrowed
+  with the human, or a time-locked queue where the human's silence is NOT
+  consent — plus a human out-of-band veto on contested rotations. **Scope
+  keys per context (UDP):** one keypair per world; a stolen key burns one
+  room, not the house. Compatible concrete instantiation (reference, not
+  imported): ARION/Anastasia's measured rotation-row work (v1–v9) —
+  rotation_row `{muse_id, old_pk, new_pk, effective_at, sig_old}` over a
+  fixed canon string, "board-pinned, not immutable" (Aether), chain-tx
+  anchoring as the outliving tier.
 - **O3** (gates Phase 3): town directory location/format + the un-silencing
   decision. Speechless.
 - **O4** — answered: default is no caps (D9); each muse's human may opt in to
-  caps/thresholds. No numbers needed.
-- **O5** (Phase 1 item, per S7): human-approval auth — the approve token is
-  held only by the human's own tooling (v1: O5 HMAC from a human-held key).
-  The chat-relayed approval design is removed.
+  caps/thresholds. No numbers needed. (S4 adds queue-by-default, which is a
+  delay, not a cap.)
+- **O5** (Phase 1 item, per S7): human-approval auth — **town-converged
+  (thread 37143): separate-device HMAC is the recommended mechanism**
+  (Nimbus, Mikey, Z, BSoKirbyV1; ARION's field report: per-request named ids
+  on a second device, three approvals, zero autopilot). Prompt-per-use on
+  the same screen is rejected — it trains humans to click "yes" on autopilot
+  within a week. **Open (BSoKirbyV1):** the single-device fallback is
+  undecided — stated out loud, not papered over. The chat-relayed approval
+  design stays removed: the agent surfaces queued spends to the human
+  (read-only, decoded intent) and the human approves with their own tooling;
+  the daemon rejects approve routes from the request token (S7).
 - **O6** (gates Phase 2): cold sweep schedule and mechanics.
 - **O7** — answered: yes, via the private export flow (§6). The human writes
   the muse seed on paper and stores it offline; the agent never sees the bytes.
+- **O8** (new, thread 37143 — gates S1 final call): sibling double-spend —
+  resolved by design: siblings operate under distinct labeled addresses
+  (S5), never a shared nonce pool; a shared root across machines requires a
+  per-sibling label registry in the directory entry.
+- **O9** (new, thread 37143 — BSoKirbyV1): single-device fallback for O5 —
+  undecided. Candidates: a human-typed per-use secret, or no wallet until a
+  second device exists. Must be decided before Phase 1.
+- **O10** (standing goal, restated 2026-09-20): the wallet is the *agent's*,
+  but the *human* interacts with it from the chat. The loop is: agent
+  surfaces queued spends / balances / history to the human in chat
+  (read-only, decoded intent — this is the assistant's job); the human
+  approves with their own tooling (O5); the daemon executes and the agent
+  reports the result. The agent can request and relay, never approve — the
+  two-token split (S7) is what makes "from here" safe to build.
+
+## 12a. Town adoptions pending Speechless's final approval (thread 37143)
+
+The town converged; nothing below is final until Speechless signs off:
+
+1. **S1 → Option B** for any muse that signs from more than one machine
+   (fleet, not desk); Option A only for strictly single-machine muses.
+   Still needed: Speechless states where every process signing as the muse
+   runs (the P8 input).
+2. **S4 → queue-by-default** until the human configures policy; the queue
+   lifts only by explicit signed human configuration, never by the clock.
+   D9 unchanged (no amounts forbidden — a delay, not a cap).
+3. **O5 → separate-device HMAC** recommended; prompt-per-use rejected;
+   single-device fallback (O9) still open.
+4. **O2 → rotation-receipt shape** above (old-key-signed, versioned,
+   pre-signed compromise rotation, second-factor/veto for contested
+   rotations, per-context key scoping).
 
 ## 13. Residual risks (accepted, not solved)
 
 - **VM compromise** takes the hot wallet — that is what the hot/cold split and
   caps are for; the daemon does not defend this layer. Note the default
-  config is a signer, not a policy engine (S4) — caps only help once the
-  human opts in.
+  config queues every spend for human approval until policy is configured
+  (S4) — caps only help once the human opts in, and the queue is what holds
+  the line before that.
 - **Monoculture:** one daemon codebase for every muse = one bug fits all.
   Open-source it, audit before Phase 3, welcome independent implementations.
   The `vectors/` file lets independent implementations prove conformance.
@@ -635,8 +738,8 @@ testnet-proven install with one command and no human coordination.
      itself on testnet before mainnet is possible. A failed drill leaves the
      machine clean and prints how to resume without reinstalling (S14).
   5. Prints next steps: opt-in policy knobs, paper backup (§6), directory
-     entry (§8) — and says out loud that the default config is a signer, not
-     a policy engine (S4).
+     entry (§8) — and says out loud that every spend queues for human
+     approval until the human configures policy (S4) — a delay, not a cap.
 - The installer never asks for keys, never transmits anything outward, and
   never touches the real muse key — the drill uses a throwaway.
 
@@ -663,3 +766,15 @@ testnet-proven install with one command and no human coordination.
 **What "automatic" never means:** we never push code to anyone, never run
 anyone's daemon, never hold anyone's keys, never see anyone's secrets. Pull,
 verify, install locally — per muse, per D1.
+
+---
+
+## 15. Review log
+
+- 2026-09-20 — pass-2 audit remediation (P1–P9): `docs/reviews/2026-09-20-responses.md`.
+- 2026-09-20/21 — open-decisions town review (townhall/37143): S1 → Option B
+  (fleet, not desk), S4 → queue-by-default, O5 → separate-device HMAC,
+  O2 → rotation-receipt shape; all pending Speechless's final approval
+  (§12a). New open items O8 (sibling double-spend, resolved by design),
+  O9 (single-device fallback), O10 (human interacts with the agent's wallet
+  from chat). Full record: `docs/reviews/2026-09-21-townhall-37143.md`.
