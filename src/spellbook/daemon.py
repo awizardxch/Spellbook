@@ -34,6 +34,7 @@ import time
 import urllib.parse
 
 from spellbook import chia, chia_relay, evm, kdf, sign as spellsign
+from spellbook import chia_sign
 from spellbook import solana as solana_mod
 from spellbook.config import load_config, load_policy
 from spellbook.ledger import Ledger
@@ -45,6 +46,16 @@ REQUEST_ROUTES = {
     "request_spend", "queue_read", "status", "addresses",
     "ledger_read", "sign_musebook_request", "chia_read",
     "offer_make", "offer_take", "offer_cancel",
+    "offer_import", "offer_delete", "offer_combine",
+    "nft_mint", "nft_update", "nft_collection_update", "nft_redownload",
+    "nft_assign_did",
+    "did_create", "did_update", "did_transfer", "did_normalize",
+    "option_mint", "option_update", "option_transfer", "option_exercise",
+    "cat_issue", "cat_update",
+    "clawback_finalize",
+    "coin_combine", "coin_split", "coin_autocombine",
+    "bulk_send", "multi_send",
+    "message_sign",
 }
 APPROVE_ROUTES = {
     "queue_approve", "queue_reject", "publish_directory_entry",
@@ -66,34 +77,88 @@ OFFER_TAKE_FIELDS = {"intent", "chain", "offer", "fee_mojos", "purpose",
 OFFER_CANCEL_FIELDS = {"intent", "chain", "offer_id", "offer_ids",
                        "fee_mojos", "purpose", "_offered"}
 
-# chia_read op allowlist: read-only or wallet-local offer ops only. Each
-# entry is (rpc_method, [param names]). Anything not listed here is
-# rejected by rt_chia_read, so the route can never become a generic RPC
-# passthrough (no spends, no signing, no key material, no issuance).
+# Full Sage wallet surface: every fund-moving Sage endpoint is a queued
+# intent with an explicit schema (S13: unknown shapes are rejected, never
+# coerced). Local-only metadata ops are direct routes, not queue items.
+NFT_MINT_FIELDS = {"intent", "chain", "mints", "did_id", "fee_mojos",
+                   "purpose"}
+DID_CREATE_FIELDS = {"intent", "chain", "name", "fee_mojos", "purpose"}
+DID_TRANSFER_FIELDS = {"intent", "chain", "did_ids", "destination",
+                       "fee_mojos", "purpose", "clawback_at"}
+DID_NORMALIZE_FIELDS = {"intent", "chain", "did_ids", "fee_mojos", "purpose"}
+OPTION_MINT_FIELDS = {"intent", "chain", "expiration_seconds", "underlying",
+                      "strike", "fee_mojos", "purpose"}
+OPTION_TRANSFER_FIELDS = {"intent", "chain", "option_ids", "destination",
+                          "fee_mojos", "purpose", "clawback_at"}
+OPTION_EXERCISE_FIELDS = {"intent", "chain", "option_ids", "fee_mojos",
+                          "purpose"}
+CAT_ISSUE_FIELDS = {"intent", "chain", "name", "ticker", "amount_mojos",
+                    "revocable", "fee_mojos", "purpose"}
+NFT_ASSIGN_DID_FIELDS = {"intent", "chain", "nft_ids", "did_id",
+                         "fee_mojos", "purpose"}
+CLAWBACK_FIELDS = {"intent", "chain", "coin_ids", "fee_mojos", "purpose"}
+COIN_COMBINE_FIELDS = {"intent", "chain", "coin_ids", "fee_mojos", "purpose"}
+COIN_SPLIT_FIELDS = {"intent", "chain", "coin_ids", "output_count",
+                     "fee_mojos", "purpose"}
+COIN_AUTOCOMBINE_FIELDS = {"intent", "chain", "asset", "max_coins",
+                           "max_coin_amount", "fee_mojos", "purpose"}
+BULK_SEND_FIELDS = {"intent", "chain", "asset", "addresses", "amount_mojos",
+                    "fee_mojos", "purpose", "memos"}
+MULTI_SEND_FIELDS = {"intent", "chain", "payments", "fee_mojos", "purpose"}
+MESSAGE_SIGN_FIELDS = {"intent", "chain", "address", "public_key",
+                       "message", "purpose"}
+
+# Wallet-local metadata routes: direct (no queue, no chain, no funds).
+# Each has an explicit schema — S13 rejects anything else.
+OFFER_IMPORT_FIELDS = {"intent", "chain", "offer"}
+OFFER_DELETE_FIELDS = {"intent", "chain", "offer_id"}
+OFFER_COMBINE_FIELDS = {"intent", "chain", "offers"}
+CAT_UPDATE_FIELDS = {"intent", "chain", "record"}
+DID_UPDATE_FIELDS = {"intent", "chain", "did_id", "name", "visible"}
+NFT_UPDATE_FIELDS = {"intent", "chain", "nft_id", "visible"}
+NFT_COLLECTION_UPDATE_FIELDS = {"intent", "chain", "collection_id",
+                                "visible"}
+NFT_REDOWNLOAD_FIELDS = {"intent", "chain", "nft_id"}
+OPTION_UPDATE_FIELDS = {"intent", "chain", "option_id", "visible"}
+
+# chia_read op allowlist: strictly read-only. Each entry is (rpc_method,
+# [param names]). Anything not listed here is rejected by rt_chia_read, so
+# the route can never become a generic RPC passthrough (no spends, no
+# signing, no key material, no issuance, no local-record mutation —
+# import/delete/combine live behind their own explicit routes).
 _CHIA_READ_OPS = {
     # offers (local records / decode only — NOT take/cancel)
     "get_offers": ("get_offers", []),
     "get_offer": ("get_offer", ["offer_id"]),
     "get_offers_for_asset": ("get_offers_for_asset", ["asset_id"]),
     "view_offer": ("view_offer", ["offer"]),
-    "import_offer": ("import_offer", ["offer"]),
-    "delete_offer": ("delete_offer", ["offer_id"]),
-    "combine_offers": ("combine_offers", ["offers"]),
     # coins
     "get_coins": ("get_coins", ["asset_id", "offset", "limit"]),
     "get_coins_by_ids": ("get_coins_by_ids", ["coin_ids"]),
     "get_are_coins_spendable": ("get_are_coins_spendable", ["coin_ids"]),
     "get_spendable_coin_count": ("get_spendable_coin_count", ["asset_id"]),
+    "get_asset_coins": ("get_asset_coins",
+                        ["kind", "asset_id", "included_locked",
+                         "offset", "limit"]),
+    "filter_unlocked_coins": ("filter_unlocked_coins", ["coin_ids"]),
     # transactions
-    "get_transaction": ("get_transaction", ["transaction_id"]),
+    "get_transaction": ("get_transaction", ["height"]),
+    "get_transactions": ("get_transactions",
+                         ["offset", "limit", "ascending", "find_value"]),
     "get_pending_transactions": ("get_pending_transactions", []),
     "recent_transactions": ("recent_transactions", ["limit"]),
     # assets
     "get_cats": ("get_cats", []),
     "get_all_cats": ("get_all_cats", []),
+    "get_token": ("get_token", ["asset_id"]),
     "get_nfts": ("get_nfts", ["offset", "limit", "collection_id", "name"]),
     "get_nft": ("get_nft", ["nft_id"]),
     "get_nft_data": ("get_nft_data", ["nft_id"]),
+    "get_nft_icon": ("get_nft_icon", ["nft_id"]),
+    "get_nft_thumbnail": ("get_nft_thumbnail", ["nft_id"]),
+    "get_nft_collections": ("get_nft_collections",
+                            ["offset", "limit", "include_hidden"]),
+    "get_nft_collection": ("get_nft_collection", ["collection_id"]),
     "get_dids": ("get_dids", []),
     "get_minter_did_ids": ("get_minter_did_ids", []),
     "is_asset_owned": ("is_asset_owned", ["asset_id"]),
@@ -158,10 +223,13 @@ def chia_asset_kind(asset: str) -> tuple:
 def _validate_offer_legs(items, side: str) -> list:
     """Validate one side of an offer intent: [{asset, amount_mojos}].
 
-    Returns [(asset, amount)] with the asset in daemon form ("native" or
-    64-hex CAT). NFTs are rejected — the daemon's NFT path is
-    transfer-only. Raises chia.SageError on any malformed leg so bad
-    offers fail closed at request time.
+    Returns [(asset, amount)] with the asset in daemon form ("native",
+    64-hex CAT id, or "nft:<ref>" where ref is a 64-hex coin/launcher id
+    or nft1 id). NFT legs keep the "nft:" prefix here — the daemon
+    resolves them to launcher ids (and checks ownership) via
+    _resolve_offer_nft_legs before building the intent. Raises
+    chia.SageError on any malformed leg so bad offers fail closed at
+    request time.
     """
     if not isinstance(items, list) or not items:
         raise chia.SageError(f"offer {side} must be a non-empty list")
@@ -175,22 +243,71 @@ def _validate_offer_legs(items, side: str) -> list:
             kind, ref = chia_asset_kind(asset)
         except chia.SageError as e:
             raise chia.SageError(f"offer {side}: {e}") from e
-        if kind == "nft":
-            raise chia.SageError(
-                f"offer {side}: NFTs not supported in offers")
         if not isinstance(amount, int) or amount <= 0:
             raise chia.SageError(
                 f"offer {side}: amount_mojos must be a positive integer")
-        out.append((asset if kind == "native" else ref, amount))
+        if kind == "nft":
+            if amount != 1:
+                raise chia.SageError(
+                    f"offer {side}: NFT legs must have amount_mojos 1")
+            out.append((f"nft:{ref}", amount))
+        else:
+            out.append((asset if kind == "native" else ref, amount))
     return out
+
+
+def _resolve_offer_nft_legs(rpc, legs: list, side: str) -> list:
+    """Resolve "nft:<ref>" legs to "nft:<launcher-id>", checking ownership.
+
+    Sage's /make_offer takes the NFT's launcher id as the leg's asset_id;
+    the daemon accepts a coin id, launcher id, or nft1 id and resolves it
+    here. Raises chia.SageError when the NFT is not in this wallet —
+    offering someone else's NFT fails closed.
+    """
+    out = []
+    for asset, amount in legs:
+        if not asset.startswith("nft:"):
+            out.append((asset, amount))
+            continue
+        launcher = _resolve_nft_launcher(rpc, asset[4:])
+        if not launcher:
+            raise chia.SageError(
+                f"offer {side}: NFT {asset[4:][:16]}… is not in this "
+                "wallet — refusing")
+        out.append((f"nft:{launcher}", amount))
+    return out
+
+
+def _resolve_nft_launcher(rpc, ref: str) -> str | None:
+    """Launcher id (lowercase hex) for an NFT ref, or None if not owned.
+
+    ref may be a 64-hex coin id, a 64-hex launcher id, or an nft1 id.
+    """
+    r = (ref or "").strip()
+    if r.startswith("nft1"):
+        rec = rpc.get_nft(r) or {}
+        lid = rec.get("launcher_id")
+        return str(lid).lower() if lid else None
+    if not _HEX64.fullmatch(r):
+        return None
+    rl = r.lower()
+    for nft in rpc.get_nfts(offset=0, limit=1000):
+        if not isinstance(nft, dict):
+            continue
+        lid = str(nft.get("launcher_id") or "").lower()
+        cid = str(nft.get("coin_id") or "").lower()
+        if rl in (lid, cid) and lid:
+            return lid
+    return None
 
 
 def _summary_legs(summary: dict, side: str) -> list:
     """Convert a Sage OfferSummary's maker/taker legs to [(asset, amount)].
 
-    Sage's summary uses {"asset": {"asset_id": <hex>|null, "kind": ...},
-    "amount": ...}; asset_id null means XCH. NFT/DID/option legs raise —
-    the daemon only handles fungible legs.
+    Sage's summary uses {"asset": {"asset_id": <hex>|null,
+    "kind": "token"|"nft"|...}, "amount": ...}; asset_id null means XCH.
+    NFT legs come back as "nft:<launcher-id>". DID/option legs raise —
+    offers only carry fungible and NFT legs.
     """
     legs = summary.get(side)
     if not isinstance(legs, list):
@@ -200,13 +317,19 @@ def _summary_legs(summary: dict, side: str) -> list:
     for leg in legs:
         a = (leg or {}).get("asset") or {}
         kind = (a.get("kind") or "token")
-        if kind != "token":
-            raise chia.SageError(
-                f"offer leg kind {kind!r} not supported (fungible only)")
         asset_id = a.get("asset_id")
-        asset = "native" if not asset_id else str(asset_id).lower()
-        if asset != "native" and not _HEX64.fullmatch(asset):
-            raise chia.SageError(f"bad offer leg asset id {asset_id!r}")
+        if kind == "nft":
+            if not asset_id or not _HEX64.fullmatch(str(asset_id)):
+                raise chia.SageError(
+                    f"bad NFT offer leg asset id {asset_id!r}")
+            asset = f"nft:{str(asset_id).lower()}"
+        elif kind == "token":
+            asset = "native" if not asset_id else str(asset_id).lower()
+            if asset != "native" and not _HEX64.fullmatch(asset):
+                raise chia.SageError(f"bad offer leg asset id {asset_id!r}")
+        else:
+            raise chia.SageError(
+                f"offer leg kind {kind!r} not supported")
         try:
             amount = chia.amount_to_int(leg.get("amount"))
         except chia.SageError as e:
@@ -243,6 +366,20 @@ class Daemon:
         self.ledger = Ledger(os.path.join(config_dir, "ledger.jsonl"))
         self.queue_path = os.path.join(config_dir, "queue.json")
         self.velocity_path = os.path.join(config_dir, "velocity.jsonl")
+        # Mint/issuance gate (six-gate rule): mint_gate.json is written by
+        # the human's own tooling, never by the agent and never by any
+        # daemon route. It must name the exact canonical digests of the
+        # queued intents it authorizes (one-shot: each digest is consumed
+        # on first use), bind the network, carry an expiry, and attest all
+        # six launch requirements. Read fresh at every execution.
+        self.mint_gate_path = os.path.join(config_dir, "mint_gate.json")
+        # One-shot consumption record: digests the gate has already
+        # authorized. Written by the daemon (mode 600, atomic) — the only
+        # daemon-side write in the gate protocol. A digest listed here can
+        # never authorize another execution, even if mint_gate.json still
+        # names it.
+        self.mint_gate_consumed_path = os.path.join(
+            config_dir, "mint_gate_consumed.json")
         self._load_queue()
         self._load_velocity()
         # The seed is loaded only to derive addresses/signing keys in-process.
@@ -391,7 +528,15 @@ class Daemon:
         handler = getattr(self, "rt_" + route, None)
         if handler is None:
             return {"ok": False, "error": "not implemented"}
-        return handler(params, req.get("muse_id", "?"))
+        try:
+            return handler(params, req.get("muse_id", "?"))
+        except (evm.EvmError, chia.SageError, chia_relay.RelayError,
+                solana_mod.SolanaError) as e:
+            # A request handler must never let a validation/broadcast
+            # error escape as a dropped connection: return a structured
+            # failure instead (e.g. an invalid fee_mojos raised from
+            # _fee_of outside a handler-local try/except).
+            return {"ok": False, "error": str(e)}
 
     # ------------------------------------------------------------ chain execution
     def _signing_seed(self):
@@ -684,6 +829,185 @@ class Daemon:
         rpc.login(expected_fp)
         return expected_fp, rpc.wallet_address(expected_fp, network)
 
+    # The six standing requirements for any token launch, mint, or
+    # issuance. mint_gate.json must attest ALL of them, name the EXACT
+    # canonical digests of the queued intents it authorizes, bind the
+    # network, and carry an expiry. The human writes that file with their
+    # own tooling — the agent has no route that writes it, so queue
+    # approval alone can never open it.
+    #
+    # Gate schema (strict — unknown keys are refused):
+    #   {
+    #     "attestations": {
+    #       "receive_95_percent_supply": true,
+    #       "majority_holder": true,
+    #       "hold_at_least_1_percent": true,
+    #       "articles_of_description": true,
+    #       "metadata_set": true,
+    #       "website_exists": true
+    #     },
+    #     "granted_by": "<human identifier>",
+    #     "digests": ["<64-hex sha256 of the canonical queued params>"],
+    #     "network": "testnet11",
+    #     "expires_at": <epoch seconds>
+    #   }
+    # The digest is sha256(json.dumps(params, sort_keys=True)) over the
+    # exact stored queue params — the same bytes the ledger's canon_digest
+    # covers. The human reads it from the decoded queue listing
+    # ("canon_digest") before writing the gate file. Each digest is
+    # one-shot: the first execution attempt consumes it, and a consumed
+    # digest never authorizes again.
+    _MINT_GATE_INTENTS = {"cat_issue", "nft_mint", "option_mint"}
+    _MINT_GATE_ATTESTATIONS = (
+        "receive_95_percent_supply",
+        "majority_holder",
+        "hold_at_least_1_percent",
+        "articles_of_description",
+        "metadata_set",
+        "website_exists",
+    )
+    _MINT_GATE_TOP_KEYS = frozenset(
+        {"attestations", "granted_by", "digests", "network", "expires_at"})
+
+    @staticmethod
+    def _mint_intent_digest(params: dict) -> str:
+        """Canonical digest of the exact queued params the gate authorizes."""
+        return hashlib.sha256(
+            json.dumps(params, sort_keys=True).encode()).hexdigest()
+
+    def _mint_consumed_digests(self) -> set:
+        """Digests already consumed by the one-shot gate. Fail closed: an
+        unreadable consumption record refuses every mint."""
+        try:
+            with open(self.mint_gate_consumed_path) as f:
+                data = json.load(f)
+        except OSError:
+            return set()
+        except ValueError:
+            raise chia.SageError(
+                "consumed-digest store is corrupt — refusing every mint "
+                "until the human repairs or removes "
+                "mint_gate_consumed.json")
+        if not isinstance(data, dict) or not isinstance(
+                data.get("digests"), list):
+            raise chia.SageError(
+                "consumed-digest store has a bad shape — refusing every "
+                "mint until the human repairs or removes "
+                "mint_gate_consumed.json")
+        return {d for d in data["digests"] if isinstance(d, str)}
+
+    def _mint_consume_digest(self, digest: str) -> None:
+        consumed = self._mint_consumed_digests()
+        consumed.add(digest)
+        _atomic_write_json(self.mint_gate_consumed_path,
+                           {"digests": sorted(consumed)})
+
+    def _check_mint_gate(self, params: dict) -> None:
+        """Refuse mint/issuance execution unless the human's mint gate is
+        open for the EXACT canonical digest of these params, on this
+        network, before expiry, with all six attestations. Read fresh every
+        time — no caching, no bypass.
+
+        One-shot: a passing check consumes the digest BEFORE execution
+        proceeds, so the grant authorizes exactly one execution attempt
+        even if the daemon crashes mid-flight. A failed check consumes
+        nothing and triggers no RPC attempt."""
+        intent = params.get("intent")
+        if intent not in self._MINT_GATE_INTENTS:
+            raise chia.SageError(
+                f"mint gate invoked for non-mint intent {intent!r} — "
+                "refusing")
+        canon = json.dumps(params, sort_keys=True).encode()
+        digest = hashlib.sha256(canon).hexdigest()
+        problems = []
+
+        gate = None
+        try:
+            with open(self.mint_gate_path) as f:
+                gate = json.load(f)
+        except (OSError, ValueError):
+            gate = None
+        if not isinstance(gate, dict):
+            problems.append("mint_gate.json is missing or not a JSON object")
+        else:
+            unknown = set(gate) - self._MINT_GATE_TOP_KEYS
+            if unknown:
+                problems.append(
+                    "unknown top-level keys: " + ", ".join(sorted(unknown)))
+            atts = gate.get("attestations")
+            if not isinstance(atts, dict):
+                problems.append("attestations is not an object")
+            else:
+                unknown_atts = set(atts) - set(self._MINT_GATE_ATTESTATIONS)
+                if unknown_atts:
+                    problems.append("unknown attestations: " +
+                                    ", ".join(sorted(unknown_atts)))
+                missing = [a for a in self._MINT_GATE_ATTESTATIONS
+                           if atts.get(a) is not True]
+                if missing:
+                    problems.append("missing attestations: " +
+                                    ", ".join(missing))
+            granted_by = gate.get("granted_by")
+            if not isinstance(granted_by, str) or not granted_by.strip():
+                problems.append("granted_by is not set")
+            digests = gate.get("digests")
+            if (not isinstance(digests, list) or not digests or not all(
+                    isinstance(d, str) and len(d) == 64 and
+                    all(c in "0123456789abcdef" for c in d.lower())
+                    for d in digests)):
+                problems.append(
+                    "digests must be a non-empty list of 64-hex digests")
+            network = gate.get("network")
+            if not isinstance(network, str) or not network:
+                problems.append("network is not set")
+            elif network not in set(chia.NETWORKS.values()):
+                problems.append(f"unknown network {network!r}")
+            expires_at = gate.get("expires_at")
+            if (isinstance(expires_at, bool) or
+                    not isinstance(expires_at, (int, float)) or
+                    expires_at <= 0):
+                problems.append("expires_at must be a positive epoch time")
+            # Cross-checks against this execution (only meaningful when the
+            # shape above parsed; each appends rather than short-circuits so
+            # the refusal reason lists everything wrong at once).
+            if not problems:
+                try:
+                    consumed = self._mint_consumed_digests()
+                except chia.SageError as e:
+                    problems.append(str(e))
+                else:
+                    if digest in consumed:
+                        problems.append(
+                            "this grant was already consumed (one-shot) — "
+                            "the human must open a fresh gate for another "
+                            "attempt")
+                if digest not in [d.lower() for d in digests]:
+                    problems.append(
+                        f"digest {digest} is not authorized by the gate")
+                want_network = chia.NETWORKS.get(params.get("chain"))
+                if network != want_network:
+                    problems.append(
+                        f"gate is for network {network!r}, this execution "
+                        f"is on {want_network!r}")
+                if time.time() > expires_at:
+                    problems.append("gate has expired")
+
+        if problems:
+            self.ledger.append("mint-gate", canon, None,
+                               "mint-gate-refused:" + "; ".join(problems))
+            raise chia.SageError(
+                "mint/issuance gate is closed: " + "; ".join(problems) +
+                ". The human opens it with their own tooling via "
+                "mint_gate.json (six attestations + granted_by + exact "
+                "intent digests + network + expires_at); queue approval "
+                "alone never opens it.")
+        # Open: consume the digest first (one-shot), then let execution
+        # proceed. A crash between here and the RPC still burns the grant —
+        # that is the point: one grant, one attempt, never a replay.
+        self._mint_consume_digest(digest)
+        self.ledger.append("mint-gate", canon, None,
+                           f"mint-gate-open:{intent}:{digest}")
+
     def _execute_chia_spend(self, params: dict) -> dict:
         """Dispatch to the Sage or relay Chia spend path.
 
@@ -703,12 +1027,50 @@ class Daemon:
         relay deliberately does not expose.
         """
         intent = params.get("intent")
+        if intent in self._MINT_GATE_INTENTS:
+            # Six-gate rule: token launches, mints, and issuance execute
+            # only when the human has separately opened the mint gate for
+            # the exact canonical digest of these params. Queue approval
+            # is not enough.
+            self._check_mint_gate(params)
         if intent == "offer_make":
             return self._execute_offer_make_via_sage(params)
         if intent == "offer_take":
             return self._execute_offer_take_via_sage(params)
         if intent == "offer_cancel":
             return self._execute_offer_cancel_via_sage(params)
+        if intent == "nft_mint":
+            return self._execute_nft_mint_via_sage(params)
+        if intent == "nft_assign_did":
+            return self._execute_nft_assign_did_via_sage(params)
+        if intent == "did_create":
+            return self._execute_did_create_via_sage(params)
+        if intent == "did_transfer":
+            return self._execute_did_transfer_via_sage(params)
+        if intent == "did_normalize":
+            return self._execute_did_normalize_via_sage(params)
+        if intent == "option_mint":
+            return self._execute_option_mint_via_sage(params)
+        if intent == "option_transfer":
+            return self._execute_option_transfer_via_sage(params)
+        if intent == "option_exercise":
+            return self._execute_option_exercise_via_sage(params)
+        if intent == "cat_issue":
+            return self._execute_cat_issue_via_sage(params)
+        if intent == "clawback_finalize":
+            return self._execute_clawback_finalize_via_sage(params)
+        if intent == "coin_combine":
+            return self._execute_coin_combine_via_sage(params)
+        if intent == "coin_split":
+            return self._execute_coin_split_via_sage(params)
+        if intent == "coin_autocombine":
+            return self._execute_coin_autocombine_via_sage(params)
+        if intent == "bulk_send":
+            return self._execute_bulk_send_via_sage(params)
+        if intent == "multi_send":
+            return self._execute_multi_send_via_sage(params)
+        if intent == "message_sign":
+            return self._execute_message_sign_via_sage(params)
         kind, _ = chia_asset_kind(params.get("asset", "native"))
         if kind != "native":
             return self._execute_chia_spend_via_sage(params)
@@ -1216,6 +1578,502 @@ class Daemon:
         return {"submitted": True, "tx_hash": ref or ids[0],
                 "offer_ids": ids}
 
+    # ---- full Sage wallet surface: mints, DID/option/CAT, coin ops ----
+
+    def _submit_sage_tx(self, rpc, res: dict, t0: float,
+                        describe: str) -> dict:
+        """Verify a Sage TransactionResponse and return the spend record.
+
+        Extracts the input coin ids from the response's summary, then
+        waits for a wallet transaction spending one of them (created after
+        t0, the pre-call timestamp). The first matched input coin id is
+        the stable ledger reference — Sage's transaction records carry
+        height/timestamp, not a bundle hash. Raises chia.SageError when
+        the response has no inputs, and chia.BroadcastUnknown when no
+        transaction appears: the broadcast happened or it didn't, so it
+        is never retried and velocity is consumed fail-closed by the
+        caller.
+        """
+        inputs = [str(i.get("coin_id") or "") for i in
+                  ((res or {}).get("summary") or {}).get("inputs") or []]
+        inputs = [i for i in inputs if i]
+        if not inputs:
+            raise chia.SageError(
+                f"{describe}: Sage returned a transaction with no inputs "
+                "— refusing to report success")
+        tx = chia.wait_for_tx_by_inputs(
+            rpc, inputs, t0, timeout_s=self._sage_wait_timeout_s())
+        return {"submitted": True, "tx_hash": inputs[0],
+                "input_coin_ids": inputs,
+                "tx_height": tx.get("height"),
+                "note": f"{describe} submitted (in wallet tx at height "
+                        f"{tx.get('height')})"}
+
+    def _tx_intent_rpc(self, params: dict):
+        """Common entry for approved Sage-transaction intents: guards +
+        wallet selection. Returns (rpc, fee)."""
+        chain = params["chain"]
+        self._chia_offer_guards(params, chain)
+        rpc, _, _ = self._chia_sage_rpc(chain)
+        return rpc, params.get("fee_mojos", 0)
+
+    def _execute_nft_mint_via_sage(self, params: dict) -> dict:
+        """Mint approved NFTs via Sage RPC (on-chain).
+
+        Re-validates the queued mints at execution; the approved
+        did_id must still be a minter DID we own. The mint gate
+        (_check_mint_gate) runs before this is reached — execution
+        requires the human's separately-opened gate, not just queue
+        approval. Returns the TransactionResponse-verified spend record.
+        """
+        rpc, fee = self._tx_intent_rpc(params)
+        mints = params.get("mints") or []
+        if not isinstance(mints, list) or not mints:
+            raise chia.SageError("nft_mint needs a non-empty mints list")
+        for m in mints:
+            self._validate_nft_mint(m)
+        did_id = params.get("did_id")
+        # DidRecord.address is the did:chia:1… address the request names.
+        owned = {str(d.get("address") or "") for d in rpc.get_dids()}
+        if did_id not in owned:
+            raise chia.SageError(
+                f"minter DID {str(did_id)[:16]}… is not in this wallet — "
+                "refusing")
+        t0 = time.time()
+        res = rpc.bulk_mint_nfts(list(mints), did_id, fee_mojos=fee,
+                                 auto_submit=True)
+        out = self._submit_sage_tx(
+            rpc, res, t0, f"minted {len(mints)} NFT(s)")
+        out["nft_ids"] = res.get("nft_ids", [])
+        return out
+
+    # Sage's NftMint descriptor fields — anything else is rejected (S13:
+    # unknown shapes never reach the RPC).
+    _NFT_MINT_KEYS = {"address", "edition_number", "edition_total",
+                      "data_uris", "data_hash", "metadata_uris",
+                      "metadata_hash", "license_uris", "license_hash",
+                      "royalty_address", "royalty_ten_thousandths"}
+
+    @staticmethod
+    def _validate_nft_mint(m: dict) -> None:
+        """Fail-closed validation of one NFT mint descriptor."""
+        if not isinstance(m, dict):
+            raise chia.SageError("each NFT mint must be an object")
+        unknown = set(m) - Daemon._NFT_MINT_KEYS
+        if unknown:
+            raise chia.SageError(
+                f"unknown NFT mint fields: {sorted(unknown)}")
+        for key in ("data_uris", "metadata_uris", "license_uris"):
+            v = m.get(key)
+            if v is not None and not isinstance(v, list):
+                raise chia.SageError(f"NFT mint {key} must be a list")
+        roy = m.get("royalty_ten_thousandths")
+        if roy is not None and (
+                not isinstance(roy, int) or not 0 <= roy <= 10000):
+            raise chia.SageError(
+                "royalty_ten_thousandths must be 0-10000")
+        if m.get("royalty_address") and not isinstance(
+                m["royalty_address"], str):
+            raise chia.SageError("royalty_address must be a string")
+
+    def _execute_nft_assign_did_via_sage(self, params: dict) -> dict:
+        """Assign approved NFTs to a DID profile via Sage RPC (on-chain).
+
+        Every NFT id must still be in this wallet at execution; the RPC
+        takes nft1 bech32 ids, so refs are resolved to launcher ids and
+        re-encoded here (chia_sign.address_for_puzzle_hash). did_id None
+        unassigns; otherwise it must be a did:chia: id we own.
+        """
+        rpc, fee = self._tx_intent_rpc(params)
+        ids = params.get("nft_ids") or []
+        if not isinstance(ids, list) or not all(
+                isinstance(i, str) and i for i in ids):
+            raise chia.SageError("nft_ids must be a non-empty string list")
+        nft1_ids = []
+        for i in ids:
+            lid = _resolve_nft_launcher(rpc, i)
+            if not lid:
+                raise chia.SageError(
+                    f"NFT {i[:16]}… is not in this wallet — refusing")
+            nft1_ids.append(chia_sign.address_for_puzzle_hash(
+                bytes.fromhex(lid), "nft"))
+        did_id = params.get("did_id")
+        if did_id is not None:
+            if not (isinstance(did_id, str)
+                    and did_id.startswith("did:chia:1")):
+                raise chia.SageError(
+                    "did_id must be a did:chia:1… address or null")
+            # DidRecord.address is the did:chia:1… address form.
+            owned_dids = {str(d.get("address") or "")
+                          for d in rpc.get_dids()}
+            if did_id not in owned_dids:
+                raise chia.SageError(
+                    f"DID {did_id[:20]}… is not in this wallet — refusing")
+        t0 = time.time()
+        res = rpc.assign_nfts_to_did(nft1_ids, did_id,
+                                     fee_mojos=fee, auto_submit=True)
+        return self._submit_sage_tx(
+            rpc, res, t0,
+            f"assigned {len(ids)} NFT(s) to DID")
+
+    def _execute_did_create_via_sage(self, params: dict) -> dict:
+        """Create an approved DID via Sage RPC (on-chain)."""
+        rpc, fee = self._tx_intent_rpc(params)
+        name = params.get("name")
+        if not isinstance(name, str) or not name:
+            raise chia.SageError("did_create needs a non-empty name")
+        t0 = time.time()
+        res = rpc.create_did(name, fee_mojos=fee, auto_submit=True)
+        return self._submit_sage_tx(rpc, res, t0,
+                                    f"created DID {name!r}")
+
+    @staticmethod
+    def _validated_did_ids(params: dict) -> list:
+        """did:chia:1… ids, the wallet's canonical DID form (what
+        /get_dids returns as launcher_id and /transfer_dids accepts)."""
+        ids = params.get("did_ids") or []
+        if not isinstance(ids, list) or not ids or not all(
+                isinstance(i, str) and i.startswith("did:chia:1")
+                for i in ids):
+            raise chia.SageError(
+                "did_ids must be a non-empty list of did:chia:1… ids")
+        return list(ids)
+
+    @staticmethod
+    def _owned_did_ids(rpc) -> set:
+        return {str(d.get("launcher_id") or "") for d in rpc.get_dids()}
+
+    @staticmethod
+    def _validated_option_ids(params: dict) -> list:
+        """option1… ids, the wallet's canonical option form."""
+        ids = params.get("option_ids") or []
+        if not isinstance(ids, list) or not ids or not all(
+                isinstance(i, str) and i.startswith("option1")
+                for i in ids):
+            raise chia.SageError(
+                "option_ids must be a non-empty list of option1… ids")
+        return list(ids)
+
+    @staticmethod
+    def _owned_option_ids(rpc) -> set:
+        # OptionRecord.launcher_id is the canonical option id field.
+        return {str(o.get("launcher_id") or "")
+                for o in rpc.get_options(offset=0, limit=1000)}
+
+    def _execute_did_transfer_via_sage(self, params: dict) -> dict:
+        """Transfer approved DIDs via Sage RPC (on-chain).
+
+        Every DID must still be in this wallet; the destination is the
+        exact approved one (re-checked here, not trusted from the queue).
+        """
+        rpc, fee = self._tx_intent_rpc(params)
+        ids = self._validated_did_ids(params)
+        dest = params.get("destination")
+        if not isinstance(dest, str) or not dest:
+            raise chia.SageError("destination must be a non-empty string")
+        owned = self._owned_did_ids(rpc)
+        for i in ids:
+            if i not in owned:
+                raise chia.SageError(
+                    f"DID {i[:20]}… is not in this wallet — refusing")
+        t0 = time.time()
+        res = rpc.transfer_dids(ids, dest, fee_mojos=fee,
+                                clawback=params.get("clawback_at"),
+                                auto_submit=True)
+        out = self._submit_sage_tx(
+            rpc, res, t0, f"transferred {len(ids)} DID(s) to {dest}")
+        out["destination"] = dest
+        return out
+
+    def _execute_did_normalize_via_sage(self, params: dict) -> dict:
+        """Normalize approved DID coins via Sage RPC (on-chain)."""
+        rpc, fee = self._tx_intent_rpc(params)
+        ids = self._validated_did_ids(params)
+        owned = self._owned_did_ids(rpc)
+        for i in ids:
+            if i not in owned:
+                raise chia.SageError(
+                    f"DID {i[:20]}… is not in this wallet — refusing")
+        t0 = time.time()
+        res = rpc.normalize_dids(ids, fee_mojos=fee, auto_submit=True)
+        return self._submit_sage_tx(
+            rpc, res, t0, f"normalized {len(ids)} DID(s)")
+
+    def _execute_option_mint_via_sage(self, params: dict) -> dict:
+        """Mint an approved option contract via Sage RPC (on-chain).
+
+        The underlying/strike legs are re-validated at execution; both
+        assets must be native or 64-hex CAT ids. The mint gate
+        (_check_mint_gate) runs before this is reached — execution
+        requires the human's separately-opened gate, not just queue
+        approval.
+        """
+        rpc, fee = self._tx_intent_rpc(params)
+        for key in ("underlying", "strike"):
+            leg = params.get(key) or {}
+            aid = leg.get("asset_id")
+            amt = leg.get("amount")
+            if aid is not None and not _HEX64.fullmatch(str(aid)):
+                raise chia.SageError(
+                    f"option {key} asset_id must be a 64-hex CAT id")
+            if not isinstance(amt, int) or amt <= 0:
+                raise chia.SageError(
+                    f"option {key} amount must be a positive integer")
+        exp = params.get("expiration_seconds")
+        if not isinstance(exp, int) or exp <= 0:
+            raise chia.SageError(
+                "expiration_seconds must be a positive unix timestamp")
+        t0 = time.time()
+        res = rpc.mint_option(exp, params["underlying"], params["strike"],
+                              fee_mojos=fee, auto_submit=True)
+        return self._submit_sage_tx(rpc, res, t0, "minted option contract")
+
+    def _execute_option_transfer_via_sage(self, params: dict) -> dict:
+        """Transfer approved options via Sage RPC (on-chain).
+
+        Every option must still be in this wallet; the destination is
+        the exact approved one.
+        """
+        rpc, fee = self._tx_intent_rpc(params)
+        ids = self._validated_option_ids(params)
+        dest = params.get("destination")
+        if not isinstance(dest, str) or not dest:
+            raise chia.SageError("destination must be a non-empty string")
+        owned = self._owned_option_ids(rpc)
+        for i in ids:
+            if i not in owned:
+                raise chia.SageError(
+                    f"option {i[:16]}… is not in this wallet — refusing")
+        t0 = time.time()
+        res = rpc.transfer_options(ids, dest, fee_mojos=fee,
+                                   clawback=params.get("clawback_at"),
+                                   auto_submit=True)
+        out = self._submit_sage_tx(
+            rpc, res, t0, f"transferred {len(ids)} option(s) to {dest}")
+        out["destination"] = dest
+        return out
+
+    def _execute_option_exercise_via_sage(self, params: dict) -> dict:
+        """Exercise approved options via Sage RPC (on-chain)."""
+        rpc, fee = self._tx_intent_rpc(params)
+        ids = self._validated_option_ids(params)
+        owned = self._owned_option_ids(rpc)
+        for i in ids:
+            if i not in owned:
+                raise chia.SageError(
+                    f"option {i[:16]}… is not in this wallet — refusing")
+        t0 = time.time()
+        res = rpc.exercise_options(ids, fee_mojos=fee,
+                                   auto_submit=True)
+        return self._submit_sage_tx(
+            rpc, res, t0, f"exercised {len(ids)} option(s)")
+
+    def _execute_cat_issue_via_sage(self, params: dict) -> dict:
+        """Issue an approved CAT via Sage RPC (on-chain).
+
+        This is token issuance. The six-gate rule is enforced by
+        _check_mint_gate before this is reached: queue approval alone
+        never authorizes issuance — the human must separately open the
+        mint gate (mint_gate.json) with all six attestations. The daemon
+        records the name, ticker, and amount in the ledger for the
+        human to see.
+        """
+        rpc, fee = self._tx_intent_rpc(params)
+        name = params.get("name")
+        ticker = params.get("ticker")
+        amount = params.get("amount_mojos")
+        if not isinstance(name, str) or not name:
+            raise chia.SageError("cat_issue needs a non-empty name")
+        if not isinstance(ticker, str) or not ticker:
+            raise chia.SageError("cat_issue needs a non-empty ticker")
+        if not isinstance(amount, int) or amount <= 0:
+            raise chia.SageError("amount_mojos must be a positive integer")
+        t0 = time.time()
+        res = rpc.issue_cat(name, ticker, amount,
+                            revocable=bool(params.get("revocable", False)),
+                            fee_mojos=fee, auto_submit=True)
+        out = self._submit_sage_tx(
+            rpc, res, t0,
+            f"issued CAT {ticker} ({amount} mojos)")
+        out["name"] = name
+        out["ticker"] = ticker
+        return out
+
+    def _execute_clawback_finalize_via_sage(self, params: dict) -> dict:
+        """Finalize an approved clawback via Sage RPC (on-chain)."""
+        rpc, fee = self._tx_intent_rpc(params)
+        ids = params.get("coin_ids") or []
+        if not isinstance(ids, list) or not all(
+                isinstance(i, str) and i for i in ids):
+            raise chia.SageError("coin_ids must be a non-empty string list")
+        t0 = time.time()
+        res = rpc.finalize_clawback(list(ids), fee_mojos=fee,
+                                    auto_submit=True)
+        return self._submit_sage_tx(
+            rpc, res, t0, f"finalized clawback of {len(ids)} coin(s)")
+
+    def _execute_coin_combine_via_sage(self, params: dict) -> dict:
+        """Combine approved coins via Sage RPC (on-chain)."""
+        rpc, fee = self._tx_intent_rpc(params)
+        ids = self._validated_coin_ids(params)
+        t0 = time.time()
+        res = rpc.combine(list(ids), fee_mojos=fee, auto_submit=True)
+        return self._submit_sage_tx(
+            rpc, res, t0, f"combined {len(ids)} coin(s)")
+
+    def _execute_coin_split_via_sage(self, params: dict) -> dict:
+        """Split approved coins via Sage RPC (on-chain)."""
+        rpc, fee = self._tx_intent_rpc(params)
+        ids = self._validated_coin_ids(params)
+        n = params.get("output_count")
+        if not isinstance(n, int) or n < 2:
+            raise chia.SageError("output_count must be an integer >= 2")
+        t0 = time.time()
+        res = rpc.split(list(ids), n, fee_mojos=fee, auto_submit=True)
+        return self._submit_sage_tx(
+            rpc, res, t0, f"split {len(ids)} coin(s) into {n}")
+
+    def _execute_coin_autocombine_via_sage(self, params: dict) -> dict:
+        """Auto-combine approved small coins via Sage RPC (on-chain)."""
+        rpc, fee = self._tx_intent_rpc(params)
+        asset = params.get("asset", "native")
+        max_coins = params.get("max_coins")
+        if asset not in ("native",) and not _HEX64.fullmatch(
+                str(asset or "")):
+            raise chia.SageError(
+                "coin_autocombine asset must be 'native' or a 64-hex CAT id")
+        if not isinstance(max_coins, int) or max_coins < 2:
+            raise chia.SageError("max_coins must be an integer >= 2")
+        t0 = time.time()
+        if asset == "native":
+            res = rpc.auto_combine_xch(
+                max_coins,
+                max_coin_amount=params.get("max_coin_amount"),
+                fee_mojos=fee, auto_submit=True)
+        else:
+            res = rpc.auto_combine_cat(
+                str(asset).lower(), max_coins,
+                max_coin_amount=params.get("max_coin_amount"),
+                fee_mojos=fee, auto_submit=True)
+        return self._submit_sage_tx(
+            rpc, res, t0, f"auto-combined {asset} coins")
+
+    @staticmethod
+    def _validated_coin_ids(params: dict) -> list:
+        ids = params.get("coin_ids") or []
+        if not isinstance(ids, list) or not ids or not all(
+                isinstance(i, str) and _HEX64.fullmatch(i) for i in ids):
+            raise chia.SageError(
+                "coin_ids must be a non-empty list of 64-hex coin ids")
+        return [i.lower() for i in ids]
+
+    def _execute_bulk_send_via_sage(self, params: dict) -> dict:
+        """Bulk-send an approved batch via Sage RPC (on-chain).
+
+        Re-validates every address and the exact amount at execution —
+        the queue entry is never trusted blindly.
+        """
+        rpc, fee = self._tx_intent_rpc(params)
+        kind, ref = chia_asset_kind(params.get("asset", "native"))
+        if kind == "nft":
+            raise chia.SageError("bulk_send does not support NFT assets")
+        addrs = params.get("addresses") or []
+        amount = params.get("amount_mojos")
+        if not isinstance(addrs, list) or not addrs or not all(
+                isinstance(a, str) and a for a in addrs):
+            raise chia.SageError(
+                "addresses must be a non-empty list of address strings")
+        if not isinstance(amount, int) or amount <= 0:
+            raise chia.SageError("amount_mojos must be a positive integer")
+        memos = params.get("memos") or []
+        if not isinstance(memos, list):
+            raise chia.SageError("memos must be a list")
+        t0 = time.time()
+        if kind == "native":
+            res = rpc.bulk_send_xch(list(addrs), amount, fee_mojos=fee,
+                                    memos=memos, auto_submit=True)
+        else:
+            res = rpc.bulk_send_cat(ref, list(addrs), amount,
+                                    fee_mojos=fee, memos=memos,
+                                    auto_submit=True)
+        out = self._submit_sage_tx(
+            rpc, res, t0,
+            f"bulk-sent {amount} mojos to {len(addrs)} address(es)")
+        out["addresses"] = list(addrs)
+        return out
+
+    def _execute_multi_send_via_sage(self, params: dict) -> dict:
+        """Multi-send approved mixed-asset payments via Sage RPC (on-chain).
+
+        Every payment's asset/address/amount is re-validated at
+        execution against the queued intent.
+        """
+        rpc, fee = self._tx_intent_rpc(params)
+        pays = params.get("payments") or []
+        if not isinstance(pays, list) or not pays:
+            raise chia.SageError("payments must be a non-empty list")
+        norm = []
+        for pay in pays:
+            if not isinstance(pay, dict):
+                raise chia.SageError("each payment must be an object")
+            aid = pay.get("asset_id")
+            amt = pay.get("amount")
+            addr = pay.get("address")
+            if aid is not None and not _HEX64.fullmatch(str(aid)):
+                raise chia.SageError(f"bad payment asset_id {aid!r}")
+            if not isinstance(amt, int) or amt <= 0:
+                raise chia.SageError(
+                    "each payment amount must be a positive integer")
+            if not isinstance(addr, str) or not addr:
+                raise chia.SageError(
+                    "each payment needs a non-empty address")
+            memos = pay.get("memos") or []
+            if not isinstance(memos, list):
+                raise chia.SageError("payment memos must be a list")
+            norm.append({"asset_id": str(aid).lower() if aid else None,
+                         "address": addr, "amount": amt, "memos": memos})
+        t0 = time.time()
+        res = rpc.multi_send(norm, fee_mojos=fee, auto_submit=True)
+        out = self._submit_sage_tx(
+            rpc, res, t0, f"multi-sent {len(norm)} payment(s)")
+        out["payments"] = norm
+        return out
+
+    def _execute_message_sign_via_sage(self, params: dict) -> dict:
+        """Sign an approved message via Sage RPC (off-chain).
+
+        No funds move, but the signature is a capability: the message
+        and the signing identity are exactly what the human approved,
+        verified here before signing. Returns the signature — never the
+        key. Nothing is broadcast, so submitted=False and no velocity is
+        recorded.
+        """
+        chain = params["chain"]
+        self._chia_offer_guards(params, chain)
+        rpc, _, _ = self._chia_sage_rpc(chain)
+        message = params.get("message")
+        if not isinstance(message, str) or not message:
+            raise chia.SageError("message_sign needs a non-empty message")
+        addr = params.get("address")
+        pkey = params.get("public_key")
+        if addr and pkey:
+            raise chia.SageError(
+                "message_sign takes address OR public_key, not both")
+        if addr:
+            res = rpc.sign_message_by_address(addr, message)
+            who = addr
+        elif pkey:
+            res = rpc.sign_message_with_public_key(pkey, message)
+            who = pkey
+        else:
+            raise chia.SageError(
+                "message_sign needs address or public_key")
+        sig = (res or {}).get("signature")
+        if not sig:
+            raise chia.SageError("Sage returned no signature")
+        return {"submitted": False, "signature": sig, "signed_by": who,
+                "note": f"signed message as {who[:24]}…"}
+
     def _wait_pending_tx(self, rpc, tx_id: str, timeout_s: int) -> bool:
         """True when tx_id shows up in Sage's pending transactions."""
         deadline = time.time() + timeout_s
@@ -1398,12 +2256,25 @@ class Daemon:
     def _check_offer_balances(self, rpc, legs: list, fee_mojos: int) -> None:
         """Fail closed when the wallet cannot fund the offer's give side.
 
-        legs are (asset, amount) with asset "native" or 64-hex CAT.
+        legs are (asset, amount) with asset "native", 64-hex CAT, or
+        "nft:<launcher-id>". NFT legs are verified by ownership (the NFT
+        must still be in the wallet), not by a fungible balance.
         """
         xch_need = fee_mojos
+        nft_launchers = [a[4:] for a, _ in legs if a.startswith("nft:")]
+        if nft_launchers:
+            owned = {str(n.get("launcher_id") or "").lower()
+                     for n in rpc.get_nfts(offset=0, limit=1000)}
+            for lid in nft_launchers:
+                if lid.lower() not in owned:
+                    raise chia.SageError(
+                        f"offered NFT {lid[:16]}… is no longer in this "
+                        "wallet — refusing")
         for asset, amount in legs:
             if asset == "native":
                 xch_need += amount
+            elif asset.startswith("nft:"):
+                continue
             else:
                 bal = chia.cat_balance(rpc, asset)
                 if bal < amount:
@@ -1443,7 +2314,10 @@ class Daemon:
         encumbered offered legs; offer_take counts what we give (the
         request-time _give legs, re-verified at execution); offer_cancel
         counts nothing — the coins return to the wallet and the make
-        already counted them.
+        already counted them. Mint/DID/option/coin-op intents count the
+        fee leg (native) plus any asset the wallet gives up: option_mint
+        counts the underlying leg, bulk_send and multi_send count every
+        payment leg. message_sign moves nothing and counts nothing.
         """
         intent = params.get("intent")
         chain = params["chain"]
@@ -1453,11 +2327,46 @@ class Daemon:
         if intent == "offer_take":
             return [(chain, it["asset"], it["amount_mojos"])
                     for it in params["_give"]]
-        if intent == "offer_cancel":
+        if intent in ("offer_cancel", "message_sign"):
             return []
+        fee = params.get("fee_mojos", 0)
+        if intent == "option_mint":
+            leg = params.get("underlying") or {}
+            aid = leg.get("asset_id")
+            a = aid.lower() if aid else "native"
+            amt = leg.get("amount", 0)
+            if a == "native":
+                return [(chain, "native", fee + amt)]
+            return [(chain, "native", fee), (chain, a, amt)]
+        if intent == "bulk_send":
+            asset = params.get("asset", "native")
+            kind, ref = chia_asset_kind(asset)
+            a = "native" if kind == "native" else ref
+            total = len(params.get("addresses") or []) * params.get(
+                "amount_mojos", 0)
+            if a == "native":
+                # One merged native entry — evaluate() is per-entry, so
+                # separate amount and fee entries would under-count.
+                return [(chain, "native", total + fee)]
+            return [(chain, a, total), (chain, "native", fee)]
+        if intent == "multi_send":
+            # Merge per asset (same reason as bulk_send) so a mixed batch
+            # is evaluated at its true total per asset.
+            totals: dict = {}
+            for pay in params.get("payments") or []:
+                aid = pay.get("asset_id")
+                a = aid.lower() if aid else "native"
+                totals[a] = totals.get(a, 0) + pay.get("amount", 0)
+            totals["native"] = totals.get("native", 0) + fee
+            return [(chain, a, t) for a, t in totals.items()]
         asset = params.get("asset", "native")
         amount = params.get("amount_mojos", params.get("amount_wei",
                             params.get("amount_lamports")))
+        if intent in ("nft_mint", "nft_assign_did", "did_create",
+                      "did_transfer", "did_normalize", "option_transfer",
+                      "option_exercise", "cat_issue", "clawback_finalize",
+                      "coin_combine", "coin_split", "coin_autocombine"):
+            return [(chain, "native", fee)]
         return [(chain, asset, amount)]
 
     def _record_velocity_entries(self, params: dict) -> None:
@@ -1532,6 +2441,12 @@ class Daemon:
             self._chia_offer_guards(p, chain)
             offered = _validate_offer_legs(p["offered"], "offered")
             requested = _validate_offer_legs(p["requested"], "requested")
+            # NFT legs resolve to launcher ids now, so the queued intent
+            # the human approves names the exact NFT (and fails fast when
+            # the NFT is not in this wallet).
+            rpc, _, _ = self._chia_sage_rpc(chain)
+            offered = _resolve_offer_nft_legs(rpc, offered, "offered")
+            requested = _resolve_offer_nft_legs(rpc, requested, "requested")
             expires = p.get("expires_at_second")
             if expires is not None and (
                     not isinstance(expires, int) or expires <= 0):
@@ -1642,6 +2557,680 @@ class Daemon:
         return {"ok": True, "decision": "queued", "queue_id": qid,
                 "reason": "offer cancellation always requires human approval"}
 
+    # --------------------------------- full Sage wallet surface: intents
+
+    def _req_tx_guards(self, p: dict, chain: str):
+        """Request-time guards shared by every Sage-transaction intent.
+
+        Returns None on success, or an error dict. Mainnet-without-flag
+        and missing-seed refuse exactly like the transfer/offer paths;
+        fee_mojos must be a non-negative integer.
+        """
+        if chain not in chia.NETWORKS:
+            return {"ok": False,
+                    "error": f"Chia-only intent, got chain {chain!r}"}
+        try:
+            self._chia_offer_guards(p, chain)
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+        return None
+
+    def _queue_tx_intent(self, params: dict, muse_id: str, intent: str):
+        """Queue-or-execute a validated Sage-transaction intent.
+
+        Velocity legs come from _velocity_entries(params) — one source of
+        truth shared with the post-execution recording.
+        """
+        return self._run_fund_intent(params, muse_id,
+                                     self._velocity_entries(params), intent)
+
+    @staticmethod
+    def _fee_of(p: dict) -> int:
+        fee = p.get("fee_mojos", 0)
+        if not isinstance(fee, int) or fee < 0:
+            raise chia.SageError("fee_mojos must be a non-negative integer")
+        return fee
+
+    def rt_nft_mint(self, p: dict, muse_id: str) -> dict:
+        fields = set(p)
+        if (not fields.issubset(NFT_MINT_FIELDS) or "chain" not in p
+                or "mints" not in p or "did_id" not in p):
+            return {"ok": False,
+                    "error": "schema violation: nft_mint needs chain, "
+                             "mints[], did_id"}
+        err = self._req_tx_guards(p, p["chain"])
+        if err:
+            return err
+        try:
+            mints = p["mints"]
+            if not isinstance(mints, list) or not mints:
+                raise chia.SageError("mints must be a non-empty list")
+            for m in mints:
+                self._validate_nft_mint(m)
+            did_id = p["did_id"]
+            if not (isinstance(did_id, str)
+                    and did_id.startswith("did:chia:1")):
+                raise chia.SageError(
+                    "did_id must be a did:chia:1… minter DID id")
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+        params = {"intent": "nft_mint", "chain": p["chain"],
+                  "mints": mints, "did_id": did_id,
+                  "fee_mojos": self._fee_of(p),
+                  "purpose": p.get("purpose", "")}
+        return self._queue_tx_intent(params, muse_id, "nft_mint")
+
+    def rt_nft_assign_did(self, p: dict, muse_id: str) -> dict:
+        fields = set(p)
+        if (not fields.issubset(NFT_ASSIGN_DID_FIELDS) or "chain" not in p
+                or "nft_ids" not in p):
+            return {"ok": False,
+                    "error": "schema violation: nft_assign_did needs chain, "
+                             "nft_ids[]"}
+        err = self._req_tx_guards(p, p["chain"])
+        if err:
+            return err
+        try:
+            ids = p["nft_ids"]
+            if not isinstance(ids, list) or not ids or not all(
+                    isinstance(i, str) and (
+                        i.startswith("nft1") or _HEX64.fullmatch(i))
+                    for i in ids):
+                raise chia.SageError(
+                    "nft_ids must be a non-empty list of nft1 or 64-hex ids")
+            did_id = p.get("did_id")
+            if did_id is not None and not (
+                    isinstance(did_id, str)
+                    and did_id.startswith("did:chia:1")):
+                raise chia.SageError(
+                    "did_id must be a did:chia:1… address or null "
+                    "(null unassigns)")
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+        params = {"intent": "nft_assign_did", "chain": p["chain"],
+                  "nft_ids": list(ids), "did_id": did_id,
+                  "fee_mojos": self._fee_of(p),
+                  "purpose": p.get("purpose", "")}
+        return self._queue_tx_intent(params, muse_id, "nft_assign_did")
+
+    def rt_did_create(self, p: dict, muse_id: str) -> dict:
+        fields = set(p)
+        if (not fields.issubset(DID_CREATE_FIELDS) or "chain" not in p
+                or "name" not in p):
+            return {"ok": False,
+                    "error": "schema violation: did_create needs chain, name"}
+        err = self._req_tx_guards(p, p["chain"])
+        if err:
+            return err
+        try:
+            name = p["name"]
+            if not isinstance(name, str) or not name:
+                raise chia.SageError("name must be a non-empty string")
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+        params = {"intent": "did_create", "chain": p["chain"], "name": name,
+                  "fee_mojos": self._fee_of(p),
+                  "purpose": p.get("purpose", "")}
+        return self._queue_tx_intent(params, muse_id, "did_create")
+
+    def rt_did_transfer(self, p: dict, muse_id: str) -> dict:
+        fields = set(p)
+        if (not fields.issubset(DID_TRANSFER_FIELDS) or "chain" not in p
+                or "did_ids" not in p or "destination" not in p):
+            return {"ok": False,
+                    "error": "schema violation: did_transfer needs chain, "
+                             "did_ids[], destination"}
+        err = self._req_tx_guards(p, p["chain"])
+        if err:
+            return err
+        try:
+            ids = self._validated_did_ids(p)
+            dest = p["destination"]
+            if not isinstance(dest, str) or not dest:
+                raise chia.SageError(
+                    "destination must be a non-empty string")
+            claw = p.get("clawback_at")
+            if claw is not None and (
+                    not isinstance(claw, int) or claw <= 0):
+                raise chia.SageError(
+                    "clawback_at must be a positive unix timestamp")
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+        params = {"intent": "did_transfer", "chain": p["chain"],
+                  "did_ids": ids, "destination": dest,
+                  "fee_mojos": self._fee_of(p),
+                  "purpose": p.get("purpose", "")}
+        if claw is not None:
+            params["clawback_at"] = claw
+        return self._queue_tx_intent(params, muse_id, "did_transfer")
+
+    def rt_did_normalize(self, p: dict, muse_id: str) -> dict:
+        fields = set(p)
+        if (not fields.issubset(DID_NORMALIZE_FIELDS) or "chain" not in p
+                or "did_ids" not in p):
+            return {"ok": False,
+                    "error": "schema violation: did_normalize needs chain, "
+                             "did_ids[]"}
+        err = self._req_tx_guards(p, p["chain"])
+        if err:
+            return err
+        try:
+            ids = self._validated_did_ids(p)
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+        params = {"intent": "did_normalize", "chain": p["chain"],
+                  "did_ids": ids, "fee_mojos": self._fee_of(p),
+                  "purpose": p.get("purpose", "")}
+        return self._queue_tx_intent(params, muse_id, "did_normalize")
+
+    def rt_option_mint(self, p: dict, muse_id: str) -> dict:
+        fields = set(p)
+        if (not fields.issubset(OPTION_MINT_FIELDS) or "chain" not in p
+                or "expiration_seconds" not in p or "underlying" not in p
+                or "strike" not in p):
+            return {"ok": False,
+                    "error": "schema violation: option_mint needs chain, "
+                             "expiration_seconds, underlying, strike"}
+        err = self._req_tx_guards(p, p["chain"])
+        if err:
+            return err
+        try:
+            exp = p["expiration_seconds"]
+            if not isinstance(exp, int) or exp <= 0:
+                raise chia.SageError(
+                    "expiration_seconds must be a positive unix timestamp")
+            legs = {}
+            for key in ("underlying", "strike"):
+                leg = p[key]
+                if not isinstance(leg, dict):
+                    raise chia.SageError(f"{key} must be an object")
+                aid = leg.get("asset_id")
+                amt = leg.get("amount")
+                if aid is not None and not _HEX64.fullmatch(str(aid)):
+                    raise chia.SageError(
+                        f"{key}.asset_id must be a 64-hex CAT id or null "
+                        "(null = XCH)")
+                if not isinstance(amt, int) or amt <= 0:
+                    raise chia.SageError(
+                        f"{key}.amount must be a positive integer")
+                legs[key] = {"asset_id": str(aid).lower() if aid else None,
+                             "amount": amt}
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+        params = {"intent": "option_mint", "chain": p["chain"],
+                  "expiration_seconds": exp,
+                  "underlying": legs["underlying"],
+                  "strike": legs["strike"],
+                  "fee_mojos": self._fee_of(p),
+                  "purpose": p.get("purpose", "")}
+        return self._queue_tx_intent(params, muse_id, "option_mint")
+
+    def rt_option_transfer(self, p: dict, muse_id: str) -> dict:
+        fields = set(p)
+        if (not fields.issubset(OPTION_TRANSFER_FIELDS) or "chain" not in p
+                or "option_ids" not in p or "destination" not in p):
+            return {"ok": False,
+                    "error": "schema violation: option_transfer needs chain, "
+                             "option_ids[], destination"}
+        err = self._req_tx_guards(p, p["chain"])
+        if err:
+            return err
+        try:
+            ids = self._validated_option_ids(p)
+            dest = p["destination"]
+            if not isinstance(dest, str) or not dest:
+                raise chia.SageError(
+                    "destination must be a non-empty string")
+            claw = p.get("clawback_at")
+            if claw is not None and (
+                    not isinstance(claw, int) or claw <= 0):
+                raise chia.SageError(
+                    "clawback_at must be a positive unix timestamp")
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+        params = {"intent": "option_transfer", "chain": p["chain"],
+                  "option_ids": ids, "destination": dest,
+                  "fee_mojos": self._fee_of(p),
+                  "purpose": p.get("purpose", "")}
+        if claw is not None:
+            params["clawback_at"] = claw
+        return self._queue_tx_intent(params, muse_id, "option_transfer")
+
+    def rt_option_exercise(self, p: dict, muse_id: str) -> dict:
+        fields = set(p)
+        if (not fields.issubset(OPTION_EXERCISE_FIELDS) or "chain" not in p
+                or "option_ids" not in p):
+            return {"ok": False,
+                    "error": "schema violation: option_exercise needs chain, "
+                             "option_ids[]"}
+        err = self._req_tx_guards(p, p["chain"])
+        if err:
+            return err
+        try:
+            ids = self._validated_option_ids(p)
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+        params = {"intent": "option_exercise", "chain": p["chain"],
+                  "option_ids": ids, "fee_mojos": self._fee_of(p),
+                  "purpose": p.get("purpose", "")}
+        return self._queue_tx_intent(params, muse_id, "option_exercise")
+
+    def rt_cat_issue(self, p: dict, muse_id: str) -> dict:
+        fields = set(p)
+        if (not fields.issubset(CAT_ISSUE_FIELDS) or "chain" not in p
+                or "name" not in p or "ticker" not in p
+                or "amount_mojos" not in p):
+            return {"ok": False,
+                    "error": "schema violation: cat_issue needs chain, name, "
+                             "ticker, amount_mojos"}
+        err = self._req_tx_guards(p, p["chain"])
+        if err:
+            return err
+        try:
+            name, ticker = p["name"], p["ticker"]
+            amount = p["amount_mojos"]
+            if not isinstance(name, str) or not name:
+                raise chia.SageError("name must be a non-empty string")
+            if not isinstance(ticker, str) or not ticker:
+                raise chia.SageError("ticker must be a non-empty string")
+            if not isinstance(amount, int) or amount <= 0:
+                raise chia.SageError(
+                    "amount_mojos must be a positive integer")
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+        # Token issuance: the six-gate rule applies. The queued intent
+        # carries the full terms (name/ticker/amount) for the human, and
+        # nothing executes without BOTH their queue approval AND the
+        # separately-opened mint gate (mint_gate.json, six attestations).
+        params = {"intent": "cat_issue", "chain": p["chain"],
+                  "name": name, "ticker": ticker,
+                  "amount_mojos": amount,
+                  "revocable": bool(p.get("revocable", False)),
+                  "fee_mojos": self._fee_of(p),
+                  "purpose": p.get("purpose", "")}
+        return self._queue_tx_intent(params, muse_id, "cat_issue")
+
+    def rt_clawback_finalize(self, p: dict, muse_id: str) -> dict:
+        fields = set(p)
+        if (not fields.issubset(CLAWBACK_FIELDS) or "chain" not in p
+                or "coin_ids" not in p):
+            return {"ok": False,
+                    "error": "schema violation: clawback_finalize needs "
+                             "chain, coin_ids[]"}
+        err = self._req_tx_guards(p, p["chain"])
+        if err:
+            return err
+        try:
+            ids = self._validated_coin_ids(p)
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+        params = {"intent": "clawback_finalize", "chain": p["chain"],
+                  "coin_ids": ids, "fee_mojos": self._fee_of(p),
+                  "purpose": p.get("purpose", "")}
+        return self._queue_tx_intent(params, muse_id, "clawback_finalize")
+
+    def rt_coin_combine(self, p: dict, muse_id: str) -> dict:
+        fields = set(p)
+        if (not fields.issubset(COIN_COMBINE_FIELDS) or "chain" not in p
+                or "coin_ids" not in p):
+            return {"ok": False,
+                    "error": "schema violation: coin_combine needs chain, "
+                             "coin_ids[]"}
+        err = self._req_tx_guards(p, p["chain"])
+        if err:
+            return err
+        try:
+            ids = self._validated_coin_ids(p)
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+        params = {"intent": "coin_combine", "chain": p["chain"],
+                  "coin_ids": ids, "fee_mojos": self._fee_of(p),
+                  "purpose": p.get("purpose", "")}
+        return self._queue_tx_intent(params, muse_id, "coin_combine")
+
+    def rt_coin_split(self, p: dict, muse_id: str) -> dict:
+        fields = set(p)
+        if (not fields.issubset(COIN_SPLIT_FIELDS) or "chain" not in p
+                or "coin_ids" not in p or "output_count" not in p):
+            return {"ok": False,
+                    "error": "schema violation: coin_split needs chain, "
+                             "coin_ids[], output_count"}
+        err = self._req_tx_guards(p, p["chain"])
+        if err:
+            return err
+        try:
+            ids = self._validated_coin_ids(p)
+            n = p["output_count"]
+            if not isinstance(n, int) or n < 2:
+                raise chia.SageError("output_count must be an integer >= 2")
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+        params = {"intent": "coin_split", "chain": p["chain"],
+                  "coin_ids": ids, "output_count": n,
+                  "fee_mojos": self._fee_of(p),
+                  "purpose": p.get("purpose", "")}
+        return self._queue_tx_intent(params, muse_id, "coin_split")
+
+    def rt_coin_autocombine(self, p: dict, muse_id: str) -> dict:
+        fields = set(p)
+        if (not fields.issubset(COIN_AUTOCOMBINE_FIELDS) or "chain" not in p
+                or "max_coins" not in p):
+            return {"ok": False,
+                    "error": "schema violation: coin_autocombine needs chain, "
+                             "max_coins"}
+        err = self._req_tx_guards(p, p["chain"])
+        if err:
+            return err
+        try:
+            asset = p.get("asset", "native")
+            if asset != "native" and not _HEX64.fullmatch(str(asset or "")):
+                raise chia.SageError(
+                    "asset must be 'native' or a 64-hex CAT id")
+            max_coins = p["max_coins"]
+            if not isinstance(max_coins, int) or max_coins < 2:
+                raise chia.SageError("max_coins must be an integer >= 2")
+            mca = p.get("max_coin_amount")
+            if mca is not None and (
+                    not isinstance(mca, int) or mca <= 0):
+                raise chia.SageError(
+                    "max_coin_amount must be a positive integer")
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+        params = {"intent": "coin_autocombine", "chain": p["chain"],
+                  "asset": asset if asset == "native" else str(asset).lower(),
+                  "max_coins": max_coins,
+                  "fee_mojos": self._fee_of(p),
+                  "purpose": p.get("purpose", "")}
+        if mca is not None:
+            params["max_coin_amount"] = mca
+        return self._queue_tx_intent(params, muse_id, "coin_autocombine")
+
+    def rt_bulk_send(self, p: dict, muse_id: str) -> dict:
+        fields = set(p)
+        if (not fields.issubset(BULK_SEND_FIELDS) or "chain" not in p
+                or "addresses" not in p or "amount_mojos" not in p):
+            return {"ok": False,
+                    "error": "schema violation: bulk_send needs chain, "
+                             "addresses[], amount_mojos"}
+        err = self._req_tx_guards(p, p["chain"])
+        if err:
+            return err
+        try:
+            kind, ref = chia_asset_kind(p.get("asset", "native"))
+            if kind == "nft":
+                raise chia.SageError(
+                    "bulk_send does not support NFT assets")
+            addrs = p["addresses"]
+            amount = p["amount_mojos"]
+            if not isinstance(addrs, list) or not addrs or not all(
+                    isinstance(a, str) and a for a in addrs):
+                raise chia.SageError(
+                    "addresses must be a non-empty list of address strings")
+            if not isinstance(amount, int) or amount <= 0:
+                raise chia.SageError(
+                    "amount_mojos must be a positive integer")
+            memos = p.get("memos") or []
+            if not isinstance(memos, list):
+                raise chia.SageError("memos must be a list")
+            asset = "native" if kind == "native" else ref
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+        params = {"intent": "bulk_send", "chain": p["chain"],
+                  "asset": asset, "addresses": list(addrs),
+                  "amount_mojos": amount, "memos": list(memos),
+                  "fee_mojos": self._fee_of(p),
+                  "purpose": p.get("purpose", "")}
+        return self._queue_tx_intent(params, muse_id, "bulk_send")
+
+    def rt_multi_send(self, p: dict, muse_id: str) -> dict:
+        fields = set(p)
+        if (not fields.issubset(MULTI_SEND_FIELDS) or "chain" not in p
+                or "payments" not in p):
+            return {"ok": False,
+                    "error": "schema violation: multi_send needs chain, "
+                             "payments[]"}
+        err = self._req_tx_guards(p, p["chain"])
+        if err:
+            return err
+        try:
+            pays = p["payments"]
+            if not isinstance(pays, list) or not pays:
+                raise chia.SageError("payments must be a non-empty list")
+            norm = []
+            for pay in pays:
+                if not isinstance(pay, dict):
+                    raise chia.SageError("each payment must be an object")
+                aid = pay.get("asset_id")
+                amt = pay.get("amount")
+                addr = pay.get("address")
+                if aid is not None and not _HEX64.fullmatch(str(aid)):
+                    raise chia.SageError(
+                        f"bad payment asset_id {aid!r}: 64-hex or null")
+                if not isinstance(amt, int) or amt <= 0:
+                    raise chia.SageError(
+                        "each payment amount must be a positive integer")
+                if not isinstance(addr, str) or not addr:
+                    raise chia.SageError(
+                        "each payment needs a non-empty address")
+                memos = pay.get("memos") or []
+                if not isinstance(memos, list):
+                    raise chia.SageError("payment memos must be a list")
+                norm.append({"asset_id": str(aid).lower() if aid else None,
+                             "address": addr, "amount": amt,
+                             "memos": list(memos)})
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+        params = {"intent": "multi_send", "chain": p["chain"],
+                  "payments": norm, "fee_mojos": self._fee_of(p),
+                  "purpose": p.get("purpose", "")}
+        return self._queue_tx_intent(params, muse_id, "multi_send")
+
+    def rt_message_sign(self, p: dict, muse_id: str) -> dict:
+        fields = set(p)
+        if (not fields.issubset(MESSAGE_SIGN_FIELDS) or "chain" not in p
+                or "message" not in p):
+            return {"ok": False,
+                    "error": "schema violation: message_sign needs chain, "
+                             "message, and address or public_key"}
+        err = self._req_tx_guards(p, p["chain"])
+        if err:
+            return err
+        try:
+            message = p["message"]
+            addr = p.get("address")
+            pkey = p.get("public_key")
+            if not isinstance(message, str) or not message:
+                raise chia.SageError("message must be a non-empty string")
+            if addr and pkey:
+                raise chia.SageError(
+                    "message_sign takes address OR public_key, not both")
+            if addr is not None and not isinstance(addr, str):
+                raise chia.SageError("address must be a string")
+            if pkey is not None and not isinstance(pkey, str):
+                raise chia.SageError("public_key must be a string")
+            if not addr and not pkey:
+                raise chia.SageError(
+                    "message_sign needs address or public_key")
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+        params = {"intent": "message_sign", "chain": p["chain"],
+                  "message": message, "purpose": p.get("purpose", "")}
+        if addr:
+            params["address"] = addr
+        if pkey:
+            params["public_key"] = pkey
+        # A signature is a capability even though no funds move: it always
+        # queues for a human, no amount policy. The approved message and
+        # signing identity are re-verified at execution.
+        canon = json.dumps(params, sort_keys=True).encode()
+        qid = str(self.next_qid); self.next_qid += 1
+        self.queue[qid] = {"params": params, "muse_id": muse_id,
+                           "queued_at": time.time()}
+        self._save_queue()
+        self.ledger.append(muse_id, canon, None, f"queued:{qid}")
+        return {"ok": True, "decision": "queued", "queue_id": qid,
+                "reason": "message signing always requires human approval"}
+
+    # ----------------------- wallet-local metadata (direct, no queue)
+
+    def _local_chia_rpc(self, p: dict):
+        """Guards + wallet selection for local-metadata routes.
+
+        Returns (rpc, None) or (None, error_dict). No seed is required —
+        nothing is signed — but the chain must be a Chia network.
+        """
+        chain = p.get("chain")
+        if chain not in chia.NETWORKS:
+            return None, {"ok": False,
+                          "error": f"Chia-only route, got chain {chain!r}"}
+        try:
+            rpc, _, _ = self._chia_sage_rpc(chain)
+        except chia.SageError as e:
+            return None, {"ok": False, "error": str(e)}
+        return rpc, None
+
+    def rt_offer_import(self, p: dict, muse_id: str) -> dict:
+        if (not set(p).issubset(OFFER_IMPORT_FIELDS)
+                or "chain" not in p or "offer" not in p
+                or not isinstance(p["offer"], str)):
+            return {"ok": False,
+                    "error": "schema violation: offer_import needs chain, "
+                             "offer (string)"}
+        rpc, err = self._local_chia_rpc(p)
+        if err:
+            return err
+        try:
+            rpc.import_offer(p["offer"])
+            return {"ok": True, "imported": True}
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+
+    def rt_offer_delete(self, p: dict, muse_id: str) -> dict:
+        if (not set(p).issubset(OFFER_DELETE_FIELDS)
+                or "chain" not in p or not p.get("offer_id")):
+            return {"ok": False,
+                    "error": "schema violation: offer_delete needs chain, "
+                             "offer_id"}
+        rpc, err = self._local_chia_rpc(p)
+        if err:
+            return err
+        try:
+            rpc.delete_offer(p["offer_id"])
+            return {"ok": True, "deleted": True}
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+
+    def rt_offer_combine(self, p: dict, muse_id: str) -> dict:
+        if (not set(p).issubset(OFFER_COMBINE_FIELDS)
+                or "chain" not in p or "offers" not in p
+                or not isinstance(p["offers"], list) or not p["offers"]):
+            return {"ok": False,
+                    "error": "schema violation: offer_combine needs chain, "
+                             "offers[] (non-empty)"}
+        rpc, err = self._local_chia_rpc(p)
+        if err:
+            return err
+        try:
+            res = rpc.combine_offers(list(p["offers"]))
+            return {"ok": True, "result": res}
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+
+    def rt_cat_update(self, p: dict, muse_id: str) -> dict:
+        if (not set(p).issubset(CAT_UPDATE_FIELDS)
+                or "chain" not in p or "record" not in p
+                or not isinstance(p["record"], dict)):
+            return {"ok": False,
+                    "error": "schema violation: cat_update needs chain, "
+                             "record (object)"}
+        rpc, err = self._local_chia_rpc(p)
+        if err:
+            return err
+        try:
+            rpc.update_cat(p["record"])
+            return {"ok": True, "updated": True}
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+
+    def rt_did_update(self, p: dict, muse_id: str) -> dict:
+        if (not set(p).issubset(DID_UPDATE_FIELDS)
+                or "chain" not in p or "did_id" not in p):
+            return {"ok": False,
+                    "error": "schema violation: did_update needs chain, "
+                             "did_id"}
+        rpc, err = self._local_chia_rpc(p)
+        if err:
+            return err
+        try:
+            rpc.update_did(p["did_id"], name=p.get("name"),
+                           visible=bool(p.get("visible", True)))
+            return {"ok": True, "updated": True}
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+
+    def rt_nft_update(self, p: dict, muse_id: str) -> dict:
+        if (not set(p).issubset(NFT_UPDATE_FIELDS)
+                or "chain" not in p or "nft_id" not in p):
+            return {"ok": False,
+                    "error": "schema violation: nft_update needs chain, "
+                             "nft_id"}
+        rpc, err = self._local_chia_rpc(p)
+        if err:
+            return err
+        try:
+            rpc.update_nft(p["nft_id"],
+                           visible=bool(p.get("visible", True)))
+            return {"ok": True, "updated": True}
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+
+    def rt_nft_collection_update(self, p: dict, muse_id: str) -> dict:
+        if (not set(p).issubset(NFT_COLLECTION_UPDATE_FIELDS)
+                or "chain" not in p or "collection_id" not in p):
+            return {"ok": False,
+                    "error": "schema violation: nft_collection_update needs "
+                             "chain, collection_id"}
+        rpc, err = self._local_chia_rpc(p)
+        if err:
+            return err
+        try:
+            rpc.update_nft_collection(
+                p["collection_id"], visible=bool(p.get("visible", True)))
+            return {"ok": True, "updated": True}
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+
+    def rt_nft_redownload(self, p: dict, muse_id: str) -> dict:
+        if (not set(p).issubset(NFT_REDOWNLOAD_FIELDS)
+                or "chain" not in p or "nft_id" not in p):
+            return {"ok": False,
+                    "error": "schema violation: nft_redownload needs chain, "
+                             "nft_id"}
+        rpc, err = self._local_chia_rpc(p)
+        if err:
+            return err
+        try:
+            rpc.redownload_nft(p["nft_id"])
+            return {"ok": True, "redownloaded": True}
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+
+    def rt_option_update(self, p: dict, muse_id: str) -> dict:
+        if (not set(p).issubset(OPTION_UPDATE_FIELDS)
+                or "chain" not in p or "option_id" not in p):
+            return {"ok": False,
+                    "error": "schema violation: option_update needs chain, "
+                             "option_id"}
+        rpc, err = self._local_chia_rpc(p)
+        if err:
+            return err
+        try:
+            rpc.update_option(p["option_id"],
+                              visible=bool(p.get("visible", True)))
+            return {"ok": True, "updated": True}
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+
     # ------------------------------------------------------------ chia reads
     def rt_chia_read(self, p: dict, muse_id: str) -> dict:
         """Read-only (or wallet-local) Chia queries — never a spend.
@@ -1679,6 +3268,11 @@ class Daemon:
                 "purpose": p.get("purpose", ""),
                 "muse_id": item.get("muse_id"),
                 "queued_at": item.get("queued_at"),
+                # The exact digest the mint gate authorizes for mint
+                # intents (sha256 of the canonical params — the same bytes
+                # the ledger's canon_digest covers). Shown alongside the
+                # full decoded intent, never instead of it.
+                "canon_digest": self._mint_intent_digest(p),
             }
             # Offer intents carry no single destination/asset/amount — the
             # human must see the decoded legs, never an opaque hash.
@@ -1708,6 +3302,32 @@ class Daemon:
                     "fee_mojos": p.get("fee_mojos", 0),
                     "destination": None, "asset": "offer", "amount": None,
                 })
+            elif intent in ("nft_mint", "nft_assign_did", "did_create",
+                            "did_transfer", "did_normalize", "option_mint",
+                            "option_transfer", "option_exercise",
+                            "cat_issue", "clawback_finalize",
+                            "coin_combine", "coin_split",
+                            "coin_autocombine", "bulk_send", "multi_send",
+                            "message_sign"):
+                # Full Sage wallet surface: the human sees the whole
+                # intent, never an opaque hash. "destination"/"asset"/
+                # "amount" stay None — these intents name ids and lists,
+                # not a single transfer.
+                detail = {
+                    "kind": intent,
+                    "fee_mojos": p.get("fee_mojos", 0),
+                    "destination": None, "asset": None, "amount": None,
+                }
+                for key in ("mints", "did_id", "did_ids", "name",
+                            "option_ids", "expiration_seconds",
+                            "underlying", "strike", "ticker",
+                            "amount_mojos", "revocable", "nft_ids",
+                            "coin_ids", "output_count", "max_coins",
+                            "max_coin_amount", "addresses", "payments",
+                            "address", "public_key", "message"):
+                    if p.get(key) is not None:
+                        detail[key] = p[key]
+                entry.update(detail)
             out.append(entry)
         return out
 

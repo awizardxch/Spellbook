@@ -242,9 +242,12 @@ class SageRpc:
     def _offer_amounts(items: list) -> list:
         """Normalize [{asset, amount_mojos}] into Sage OfferAmount dicts.
 
-        asset "native" (or None) -> XCH (asset_id omitted); otherwise a
-        64-hex CAT asset id. NFT offers are not supported here — the
-        daemon's NFT path is transfer-only.
+        asset "native" (or None) -> XCH (asset_id omitted); a 64-hex CAT
+        asset id -> {"asset_id": ...}; "nft:<launcher-id>" -> {"asset_id":
+        <launcher-id>} — Sage resolves the id to an NFT leg when it matches
+        a wallet NFT (OfferAmount.asset_id carries XCH/CAT/NFT alike; the
+        wallet distinguishes by lookup). NFT legs must be owned by the
+        wallet — the daemon checks that before calling.
         """
         out = []
         for it in items:
@@ -255,12 +258,20 @@ class SageRpc:
                     "offer amounts must be positive integer mojos")
             if asset in (None, "native"):
                 out.append({"amount": amount})
-            elif isinstance(asset, str) and _HEX64_OFFER.fullmatch(asset):
-                out.append({"asset_id": asset.lower(), "amount": amount})
+                continue
+            ref = asset
+            if isinstance(asset, str) and asset.startswith("nft:"):
+                ref = asset[4:]
+                if amount != 1:
+                    raise SageError(
+                        "NFT offer legs must have amount_mojos 1 "
+                        "(the NFT is a singleton)")
+            if isinstance(ref, str) and _HEX64_OFFER.fullmatch(ref):
+                out.append({"asset_id": ref.lower(), "amount": amount})
             else:
                 raise SageError(
-                    f"bad offer asset {asset!r}: expected 'native' or a "
-                    "64-hex CAT asset id")
+                    f"bad offer asset {asset!r}: expected 'native', a "
+                    "64-hex CAT id, or 'nft:<64-hex launcher id>'")
         return out
 
     def make_offer(self, offered: list, requested: list, fee_mojos: int = 0,
@@ -383,10 +394,11 @@ class SageRpc:
 
     # ---- transactions ----
 
-    def get_transaction(self, transaction_id: str) -> dict:
-        """POST /get_transaction — one transaction record by id."""
-        return self.call("get_transaction",
-                         {"transaction_id": transaction_id})
+    def get_transaction(self, height: int) -> dict:
+        """POST /get_transaction — one transaction record by height."""
+        if not isinstance(height, int) or height < 0:
+            raise SageError("get_transaction needs a non-negative height")
+        return self.call("get_transaction", {"height": height})
 
     def get_pending_transactions(self) -> list:
         """POST /get_pending_transactions — unconfirmed wallet txs."""
@@ -478,6 +490,365 @@ class SageRpc:
         """POST /get_database_stats — wallet DB size/sync stats."""
         return self.call("get_database_stats", {})
 
+    # ---- more reads (full Sage surface) ----
+
+    def get_transactions(self, offset: int = 0, limit: int = 50,
+                         ascending: bool = False,
+                         find_value: str | None = None) -> list:
+        """POST /get_transactions — paginated wallet transactions."""
+        body = {"offset": offset, "limit": limit, "ascending": ascending}
+        if find_value:
+            body["find_value"] = find_value
+        return self.call("get_transactions", body).get("transactions", [])
+
+    def get_nft_collections(self, offset: int = 0, limit: int = 50,
+                            include_hidden: bool = False) -> list:
+        """POST /get_nft_collections — NFT collections, paginated."""
+        return self.call("get_nft_collections",
+                         {"offset": offset, "limit": limit,
+                          "include_hidden": include_hidden}
+                         ).get("collections", [])
+
+    def get_nft_collection(self, collection_id: str | None = None) -> dict:
+        """POST /get_nft_collection — one collection (None = uncollected)."""
+        body = {}
+        if collection_id:
+            body["collection_id"] = collection_id
+        return self.call("get_nft_collection", body).get("collection", {})
+
+    def get_nft_icon(self, nft_id: str) -> str:
+        """POST /get_nft_icon — base64-encoded icon image."""
+        return self.call("get_nft_icon",
+                         {"nft_id": nft_id}).get("icon", "")
+
+    def get_nft_thumbnail(self, nft_id: str) -> str:
+        """POST /get_nft_thumbnail — base64-encoded thumbnail image."""
+        return self.call("get_nft_thumbnail",
+                         {"nft_id": nft_id}).get("thumbnail", "")
+
+    def get_token(self, asset_id: str | None = None) -> dict:
+        """POST /get_token — one CAT token record (None = XCH)."""
+        body = {}
+        if asset_id:
+            body["asset_id"] = asset_id
+        return self.call("get_token", body).get("token", {})
+
+    def filter_unlocked_coins(self, coin_ids: list) -> list:
+        """POST /filter_unlocked_coins — keep only unlocked coin ids."""
+        return self.call("filter_unlocked_coins",
+                         {"coin_ids": list(coin_ids)}).get("coin_ids", [])
+
+    def get_asset_coins(self, kind: str | None = None,
+                        asset_id: str | None = None,
+                        included_locked: bool | None = None,
+                        offset: int | None = None,
+                        limit: int | None = None) -> list:
+        """POST /get_asset_coins — spendable coins for an asset type.
+
+        kind is one of "cat" | "did" | "nft" (None = any). Note the
+        endpoint uses camelCase keys.
+        """
+        body = {}
+        if kind:
+            body["type"] = kind
+        if asset_id:
+            body["assetId"] = asset_id
+        if included_locked is not None:
+            body["includedLocked"] = included_locked
+        if offset is not None:
+            body["offset"] = offset
+        if limit is not None:
+            body["limit"] = limit
+        return self.call("get_asset_coins", body).get("coins", [])
+
+    # ---- issuance / minting (fund-moving; daemon queues these) ----
+
+    def create_did(self, name: str, fee_mojos: int = 0,
+                   auto_submit: bool = True) -> dict:
+        """POST /create_did — create a new DID. TransactionResponse."""
+        return self.call("create_did", {
+            "name": name,
+            "fee": fee_mojos,
+            "auto_submit": auto_submit,
+        })
+
+    def bulk_mint_nfts(self, mints: list, did_id: str,
+                       fee_mojos: int = 0, auto_submit: bool = True) -> dict:
+        """POST /bulk_mint_nfts — mint 1..n NFTs in one transaction.
+
+        Each mint: {address?, edition_number?, edition_total?,
+        data_hash?, data_uris[], metadata_hash?, metadata_uris[],
+        license_hash?, license_uris[], royalty_address?,
+        royalty_ten_thousandths?}. Returns {nft_ids, summary, coin_spends}.
+        """
+        return self.call("bulk_mint_nfts", {
+            "mints": list(mints),
+            "did_id": did_id,
+            "fee": fee_mojos,
+            "auto_submit": auto_submit,
+        })
+
+    def mint_option(self, expiration_seconds: int, underlying: dict,
+                    strike: dict, fee_mojos: int = 0,
+                    auto_submit: bool = True) -> dict:
+        """POST /mint_option — mint an option contract.
+
+        underlying/strike: {"asset_id": <64-hex or None>, "amount": int}.
+        TransactionResponse.
+        """
+        for leg in (underlying, strike):
+            if not isinstance(leg.get("amount"), int) or leg["amount"] <= 0:
+                raise SageError("option legs need a positive integer amount")
+        return self.call("mint_option", {
+            "expiration_seconds": expiration_seconds,
+            "underlying": {"asset_id": underlying.get("asset_id"),
+                           "amount": underlying["amount"]},
+            "strike": {"asset_id": strike.get("asset_id"),
+                       "amount": strike["amount"]},
+            "fee": fee_mojos,
+            "auto_submit": auto_submit,
+        })
+
+    def issue_cat(self, name: str, ticker: str, amount_mojos: int,
+                  revocable: bool = False, fee_mojos: int = 0,
+                  auto_submit: bool = True) -> dict:
+        """POST /issue_cat — issue a new CAT. TransactionResponse.
+
+        This is token issuance: the daemon treats it as a queued fund
+        intent, and the standing token-launch gate still applies — the
+        human's approval is the authorization.
+        """
+        if not name or not ticker:
+            raise SageError("issue_cat needs a name and a ticker")
+        if not isinstance(amount_mojos, int) or amount_mojos <= 0:
+            raise SageError("issue_cat amount must be a positive integer")
+        return self.call("issue_cat", {
+            "name": name,
+            "ticker": ticker,
+            "amount": amount_mojos,
+            "revocable": revocable,
+            "fee": fee_mojos,
+            "auto_submit": auto_submit,
+        })
+
+    # ---- DID / option transfers (fund-moving; daemon queues these) ----
+
+    def transfer_dids(self, did_ids: list, address: str,
+                      fee_mojos: int = 0, clawback: int | None = None,
+                      auto_submit: bool = True) -> dict:
+        """POST /transfer_dids — transfer DIDs. TransactionResponse."""
+        body = {"did_ids": list(did_ids), "address": address,
+                "fee": fee_mojos, "auto_submit": auto_submit}
+        if clawback is not None:
+            body["clawback"] = clawback
+        return self.call("transfer_dids", body)
+
+    def transfer_options(self, option_ids: list, address: str,
+                         fee_mojos: int = 0, clawback: int | None = None,
+                         auto_submit: bool = True) -> dict:
+        """POST /transfer_options — transfer options. TransactionResponse."""
+        body = {"option_ids": list(option_ids), "address": address,
+                "fee": fee_mojos, "auto_submit": auto_submit}
+        if clawback is not None:
+            body["clawback"] = clawback
+        return self.call("transfer_options", body)
+
+    def exercise_options(self, option_ids: list, fee_mojos: int = 0,
+                         auto_submit: bool = True) -> dict:
+        """POST /exercise_options — exercise options. TransactionResponse."""
+        return self.call("exercise_options", {
+            "option_ids": list(option_ids),
+            "fee": fee_mojos,
+            "auto_submit": auto_submit,
+        })
+
+    def assign_nfts_to_did(self, nft_ids: list, did_id: str | None,
+                           fee_mojos: int = 0,
+                           auto_submit: bool = True) -> dict:
+        """POST /assign_nfts_to_did — assign NFTs to a DID profile
+        (did_id None unassigns). TransactionResponse."""
+        return self.call("assign_nfts_to_did", {
+            "nft_ids": list(nft_ids),
+            "did_id": did_id,
+            "fee": fee_mojos,
+            "auto_submit": auto_submit,
+        })
+
+    def normalize_dids(self, did_ids: list, fee_mojos: int = 0,
+                       auto_submit: bool = True) -> dict:
+        """POST /normalize_dids — normalize DID coins. TransactionResponse."""
+        return self.call("normalize_dids", {
+            "did_ids": list(did_ids),
+            "fee": fee_mojos,
+            "auto_submit": auto_submit,
+        })
+
+    def finalize_clawback(self, coin_ids: list, fee_mojos: int = 0,
+                          auto_submit: bool = True) -> dict:
+        """POST /finalize_clawback — reclaim clawback coins.
+        TransactionResponse."""
+        return self.call("finalize_clawback", {
+            "coin_ids": list(coin_ids),
+            "fee": fee_mojos,
+            "auto_submit": auto_submit,
+        })
+
+    # ---- coin management (fund-moving; daemon queues these) ----
+
+    def combine(self, coin_ids: list, fee_mojos: int = 0,
+                auto_submit: bool = True) -> dict:
+        """POST /combine — combine coins into fewer. TransactionResponse."""
+        return self.call("combine", {
+            "coin_ids": list(coin_ids),
+            "fee": fee_mojos,
+            "auto_submit": auto_submit,
+        })
+
+    def split(self, coin_ids: list, output_count: int, fee_mojos: int = 0,
+              auto_submit: bool = True) -> dict:
+        """POST /split — split coins into output_count coins.
+        TransactionResponse."""
+        if not isinstance(output_count, int) or output_count < 2:
+            raise SageError("split needs output_count >= 2")
+        return self.call("split", {
+            "coin_ids": list(coin_ids),
+            "output_count": output_count,
+            "fee": fee_mojos,
+            "auto_submit": auto_submit,
+        })
+
+    def auto_combine_xch(self, max_coins: int,
+                         max_coin_amount: int | None = None,
+                         fee_mojos: int = 0,
+                         auto_submit: bool = True) -> dict:
+        """POST /auto_combine_xch — auto-combine small XCH coins."""
+        body = {"max_coins": max_coins, "fee": fee_mojos,
+                "auto_submit": auto_submit}
+        if max_coin_amount is not None:
+            body["max_coin_amount"] = max_coin_amount
+        return self.call("auto_combine_xch", body)
+
+    def auto_combine_cat(self, asset_id: str, max_coins: int,
+                         max_coin_amount: int | None = None,
+                         fee_mojos: int = 0,
+                         auto_submit: bool = True) -> dict:
+        """POST /auto_combine_cat — auto-combine small CAT coins."""
+        if not _HEX64_OFFER.fullmatch(asset_id or ""):
+            raise SageError("auto_combine_cat needs a 64-hex asset id")
+        body = {"asset_id": asset_id.lower(), "max_coins": max_coins,
+                "fee": fee_mojos, "auto_submit": auto_submit}
+        if max_coin_amount is not None:
+            body["max_coin_amount"] = max_coin_amount
+        return self.call("auto_combine_cat", body)
+
+    # ---- bulk sends (fund-moving; daemon queues these) ----
+
+    def bulk_send_xch(self, addresses: list, amount_mojos: int,
+                      fee_mojos: int = 0, memos: list | None = None,
+                      auto_submit: bool = True) -> dict:
+        """POST /bulk_send_xch — same amount to many addresses."""
+        return self.call("bulk_send_xch", {
+            "addresses": list(addresses),
+            "amount": amount_mojos,
+            "fee": fee_mojos,
+            "memos": memos or [],
+            "auto_submit": auto_submit,
+        })
+
+    def bulk_send_cat(self, asset_id: str, addresses: list,
+                      amount_mojos: int, fee_mojos: int = 0,
+                      memos: list | None = None, include_hint: bool = True,
+                      auto_submit: bool = True) -> dict:
+        """POST /bulk_send_cat — same CAT amount to many addresses."""
+        if not _HEX64_OFFER.fullmatch(asset_id or ""):
+            raise SageError("bulk_send_cat needs a 64-hex asset id")
+        return self.call("bulk_send_cat", {
+            "asset_id": asset_id.lower(),
+            "addresses": list(addresses),
+            "amount": amount_mojos,
+            "fee": fee_mojos,
+            "memos": memos or [],
+            "include_hint": include_hint,
+            "auto_submit": auto_submit,
+        })
+
+    def multi_send(self, payments: list, fee_mojos: int = 0,
+                   auto_submit: bool = True) -> dict:
+        """POST /multi_send — mixed-asset payments in one transaction.
+
+        payments: [{"asset_id": <64-hex or None>, "address": ...,
+                    "amount": int, "memos": [...]}].
+        """
+        norm = []
+        for pay in payments:
+            amt = pay.get("amount")
+            if not isinstance(amt, int) or amt <= 0:
+                raise SageError("multi_send payments need positive amounts")
+            aid = pay.get("asset_id")
+            if aid is not None and not _HEX64_OFFER.fullmatch(aid):
+                raise SageError(f"bad multi_send asset_id {aid!r}")
+            norm.append({"asset_id": aid.lower() if aid else None,
+                         "address": pay.get("address"),
+                         "amount": amt,
+                         "memos": pay.get("memos") or []})
+        return self.call("multi_send", {
+            "payments": norm,
+            "fee": fee_mojos,
+            "auto_submit": auto_submit,
+        })
+
+    # ---- message signing (capability; daemon always queues) ----
+
+    def sign_message_by_address(self, address: str, message: str) -> dict:
+        """POST /sign_message_by_address — sign a message with the key
+        behind an address. No funds move; the daemon still queues it so a
+        human sees exactly what is being signed."""
+        return self.call("sign_message_by_address",
+                         {"address": address, "message": message})
+
+    def sign_message_with_public_key(self, public_key: str,
+                                     message: str) -> dict:
+        """POST /sign_message_with_public_key — sign with a public key.
+        Queued like sign_message_by_address.
+
+        Note: Sage's WalletConnect request struct uses camelCase, so the
+        key goes out as "publicKey"."""
+        return self.call("sign_message_with_public_key",
+                         {"publicKey": public_key, "message": message})
+
+    # ---- wallet-local metadata (no chain, no funds) ----
+
+    def update_cat(self, record: dict) -> None:
+        """POST /update_cat — update a CAT token record (local only)."""
+        self.call("update_cat", {"record": record})
+
+    def update_did(self, did_id: str, name: str | None = None,
+                   visible: bool = True) -> None:
+        """POST /update_did — rename / show-hide a DID (local only)."""
+        body = {"did_id": did_id, "visible": visible}
+        if name is not None:
+            body["name"] = name
+        self.call("update_did", body)
+
+    def update_nft(self, nft_id: str, visible: bool = True) -> None:
+        """POST /update_nft — show/hide an NFT (local only)."""
+        self.call("update_nft", {"nft_id": nft_id, "visible": visible})
+
+    def update_option(self, option_id: str, visible: bool = True) -> None:
+        """POST /update_option — show/hide an option (local only)."""
+        self.call("update_option",
+                  {"option_id": option_id, "visible": visible})
+
+    def update_nft_collection(self, collection_id: str,
+                              visible: bool = True) -> None:
+        """POST /update_nft_collection — show/hide a collection (local)."""
+        self.call("update_nft_collection",
+                  {"collection_id": collection_id, "visible": visible})
+
+    def redownload_nft(self, nft_id: str) -> None:
+        """POST /redownload_nft — re-fetch an NFT's data/metadata (local)."""
+        self.call("redownload_nft", {"nft_id": nft_id})
+
 
 def cat_balance(rpc: SageRpc, asset_id: str) -> int:
     """Spendable balance (CAT mojos) of `asset_id` in the logged-in wallet.
@@ -535,6 +906,37 @@ def wait_for_outgoing(rpc: SageRpc, destination: str, amount_mojos: int,
         "spend was submitted but no matching transaction appeared in "
         f"/get_transactions within {timeout_s}s — broadcast, confirmation "
         "unknown; do not retry blindly")
+
+
+def wait_for_tx_by_inputs(rpc: SageRpc, input_coin_ids: list,
+                          since_ts: float, timeout_s: int = 180,
+                          poll_s: int = 5) -> dict:
+    """Poll /get_transactions until a tx spending one of `input_coin_ids`
+    shows up (created after `since_ts`).
+
+    Used to verify auto_submit writes (mints, combines, DID/option moves)
+    where there is no single external destination to match on. The inputs
+    come from the RPC's own TransactionResponse summary, so a match proves
+    the exact submitted transaction landed in the wallet. Fail-closed on
+    timeout, same BroadcastUnknown discipline as wait_for_outgoing.
+    """
+    wanted = {str(c).lower() for c in input_coin_ids if c}
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        for tx in rpc.recent_transactions(limit=10):
+            ts = tx.get("timestamp") or 0
+            if ts < since_ts - 60:
+                continue
+            spent = {str(c.get("coin_id") or "").lower()
+                     for c in tx.get("spent", [])}
+            if wanted & spent:
+                return tx
+        time.sleep(poll_s)
+    raise BroadcastUnknown(
+        "",
+        "transaction was submitted but no transaction spending its inputs "
+        f"appeared in /get_transactions within {timeout_s}s — broadcast, "
+        "confirmation unknown; do not retry blindly")
 
 
 def wait_for_nft_transfer(rpc: SageRpc, nft_ref: str, destination: str,

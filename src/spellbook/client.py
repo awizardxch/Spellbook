@@ -160,6 +160,221 @@ class AgentClient(_BaseClient):
             raise ValueError("pass offer_id or offer_ids")
         return self._call("offer_cancel", params)
 
+    # ---- full Sage wallet surface ----
+    # Every method below builds a queued, human-approved intent. Nothing
+    # executes without the human's approval (policy auto-approve only
+    # where the daemon's policy explicitly allows it; message_sign and
+    # offer_cancel always queue).
+
+    def _tx(self, route: str, params: dict) -> dict:
+        """Call a queued Sage-transaction route (params already shaped)."""
+        return self._call(route, params)
+
+    @staticmethod
+    def _tx_params(chain: str, fee_mojos: int, purpose: str, **kw) -> dict:
+        p: dict = {"chain": chain, "fee_mojos": fee_mojos,
+                   "purpose": purpose}
+        p.update({k: v for k, v in kw.items() if v is not None})
+        return p
+
+    def nft_mint(self, *, chain: str, mints: list, did_id: str,
+                 fee_mojos: int = 0, purpose: str = "") -> dict:
+        """Queue minting NFTs (on-chain). Each mint is a Sage NftMint
+        descriptor; did_id is the minter DID (did:chia:1…).
+
+        Execution also requires the human's separate six-gate
+        mint/issuance authorization (mint_gate.json) — queue approval
+        alone does not authorize minting. The gate names the exact
+        canonical digest of the queued intent (visible as canon_digest in
+        the queue listing) and each grant is one-shot: it authorizes a
+        single execution attempt."""
+        return self._tx("nft_mint", self._tx_params(
+            chain, fee_mojos, purpose, mints=mints, did_id=did_id))
+
+    def nft_assign_did(self, *, chain: str, nft_ids: list,
+                       did_id: str | None = None, fee_mojos: int = 0,
+                       purpose: str = "") -> dict:
+        """Queue assigning NFTs to a DID profile (did_id None unassigns)."""
+        return self._tx("nft_assign_did", self._tx_params(
+            chain, fee_mojos, purpose, nft_ids=nft_ids, did_id=did_id))
+
+    def did_create(self, *, chain: str, name: str, fee_mojos: int = 0,
+                   purpose: str = "") -> dict:
+        """Queue creating a DID (on-chain)."""
+        return self._tx("did_create", self._tx_params(
+            chain, fee_mojos, purpose, name=name))
+
+    def did_transfer(self, *, chain: str, did_ids: list, destination: str,
+                     fee_mojos: int = 0, purpose: str = "",
+                     clawback_at: int | None = None) -> dict:
+        """Queue transferring DIDs (on-chain)."""
+        return self._tx("did_transfer", self._tx_params(
+            chain, fee_mojos, purpose, did_ids=did_ids,
+            destination=destination, clawback_at=clawback_at))
+
+    def did_normalize(self, *, chain: str, did_ids: list,
+                      fee_mojos: int = 0, purpose: str = "") -> dict:
+        """Queue normalizing DID coins (on-chain)."""
+        return self._tx("did_normalize", self._tx_params(
+            chain, fee_mojos, purpose, did_ids=did_ids))
+
+    def option_mint(self, *, chain: str, expiration_seconds: int,
+                    underlying: dict, strike: dict, fee_mojos: int = 0,
+                    purpose: str = "") -> dict:
+        """Queue minting an option contract (on-chain). Legs are
+        {asset_id (64-hex or None for XCH), amount}.
+
+        Execution also requires the human's separate six-gate
+        mint/issuance authorization (mint_gate.json) — queue approval
+        alone does not authorize minting. The gate names the exact
+        canonical digest of the queued intent (visible as canon_digest in
+        the queue listing) and each grant is one-shot: it authorizes a
+        single execution attempt."""
+        return self._tx("option_mint", self._tx_params(
+            chain, fee_mojos, purpose, expiration_seconds=expiration_seconds,
+            underlying=underlying, strike=strike))
+
+    def option_transfer(self, *, chain: str, option_ids: list,
+                        destination: str, fee_mojos: int = 0,
+                        purpose: str = "",
+                        clawback_at: int | None = None) -> dict:
+        """Queue transferring options (on-chain)."""
+        return self._tx("option_transfer", self._tx_params(
+            chain, fee_mojos, purpose, option_ids=option_ids,
+            destination=destination, clawback_at=clawback_at))
+
+    def option_exercise(self, *, chain: str, option_ids: list,
+                        fee_mojos: int = 0, purpose: str = "") -> dict:
+        """Queue exercising options (on-chain)."""
+        return self._tx("option_exercise", self._tx_params(
+            chain, fee_mojos, purpose, option_ids=option_ids))
+
+    def cat_issue(self, *, chain: str, name: str, ticker: str,
+                  amount_mojos: int, revocable: bool = False,
+                  fee_mojos: int = 0, purpose: str = "") -> dict:
+        """Queue issuing a new CAT (on-chain token issuance).
+
+        Execution also requires the human's separate six-gate
+        mint/issuance authorization (mint_gate.json): receive 95% of
+        supply, be the majority holder, hold at least 1%, articles of
+        description exist, metadata is set, and a website exists. Queue
+        approval alone does NOT satisfy the gate. The gate names the exact
+        canonical digest of the queued intent (visible as canon_digest in
+        the queue listing), binds the network, carries an expiry, and each
+        grant is one-shot: a single execution attempt."""
+        return self._tx("cat_issue", self._tx_params(
+            chain, fee_mojos, purpose, name=name, ticker=ticker,
+            amount_mojos=amount_mojos,
+            revocable=revocable or None))
+
+    def clawback_finalize(self, *, chain: str, coin_ids: list,
+                          fee_mojos: int = 0, purpose: str = "") -> dict:
+        """Queue finalizing a clawback (on-chain)."""
+        return self._tx("clawback_finalize", self._tx_params(
+            chain, fee_mojos, purpose, coin_ids=coin_ids))
+
+    def coin_combine(self, *, chain: str, coin_ids: list,
+                     fee_mojos: int = 0, purpose: str = "") -> dict:
+        """Queue combining coins (on-chain)."""
+        return self._tx("coin_combine", self._tx_params(
+            chain, fee_mojos, purpose, coin_ids=coin_ids))
+
+    def coin_split(self, *, chain: str, coin_ids: list, output_count: int,
+                   fee_mojos: int = 0, purpose: str = "") -> dict:
+        """Queue splitting coins (on-chain)."""
+        return self._tx("coin_split", self._tx_params(
+            chain, fee_mojos, purpose, coin_ids=coin_ids,
+            output_count=output_count))
+
+    def coin_autocombine(self, *, chain: str, max_coins: int,
+                         asset: str = "native",
+                         max_coin_amount: int | None = None,
+                         fee_mojos: int = 0, purpose: str = "") -> dict:
+        """Queue auto-combining small coins (on-chain)."""
+        return self._tx("coin_autocombine", self._tx_params(
+            chain, fee_mojos, purpose, asset=asset, max_coins=max_coins,
+            max_coin_amount=max_coin_amount))
+
+    def bulk_send(self, *, chain: str, addresses: list, amount_mojos: int,
+                  asset: str = "native", fee_mojos: int = 0,
+                  purpose: str = "", memos: list | None = None) -> dict:
+        """Queue bulk-sending one amount to many addresses (on-chain)."""
+        return self._tx("bulk_send", self._tx_params(
+            chain, fee_mojos, purpose, asset=asset, addresses=addresses,
+            amount_mojos=amount_mojos, memos=memos))
+
+    def multi_send(self, *, chain: str, payments: list, fee_mojos: int = 0,
+                   purpose: str = "") -> dict:
+        """Queue a mixed-asset multi-payment (on-chain). Payments are
+        {asset_id (64-hex or None), address, amount, memos}."""
+        return self._tx("multi_send", self._tx_params(
+            chain, fee_mojos, purpose, payments=payments))
+
+    def message_sign(self, *, chain: str, message: str, address: str = "",
+                     public_key: str = "", purpose: str = "") -> dict:
+        """Queue signing a message (off-chain). Always requires human
+        approval — a signature is a capability even with no funds moving.
+        Pass address OR public_key."""
+        params = self._tx_params(chain, 0, purpose, message=message)
+        if address:
+            params["address"] = address
+        if public_key:
+            params["public_key"] = public_key
+        return self._tx("message_sign", params)
+
+    # ---- wallet-local metadata (direct, no queue, no chain, no funds)
+
+    def offer_import(self, *, chain: str, offer: str) -> dict:
+        """Import an offer string into the wallet's local offer book."""
+        return self._call("offer_import", {"chain": chain, "offer": offer})
+
+    def offer_delete(self, *, chain: str, offer_id: str) -> dict:
+        """Delete an offer from the wallet's local offer book."""
+        return self._call("offer_delete",
+                          {"chain": chain, "offer_id": offer_id})
+
+    def offer_combine(self, *, chain: str, offers: list) -> dict:
+        """Combine offer strings into one (local, off-chain)."""
+        return self._call("offer_combine",
+                          {"chain": chain, "offers": offers})
+
+    def cat_update(self, *, chain: str, record: dict) -> dict:
+        """Update a CAT token record (wallet-local display metadata)."""
+        return self._call("cat_update", {"chain": chain, "record": record})
+
+    def did_update(self, *, chain: str, did_id: str, name: str | None = None,
+                   visible: bool = True) -> dict:
+        """Rename / show-hide a DID (wallet-local)."""
+        return self._call("did_update",
+                          {"chain": chain, "did_id": did_id, "name": name,
+                           "visible": visible})
+
+    def nft_update(self, *, chain: str, nft_id: str,
+                   visible: bool = True) -> dict:
+        """Show/hide an NFT (wallet-local)."""
+        return self._call("nft_update",
+                          {"chain": chain, "nft_id": nft_id,
+                           "visible": visible})
+
+    def nft_collection_update(self, *, chain: str, collection_id: str,
+                              visible: bool = True) -> dict:
+        """Show/hide an NFT collection (wallet-local)."""
+        return self._call("nft_collection_update",
+                          {"chain": chain, "collection_id": collection_id,
+                           "visible": visible})
+
+    def nft_redownload(self, *, chain: str, nft_id: str) -> dict:
+        """Re-fetch an NFT's data/metadata (wallet-local)."""
+        return self._call("nft_redownload",
+                          {"chain": chain, "nft_id": nft_id})
+
+    def option_update(self, *, chain: str, option_id: str,
+                      visible: bool = True) -> dict:
+        """Show/hide an option (wallet-local)."""
+        return self._call("option_update",
+                          {"chain": chain, "option_id": option_id,
+                           "visible": visible})
+
 
 class HumanClient(_BaseClient):
     """The human's client. Approve token only — separate tooling (O5)."""

@@ -149,10 +149,10 @@ def test_coin_read_payload_shapes():
 
 
 def test_transaction_read_payload_shapes():
-    rpc = _Rec({"get_transaction": {"transaction_id": "t"},
+    rpc = _Rec({"get_transaction": {"transaction": {"height": 9}},
                 "get_pending_transactions": {"transactions": []}})
-    assert rpc.get_transaction("t") == {"transaction_id": "t"}
-    assert rpc.last() == ("get_transaction", {"transaction_id": "t"})
+    assert rpc.get_transaction(9) == {"transaction": {"height": 9}}
+    assert rpc.last() == ("get_transaction", {"height": 9})
     assert rpc.get_pending_transactions() == []
     assert rpc.last() == ("get_pending_transactions", {})
 
