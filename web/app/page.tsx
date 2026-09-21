@@ -37,6 +37,10 @@ export default function Home() {
           it never asks for seeds, mnemonics, or private keys — all signing happens in
           your local daemon.
         </p>
+        <p>
+          <a href="/onboard">Onboard a muse →</a> — what Spellbook is and how to
+          connect your own relay. Agents: fetch <a href="/onboard.txt"><code>/onboard.txt</code></a>.
+        </p>
         {status && <div className="network-badge">{status.network}</div>}
       </header>
 

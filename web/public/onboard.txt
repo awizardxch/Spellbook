@@ -1,0 +1,72 @@
+SPELLBOOK — ONBOARD A MUSE (plain-text agent instructions)
+https://spellbook.awizard.dev/onboard
+
+WHAT SPELLBOOK IS
+-----------------
+Spellbook is a wallet stack for AI agents on Chia. The operating loop:
+the AGENT surfaces queued spends, balances, and history read-only
+(decoded intent); the HUMAN approves with their own tooling; the DAEMON
+executes and reports back. The agent can request and relay -- it can
+never approve on its own.
+
+spellbook.awizard.dev is the first-tester dashboard for the Chia
+testnet11 relay: relay health, address watching, signed-bundle
+broadcast. It is READ-ONLY: it never asks for seeds, mnemonics, or
+private keys. All signing happens in the user's local daemon.
+
+The relay (Railway) is a NETWORK RELAY, not a custodian. It holds
+persistent WSS connections to testnet11 full nodes and exposes coin
+lookups + signed-bundle broadcast over a bearer-authed HTTPS API. It
+only ever sees public puzzle hashes and already-signed spend bundles --
+the same trust model as pointing a wallet at any public full node.
+Keys and BLS signing stay on the user's machine.
+
+ONBOARDING STEPS
+----------------
+1. Deploy your own relay to Railway. Each muse runs their own relay --
+   do not share bearer tokens.
+   Repo: github.com/awizardxch/Spellbook
+   Railway service Root Directory: relay/
+   Variables:
+     RELAY_BEARER_TOKEN=<64 hex chars you generate>
+     RELAY_CORS_ORIGIN=https://spellbook.awizard.dev
+   Generate the token: python3 -c "import secrets; print(secrets.token_hex(32))"
+   Deploy; wait 1-2 minutes for peer connections.
+
+2. Connect the dashboard. Open https://spellbook.awizard.dev, paste the
+   relay URL and bearer token into the Connect panel, click Connect.
+   The token is stored in browser localStorage only -- never sent
+   anywhere except your relay.
+
+3. Verify. Status panel should show network "testnet11", a peak height,
+   and at least one connected peer.
+
+4. Watch an address. Paste a txch1... address into the Watch panel.
+   The dashboard decodes it to a puzzle hash in the browser and asks
+   your relay for that address's coins.
+
+5. Broadcast (testnet only, experimental). Paste a signed spend-bundle
+   hex produced by the local daemon. The relay validates its structure
+   and forwards it to testnet11 peers.
+
+HARD RULES
+----------
+- NEVER paste a seed, mnemonic, or private key into the dashboard, the
+  relay, or any chat. The relay rejects key material with a 400.
+- The bearer token lives in Railway variables (private) and browser
+  localStorage. Never commit it; never put it in Vercel env vars.
+- Testnet11 only. Mainnet is not enabled.
+
+RELAY API (all routes need: Authorization: Bearer <token>)
+----------------------------------------------------------
+GET  /v1/status      -- network, peak height, peers, uptime
+POST /v1/coins       -- {"puzzle_hashes": ["<64-hex>", ...]} (1-50);
+                        returns coins: coin_id, parent_coin_info,
+                        puzzle_hash, amount_mojos, created_height,
+                        spent_height (null if unspent)
+POST /v1/broadcast   -- {"spend_bundle_hex": "<hex>"} (<= 5 MB);
+                        returns txid + mempool status:
+                        1 = SUCCESS, 2 = PENDING, 3 = FAILED
+GET  /v1/coin/:id    -- confirmation tracking for one coin
+
+Full relay docs: github.com/awizardxch/Spellbook/tree/main/relay
