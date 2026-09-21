@@ -53,7 +53,7 @@ Vercel origin (`RELAY_CORS_ORIGIN` on the relay side).
 | Method | Path | Body | Returns |
 |---|---|---|---|
 | GET | `/v1/status` | — | `{ok, network, peak_height, peers, watched_addresses, uptime_s}` |
-| POST | `/v1/coins` | `{puzzle_hashes: [hex…]}` (≤ 256) | `{coins: [{coin_id, parent_coin_info, puzzle_hash, amount_mojos, created_height, spent_height\|null}]}` |
+| POST | `/v1/coins` | `{puzzle_hashes: [hex…]}` (≤ 50) | `{coins: [{coin_id, parent_coin_info, puzzle_hash, amount_mojos, created_height, spent_height\|null}]}` |
 | POST | `/v1/broadcast` | `{spend_bundle_hex}` | `{ok, txid, status}` — 1 = SUCCESS, 2 = PENDING, 3 = FAILED |
 | GET | `/v1/coin/{coin_id}` | — | `{coin_id, created_height, spent_height\|null}` |
 

@@ -146,12 +146,12 @@ export function isPuzzleHash(s: string): boolean {
   return /^[0-9a-fA-F]{64}$/.test(s);
 }
 
-/** Spend bundle hex: non-empty even-length hex, relay caps at 1 MB. */
+/** Spend bundle hex: non-empty even-length hex, relay caps at 5 MB. */
 export function validateSpendBundleHex(s: string): string | null {
   const t = s.trim().replace(/^0x/i, "");
   if (t.length === 0) return "empty bundle";
   if (!isHex(t)) return "not valid hex";
-  if (t.length / 2 > 1024 * 1024) return "bundle exceeds 1 MB relay limit";
+  if (t.length / 2 > 5 * 1024 * 1024) return "bundle exceeds 5 MB relay limit";
   return null;
 }
 
@@ -258,8 +258,8 @@ export class RelayClient {
 
   async coins(puzzleHashes: string[]): Promise<Coin[]> {
     if (puzzleHashes.length === 0) return [];
-    if (puzzleHashes.length > 256) {
-      throw new RelayError("too many puzzle hashes (max 256)");
+    if (puzzleHashes.length > 50) {
+      throw new RelayError("too many puzzle hashes (max 50)");
     }
     for (const h of puzzleHashes) {
       if (!isPuzzleHash(h)) throw new RelayError(`bad puzzle hash: ${h.slice(0, 16)}…`);
