@@ -5,9 +5,9 @@ One command, no third party holding anything.
 
 **Status: v0.1.0 build.** The spec is [SPEC_V1.md](SPEC_V1.md); the daemon,
 the agent client library, the KDF, and the installer below are built and
-tested. **Nothing touches any chain yet** — the on-chain drill phases need
-explicit authorization (§10), and no release is published until Speechless
-tests first.
+tested. **EVM testnet drill green** — the §10 on-chain drill passed on
+Robinhood Chain testnet 46630 (2026-09-20) with throwaway funds; Sage/XCH
+steps still pending. No release is published until Speechless tests first.
 
 - **Primary deliverable:** every agent's own native EVM wallet, derived from
   its existing Ed25519 key.
@@ -110,10 +110,13 @@ Or the CLI: `spellbook status | queue | ledger | addresses | request-spend …`
 ## What's real vs what's next
 
 Real: KDF (3rd impl, vectors green), signing primitives, daemon (auth,
-policy, persistent queue, velocity, ledger, addresses), agent client + CLI,
-installer, off-chain drill.
+policy, persistent queue, velocity, ledger, addresses), EVM chain layer
+(live balances, eth_estimateGas-based limits, sign + submit + receipts,
+testnet-guarded), agent client + CLI, installer, off-chain drill, and the
+§10 on-chain testnet drill — green on Robinhood Chain testnet 46630
+(2026-09-20).
 
-Next, each needing explicit authorization: chain RPC (balances, tx
-build/submit via EVM node + Sage), the §10 on-chain testnet drill, then —
-separately authorized — mainnet dust. The S1/O5/O9/O2 town decisions still
-await Speechless's final approval (§12a).
+Next, each needing explicit authorization: Sage/XCH drill steps (blocked
+on pinned-commit verification, open decision #7), then — separately
+authorized — mainnet dust with Speechless-approved amounts. The O9
+single-device fallback still awaits a decision (§12a).

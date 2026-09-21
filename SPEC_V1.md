@@ -663,22 +663,36 @@ project starts.
   reports the result. The agent can request and relay, never approve — the
   two-token split (S7) is what makes "from here" safe to build.
 
-## 12a. Town adoptions pending Speechless's final approval (thread 37143)
+## 12a. Town adoptions — APPROVED by Speechless 2026-09-20, now implementation consensus
 
-The town converged; nothing below is final until Speechless signs off:
+The town converged (thread 37143); Speechless approved all four on 2026-09-20.
+Each is read through the standing goal **O10** — the wallet belongs to the
+agent; the human interacts with it from chat (agent surfaces decoded intent
+read-only → human approves with their own tooling → daemon executes →
+agent reports; the agent never approves).
 
-1. **S1 → Option B** for any muse that signs from more than one machine
-   (fleet, not desk); Option A only for strictly single-machine muses.
-   Still needed: Speechless states where every process signing as the muse
-   runs (the P8 input).
+1. **S1 → Option B** (fleet, not desk) for any muse that signs from more than
+   one machine; Option A only for strictly single-machine muses. **Locked and
+   implemented:** the installer and daemon assume per-agent deployment — each
+   agent its own machine, own daemon, own Sage, own keys; no central
+   authority. Still needed: Speechless states where every process signing as
+   the muse runs (the P8 input).
 2. **S4 → queue-by-default** until the human configures policy; the queue
    lifts only by explicit signed human configuration, never by the clock.
-   D9 unchanged (no amounts forbidden — a delay, not a cap).
-3. **O5 → separate-device HMAC** recommended; prompt-per-use rejected;
-   single-device fallback (O9) still open.
+   **Locked and implemented:** the daemon queues when no policy is configured
+   (D9 default-off). D9 unchanged (no amounts forbidden — a delay, not a cap).
+3. **O5 → separate-device HMAC** recommended; prompt-per-use rejected.
+   **Locked as design:** the daemon side is implemented (approve-token auth
+   on a separate route, S7); the human's separate-device HMAC prompter is
+   human-side tooling, out of repo scope. Single-device fallback (O9) still
+   open — it tensions O10's separate-device stance, so it stays undecided.
 4. **O2 → rotation-receipt shape** above (old-key-signed, versioned,
    pre-signed compromise rotation, second-factor/veto for contested
-   rotations, per-context key scoping).
+   rotations, per-context key scoping). **Locked as design;** the rotation
+   ceremony tooling itself is not yet built (§10 step 10 drills it on testnet
+   when it exists).
+5. **O8** (sibling double-spend) resolved by design via per-sibling labels —
+   unchanged.
 
 ## 13. Residual risks (accepted, not solved)
 
@@ -770,6 +784,31 @@ verify, install locally — per muse, per D1.
 ---
 
 ## 15. Review log
+- 2026-09-20 — §10 on-chain testnet drill GREEN (EVM path, Robinhood Chain
+  testnet 46630). Throwaway seed/daemon; 0.009 test ETH funded via faucet.
+  Auto-approved below-threshold transfer submitted and confirmed
+  (0x18a80c08a2808dbbb7d95597ddd2460916708b6e5033d597d37ad2ed75ac4a70);
+  queued above-threshold spend approved through the approve token and
+  confirmed (0xfa29bb775de77c08602383cb34c012d784893d5f481a0a78ed71a5e1725838cc);
+  per-spend-cap and velocity-cap denials enforced; live balances read back;
+  both tx hashes recorded as ledger sighashes with no seed material in any
+  API surface; bad-token and request-token privilege escalation denied;
+  kill -9 restart preserved queue, ledger, and velocity window. 38 unit
+  tests green. One real bug found and fixed during the drill: Robinhood
+  Chain (Arbitrum-style) estimates ~28867 gas for a plain transfer, above
+  the 21000 floor — the first run died with "intrinsic gas too low"; the
+  daemon now takes its gas limit from eth_estimateGas and fails closed if
+  estimation is unavailable. Sage/XCH drill steps stay pending on the
+  pinned-commit verification (open decision #7).
+
+- 2026-09-20 — town decisions locked as implementation consensus: Speechless
+  approved S1→Option B (fleet; implemented in installer/daemon), S4→
+  queue-by-default (implemented), O5→separate-device HMAC (daemon side
+  implemented; human device tooling out of repo scope), O2→rotation-receipt
+  shape (design locked; ceremony tooling pending). O9 single-device fallback
+  stays open (tensions O10). §12a rewritten as adopted, not pending.
+  Speechless authorized the §10 on-chain testnet drills (EVM path, Robinhood
+  testnet 46630); mainnet dust still needs separate authorization + amounts.
 
 - 2026-09-20 — pass-2 audit remediation (P1–P9): `docs/reviews/2026-09-20-responses.md`.
 - 2026-09-20/21 — open-decisions town review (townhall/37143): S1 → Option B

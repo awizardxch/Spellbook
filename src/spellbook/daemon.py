@@ -12,10 +12,12 @@ Real in this build: token auth, per-role peer-UID enforcement (when
 configured), routing, policy evaluation, the decision ledger, a persistent
 spend queue, 24h velocity accounting rebuilt from disk, the §2 KDF
 (third implementation — reproduces vectors/vectors.json), labeled
-addresses, and Ed25519 identity signing behind the S1 gate.
+addresses, EVM testnet submission (build/sign/broadcast with pre-broadcast
+verification; mainnet refuses without explicit config), live EVM balances,
+and Ed25519 identity signing behind the S1 gate (Option B adopted).
 
-Still TODO (SPEC §10 phase 1): chain RPC (balances, tx build/submit via
-EVM node and Sage). Nothing here touches a chain.
+Still TODO (SPEC §10 phase 1): Chia/Sage RPC path. Nothing here touches
+mainnet without the explicit mainnet_submit_enabled flag.
 """
 import argparse
 import json
@@ -25,7 +27,7 @@ import struct
 import sys
 import time
 
-from spellbook import kdf, sign as spellsign
+from spellbook import evm, kdf, sign as spellsign
 from spellbook.config import load_config, load_policy
 from spellbook.ledger import Ledger
 from spellbook.policy import evaluate
@@ -86,6 +88,10 @@ class Daemon:
             self._identity_key = SigningKey(self.seed)
         else:
             self._identity_key = None
+        # EVM chain wiring (SPEC §10): {"chains": {chain: {"rpc_url": str,
+        # "enabled": bool}}, "mainnet_submit_enabled": bool}. No chains
+        # configured -> approved spends do not submit (honest note, no-op).
+        self.evm_cfg = self.cfg.get("evm", {})
 
     # ------------------------------------------------------------ state
     def _load_queue(self):
@@ -187,6 +193,65 @@ class Daemon:
             return {"ok": False, "error": "not implemented"}
         return handler(params, req.get("muse_id", "?"))
 
+    # ------------------------------------------------------------ chain execution
+    def _execute_spend(self, params: dict) -> dict:
+        """Build, sign, and broadcast an approved EVM transfer (SPEC §10).
+
+        Returns {"submitted": True, "tx_hash": ..., "block": ...} on success,
+        {"submitted": False, "note": ...} when no chain is configured, and
+        raises evm.EvmError on any failure — a spend that never left the
+        machine records nothing and consumes no velocity. Spends use the
+        "default" label's key (v1).
+        """
+        chain = params["chain"]
+        if chain not in evm.CHAINS:
+            return {"submitted": False,
+                    "note": f"chain submission not configured for {chain}"}
+        entry = (self.evm_cfg.get("chains") or {}).get(chain) or {}
+        if not entry.get("enabled") or not entry.get("rpc_url"):
+            return {"submitted": False,
+                    "note": f"chain submission not configured for {chain}"}
+        info = evm.CHAINS[chain]
+        if not info["testnet"] and not self.evm_cfg.get("mainnet_submit_enabled"):
+            raise evm.EvmError(
+                f"mainnet submission refused for {chain} — needs the "
+                "separately-authorized mainnet_submit_enabled flag (§10.14-17)")
+        if self.seed is None:
+            raise evm.EvmError("no seed configured — cannot sign")
+        if params.get("amount_mojos") is not None:
+            raise evm.EvmError("mojos on an EVM chain — schema misuse, refusing")
+        dest = params.get("destination", "")
+        if not evm.is_address(dest):
+            raise evm.EvmError(f"bad destination address: {dest!r}")
+        amount = params["amount_wei"]
+        d = kdf.derive_labeled(self.seed, chain, "default")
+        priv = bytes.fromhex(d["scalar_hex"])
+        sender = d["address"]
+        rpc = evm.Rpc(entry["rpc_url"])
+        if rpc.chain_id() != info["chain_id"]:
+            raise evm.EvmError(
+                f"RPC reports a different chain id than {chain} — aborting")
+        # Gas limit comes from the node, never hardcoded: on Robinhood Chain
+        # (Arbitrum-style) the intrinsic cost of a transfer exceeds 21000,
+        # so a hardcoded limit dies with "intrinsic gas too low". estimate
+        # fails closed — no guess is ever broadcast.
+        gas_limit = max(rpc.estimate_gas(sender, dest, amount),
+                        evm.TRANSFER_GAS_LIMIT)
+        signed = evm.sign_legacy_transfer(priv, info["chain_id"],
+                                          rpc.nonce(sender), dest, amount,
+                                          rpc.gas_price_wei(), gas_limit)
+        # The approved intent, re-checked against the signed tx's fields.
+        assert signed["from"].lower() == sender.lower()
+        assert signed["to"].lower() == dest.lower()
+        assert signed["value_wei"] == amount
+        assert signed["chain_id"] == info["chain_id"]
+        tx_hash = rpc.send_raw_tx(signed["raw_hex"])
+        rcpt = rpc.wait_receipt(tx_hash)
+        if int(rcpt.get("status", "0x0"), 16) != 1:
+            raise evm.EvmError(f"tx {tx_hash} reverted on-chain")
+        return {"submitted": True, "tx_hash": tx_hash,
+                "block": int(rcpt.get("blockNumber", "0x0"), 16), "from": sender}
+
     def rt_request_spend(self, p: dict, muse_id: str) -> dict:
         fields = set(p)
         amounts = fields & AMOUNT_FIELDS
@@ -214,12 +279,20 @@ class Daemon:
         if d.verdict == "denied":
             self.ledger.append(muse_id, canon, None, "denied:" + d.reason)
             return {"ok": True, "decision": "denied", "reason": d.reason}
+        try:
+            ex = self._execute_spend(p)
+        except evm.EvmError as e:
+            self.ledger.append(muse_id, canon, None,
+                               "approved-submit-failed:" + str(e))
+            return {"ok": False, "decision": "approved-submit-failed",
+                    "error": str(e)}
         self._record_velocity(p["chain"], asset, amount)
+        if ex["submitted"]:
+            self.ledger.append(muse_id, canon, ex["tx_hash"], "approved")
+            return {"ok": True, "decision": "approved",
+                    "tx_hash": ex["tx_hash"], "block": ex["block"]}
         self.ledger.append(muse_id, canon, None, "approved")
-        # TODO(phase-1): build, sign (daemon-held key), and submit the transfer;
-        # verify the built tx matches the approved intent before signing.
-        return {"ok": True, "decision": "approved",
-                "note": "TODO(phase-1): chain submission not yet implemented"}
+        return {"ok": True, "decision": "approved", "note": ex["note"]}
 
     def _decoded_queue(self):
         # Full decoded intent (to/value/chain/asset), never just a hash.
@@ -250,12 +323,23 @@ class Daemon:
         params = item["params"]
         asset = params.get("asset", "native")
         amount = params.get("amount_mojos", params.get("amount_wei"))
+        canon = json.dumps(params, sort_keys=True).encode()
+        try:
+            ex = self._execute_spend(params)
+        except evm.EvmError as e:
+            # Approved but never executed: the human's approval is consumed,
+            # the failure is ledgered, nothing is recorded as spent. The
+            # agent reports it; the human re-requests if they still want it.
+            self.ledger.append(muse_id, canon, None,
+                               "approved-submit-failed:" + str(e))
+            return {"ok": False, "queue_id": qid, "error": str(e)}
         self._record_velocity(params["chain"], asset, amount)
-        self.ledger.append(muse_id, json.dumps(params, sort_keys=True).encode(),
-                           None, "approved-by-human")
-        # TODO(phase-1): build/sign/submit, then record sighash in the ledger.
-        return {"ok": True, "queue_id": qid,
-                "note": "TODO(phase-1): chain submission not yet implemented"}
+        if ex["submitted"]:
+            self.ledger.append(muse_id, canon, ex["tx_hash"], "approved-by-human")
+            return {"ok": True, "queue_id": qid,
+                    "tx_hash": ex["tx_hash"], "block": ex["block"]}
+        self.ledger.append(muse_id, canon, None, "approved-by-human")
+        return {"ok": True, "queue_id": qid, "note": ex["note"]}
 
     def rt_queue_reject(self, p: dict, muse_id: str) -> dict:
         qid = p.get("queue_id")
@@ -268,10 +352,23 @@ class Daemon:
         return {"ok": True, "queue_id": qid}
 
     def rt_status(self, p: dict, muse_id: str) -> dict:
-        # TODO(phase-1): balances via Sage RPC / EVM node.
-        return {"ok": True, "queue_depth": len(self.queue),
-                "seed_loaded": self.seed is not None,
-                "note": "TODO(phase-1): live balances"}
+        out = {"ok": True, "queue_depth": len(self.queue),
+               "seed_loaded": self.seed is not None}
+        balances = {}
+        if self.seed is not None:
+            for chain, entry in (self.evm_cfg.get("chains") or {}).items():
+                if not entry.get("enabled") or not entry.get("rpc_url"):
+                    continue
+                try:
+                    addr = kdf.derive_labeled(self.seed, chain, "default")["address"]
+                    balances[chain] = {
+                        "address": addr,
+                        "balance_wei": evm.Rpc(entry["rpc_url"]).balance_wei(addr),
+                    }
+                except Exception as e:  # best effort — a down RPC is not a daemon failure
+                    balances[chain] = {"error": str(e)}
+        out["balances"] = balances
+        return out
 
     def rt_addresses(self, p: dict, muse_id: str) -> dict:
         if self.seed is None:
@@ -293,7 +390,8 @@ class Daemon:
         return {"ok": True, "rows": self.ledger.read_all()}
 
     def rt_sign_musebook_request(self, p: dict, muse_id: str) -> dict:
-        # S1 gate (recommended Option B direction, pending Speechless's call).
+        # S1: Option B (fleet) adopted 2026-09-20 — each muse's own daemon may
+        # sign for that muse when its config enables it; otherwise inert.
         if self._identity_key is None:
             return {"ok": False,
                     "error": "daemon-side Musebook signing is disabled pending the S1 decision"}

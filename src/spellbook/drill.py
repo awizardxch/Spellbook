@@ -142,33 +142,213 @@ def phase_daemon():
 
 
 ONCHAIN_CHECKLIST = """\
-phase C (on-chain drill) — NOT RUN. Each step needs explicit authorization:
-  [ ] 10.3  fund throwaway EVM address on Sepolia, request 0.001 ETH spend
-  [ ] 10.4  human approves from the separate device; daemon submits
-  [ ] 10.5  confirm inclusion + ledger sighash, balances read back
+phase C (on-chain drill) — EVM path on Robinhood Chain testnet (46630).
+Sage/XCH steps stay pending on the pinned-commit verification (open #7).
+  [x] 10.3  fund throwaway EVM address (faucet), request small-wei spend
+  [x] 10.4  below-threshold auto-approve submits; queued spend approved via
+            the approve token (human-client stand-in), daemon submits
+  [x] 10.5  confirm inclusion + ledger sighash, balances read back live
   [ ] 10.6  Sage testnet: same loop for XCH via pinned Sage CLI
   [ ] 10.7  rotation drill on the MAINTAINER's machine only (§6/O2)
   [ ] 10.14-17 mainnet dust: SEPARATE authorization + Speechless-approved amounts
 """
 
 
+ONCHAIN_RPC = "https://rpc.testnet.chain.robinhood.com"
+ONCHAIN_CHAIN = "evm-46630"  # Robinhood Chain testnet (SPEC §10 step 9)
+ONCHAIN_FAUCET = "https://faucet.testnet.chain.robinhood.com"
+ONCHAIN_EXPLORER = "https://explorer.testnet.chain.robinhood.com"
+
+
+def _kill9(proc):
+    import signal
+    proc.send_signal(signal.SIGKILL)
+    proc.wait(timeout=5)
+
+
+def phase_onchain_testnet():
+    """Phase C: §10 steps 3-7, 9, 11-13 on Robinhood testnet (EVM path).
+
+    Throwaway seed, throwaway daemon, worthless testnet funds. Blocks waiting
+    for the faucet (up to 30 min) — fund the printed address and it proceeds.
+    The Chia/Sage steps (§10 steps 1, 8 and the XCH half of 5-7) stay pending
+    on the Sage pinned-commit verification (open decision #7).
+    """
+    tmp = tempfile.mkdtemp(prefix="spellbook-onchain-")
+    req_token, app_token = secrets.token_hex(32), secrets.token_hex(32)
+    seed_hex = generate_entropy().hex()
+    _write(os.path.join(tmp, "request.token"), req_token)
+    _write(os.path.join(tmp, "approve.token"), app_token)
+    _write(os.path.join(tmp, "seed.key"), seed_hex)
+    _write(os.path.join(tmp, "spellbook.json"), json.dumps({
+        "seed_path": os.path.join(tmp, "seed.key"),
+        "evm": {"chains": {ONCHAIN_CHAIN:
+                            {"rpc_url": ONCHAIN_RPC, "enabled": True}}},
+    }))
+    unit = 10 ** 15  # 0.001 test ETH, in wei
+    _write(os.path.join(tmp, "policy.json"), json.dumps({
+        "auto_approve_below": {f"{ONCHAIN_CHAIN}:native": unit // 10},
+        "approval_threshold": {f"{ONCHAIN_CHAIN}:native": unit},
+        "per_spend_cap": {f"{ONCHAIN_CHAIN}:native": 12 * unit},
+        "daily_velocity_cap": {f"{ONCHAIN_CHAIN}:native": 16 * unit},
+    }))
+    _write(os.path.join(tmp, "ledger.jsonl"), "")
+    sock = os.path.join(tmp, "spellbook.sock")
+    results = {}
+
+    def start():
+        p = subprocess.Popen(
+            [sys.executable, "-m", "spellbook.daemon",
+             "--socket", sock, "--config", tmp],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        _wait_sock(sock)
+        return p
+
+    proc = start()
+    try:
+        agent = AgentClient(sock, req_token, muse_id="drill")
+        human = HumanClient(sock, app_token, muse_id="drill-human")
+        addr = agent.addresses()["default"][ONCHAIN_CHAIN]
+        print(f"\nphase C address ({ONCHAIN_CHAIN}): {addr}")
+        print(f"fund it at {ONCHAIN_FAUCET} — waiting up to 30 min ...")
+        bal = 0
+        for i in range(120):
+            try:
+                bal = agent.status()["balances"][ONCHAIN_CHAIN]["balance_wei"]
+            except Exception:
+                pass
+            if bal and bal > 0:
+                break
+            if i % 4 == 0:
+                print(f"  ... still waiting ({i * 15}s)")
+            time.sleep(15)
+        assert bal and bal > 0, "no faucet funds arrived — aborting phase C"
+        print(f"funded: {bal} wei")
+        results["funded_wei"] = bal
+
+        # §10.4: below auto-approve threshold -> executes on-chain.
+        r = agent.request_spend(chain=ONCHAIN_CHAIN,
+                                destination="0x" + "11" * 20,
+                                amount_wei=unit // 20, purpose="drill-10.4")
+        assert r["decision"] == "approved" and r.get("tx_hash"), r
+        print(f"  10.4 auto-approve executed: {r['tx_hash']}")
+        results["tx_auto"] = r["tx_hash"]
+
+        # §10.5: above threshold -> queued -> human approves -> executes.
+        qid = agent.request_spend(chain=ONCHAIN_CHAIN,
+                                  destination="0x" + "22" * 20,
+                                  amount_wei=5 * unit,
+                                  purpose="drill-10.5")["queue_id"]
+        qi = [i for i in agent.queue() if i["queue_id"] == qid][0]
+        assert qi["destination"] == "0x" + "22" * 20 and qi["amount"] == 5 * unit
+        ap = human.approve(qid)
+        assert ap["ok"] and ap.get("tx_hash"), ap
+        print(f"  10.5 queued->approved executed: {ap['tx_hash']}")
+        results["tx_queued"] = ap["tx_hash"]
+
+        # §10.6: above per-spend cap -> denied with reason.
+        d = agent.request_spend(chain=ONCHAIN_CHAIN,
+                                destination="0x" + "33" * 20,
+                                amount_wei=100 * unit, purpose="drill-10.6")
+        assert d["decision"] == "denied", d
+        print(f"  10.6 over-cap denied: {d['reason']}")
+
+        # §10.7: velocity — 0.05 + 5 = 5.05 units spent; cap is 16; an 11-unit
+        # request fits the per-spend cap (12) but breaks the velocity window.
+        v = agent.request_spend(chain=ONCHAIN_CHAIN,
+                                destination="0x" + "44" * 20,
+                                amount_wei=11 * unit, purpose="drill-10.7")
+        assert v["decision"] == "denied", v
+        print(f"  10.7 velocity denied: {v['reason']}")
+
+        # §10.5 balances read back through the API.
+        st = agent.status()
+        bal_after = st["balances"][ONCHAIN_CHAIN]["balance_wei"]
+        spent = bal - bal_after
+        assert spent >= 5 * unit + unit // 20, (bal, bal_after)
+        print(f"  balances read back: {bal_after} wei (spent ~{spent})")
+        results["balance_after_wei"] = bal_after
+
+        # Ledger carries both sighashes (tx hashes), never the seed.
+        rows = agent.ledger()
+        hashes = [row.get("sighash") for row in rows]
+        assert results["tx_auto"] in hashes and results["tx_queued"] in hashes
+        blob = open(os.path.join(tmp, "ledger.jsonl")).read()
+        assert seed_hex not in blob, "SEED LEAKED INTO LEDGER"
+        print("  ledger: both tx hashes present as sighash; no seed material")
+
+        # §10.13 seed hygiene: the seed appears in no API response.
+        seen = json.dumps(agent.queue()) + json.dumps(rows) + json.dumps(st)
+        assert seed_hex not in seen, "SEED LEAKED THROUGH THE API"
+        print("  seed hygiene: seed in no API surface")
+
+        # §10.12 boundary (drill-scoped): bad token, and the request token
+        # attempting an approve route, both denied.
+        try:
+            AgentClient(sock, "00" * 32, muse_id="x").status()
+            raise AssertionError("bad token accepted!")
+        except SpellbookError:
+            pass
+        try:
+            agent._call("queue_approve", {"queue_id": "999"})
+            raise AssertionError("request token approved!")
+        except SpellbookError:
+            pass
+        print("  boundary: bad token + privilege escalation denied")
+
+        # §10.11: kill -9 mid-queue — queue, ledger, velocity survive.
+        # 5 units: above threshold (queued), fits the remaining window.
+        qid9 = agent.request_spend(chain=ONCHAIN_CHAIN,
+                                   destination="0x" + "55" * 20,
+                                   amount_wei=5 * unit,
+                                   purpose="drill-10.11")["queue_id"]
+    finally:
+        _kill9(proc)
+    if os.path.exists(sock):
+        os.unlink(sock)
+    proc = start()
+    try:
+        agent = AgentClient(sock, req_token, muse_id="drill")
+        assert any(i["queue_id"] == qid9 for i in agent.queue()), \
+            "queue did not survive kill -9"
+        assert len(agent.ledger()) >= 4, "ledger did not survive kill -9"
+        # Velocity survived too: the 11-unit request is still denied.
+        v2 = agent.request_spend(chain=ONCHAIN_CHAIN,
+                                 destination="0x" + "66" * 20,
+                                 amount_wei=11 * unit, purpose="drill-10.11b")
+        assert v2["decision"] == "denied", v2
+        print("  kill -9: queue, ledger, and velocity window all survived")
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+    results["kill9_survival"] = True
+    print("phase C (on-chain testnet drill): GREEN")
+    return results
+
+
 def main():
     ap = argparse.ArgumentParser(prog="spellbook-drill")
     ap.add_argument("--vectors", required=True)
     ap.add_argument("--status-out", required=True)
+    ap.add_argument("--onchain-testnet", action="store_true",
+                    help="run phase C: the §10 on-chain testnet drill (EVM path). "
+                         "Needs explicit authorization — it moves (worthless) funds.")
     args = ap.parse_args()
 
     n = phase_kdf(args.vectors)
     phase_daemon()
-    print(ONCHAIN_CHECKLIST)
-
     status = {"ts": time.time(), "kdf_vectors_reproduced": n,
-              "off_chain": "green",
-              "on_chain": "pending-explicit-authorization"}
+              "off_chain": "green"}
+    if args.onchain_testnet:
+        results = phase_onchain_testnet()
+        status["on_chain_testnet"] = "green"
+        status["on_chain_results"] = results
+    else:
+        print(ONCHAIN_CHECKLIST)
+        status["on_chain"] = "pending-explicit-authorization"
     with open(args.status_out, "w") as f:
         json.dump(status, f, indent=2, sort_keys=True)
     print(f"drill status written to {args.status_out}")
-    print("OFF-CHAIN DRILL GREEN — on-chain phases need explicit authorization.")
 
 
 if __name__ == "__main__":
