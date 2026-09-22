@@ -32,10 +32,12 @@ an API for agent software, not for this browser.
 
 ## Environment variables (Speechless sets at deploy time)
 
-Server-only — never exposed to client JS:
+`SPELLBOOK_RELAY_TOKEN` is server-only — never exposed to client JS.
+`NEXT_PUBLIC_RELAY_URL` is public (the relay base URL is not a secret):
 
-- `SPELLBOOK_RELAY_URL` — Chia relay base URL
-  (default: `https://spellbook-production.up.railway.app`).
+- `NEXT_PUBLIC_RELAY_URL` — Chia relay base URL (already set for the
+  site; public value, not a secret; default:
+  `https://spellbook-production.up.railway.app`).
 - `SPELLBOOK_RELAY_TOKEN` — copy of the relay's `RELAY_BEARER_TOKEN`
   from Railway. When unset, the Chia row reports "relay not configured"
   and every other chain keeps working.
@@ -61,7 +63,7 @@ vercel --prod
 
 Or import the repo in the Vercel dashboard with **Root Directory = `web`**.
 The marketing pages need no environment variables; `/dashboard` needs
-`SPELLBOOK_RELAY_URL` / `SPELLBOOK_RELAY_TOKEN` (above) for the Chia row
+`NEXT_PUBLIC_RELAY_URL` / `SPELLBOOK_RELAY_TOKEN` (above) for the Chia row
 and degrades gracefully without them.
 
 ## Security notes
