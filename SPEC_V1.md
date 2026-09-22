@@ -851,6 +851,14 @@ real path.
 
 All green → Phase 2 proposal to Speechless. Any red → fix, re-run, re-report.
 
+**Drill manifest (pinned):** every drill row is defined once in
+`docs/reviews/drill-manifest-v1.md` (Turbo, thread 37143) as drill id +
+manifest version + finality rule + decoded intent. New rows cite the
+manifest version; the procedure never changes under a version. Mainnet
+re-runs (steps 14–17) MUST cite the same drill id + manifest version with
+the witness's own receipts — a mainnet row without a manifest citation is
+a rehearsal, not a drill.
+
 ## 11. Phases
 
 - **Phase 0 — spec (this document).** Done when Speechless approves; open
@@ -929,6 +937,19 @@ project starts.
   approves with their own tooling (O5); the daemon executes and the agent
   reports the result. The agent can request and relay, never approve — the
   two-token split (S7) is what makes "from here" safe to build.
+- **O11** (new, thread 37143 + Speechless direction 2026-09-22): receipt
+  escrow — an opt-in `receipt_anchor` flag for posting signed receipts
+  (tx ref + canon_digest + decoded intent) to a public anchor after
+  broadcast / rejection / failure, so a stranger can walk the receipt both
+  ways. The wallet stays general and chain-agnostic; Musebook is one
+  anchor, not the anchor. Anchor-pluggable, human-gated (receipt posting
+  is itself a write), failures and rejections escrowed too. Design stage —
+  pending Speechless's build approval. Design note:
+  `docs/reviews/2026-09-22-receipt-escrow.md`.
+- **O12** (new, thread 37143 — Pete 2026-09-22): decode-gate stranger veto —
+  today the daemon names the decoded intent from canonical params and the
+  human approves it. Should a stranger be able to veto a decoded intent
+  before broadcast? Open design question, no mechanism yet.
 
 ## 12a. Town adoptions — APPROVED by Speechless 2026-09-20, now implementation consensus
 
@@ -1053,6 +1074,15 @@ verify, install locally — per muse, per D1.
 ---
 
 ## 15. Review log
+- 2026-09-22 — testnet-green town round (townhall/37143, post 51047): all
+  three chains green, town feedback folded in. New open items O11 (receipt
+  escrow — opt-in `receipt_anchor` flag, Speechless-directed design) and
+  O12 (decode-gate stranger veto, Pete). Drill manifest v1 pinned
+  (`docs/reviews/drill-manifest-v1.md`, Turbo) and referenced from §10;
+  re-walkability map (`docs/reviews/2026-09-22-testnet-rewalkability.md`,
+  Z); approval-failure drill run live (queue 11 → rejected-by-human,
+  nothing fired, Pete). Stranger-witness rule for mainnet recorded as
+  pending Speechless's mainnet authorization. Replies 51219/51221/51225/51226.
 - 2026-09-20 — Sage pinned-commit path implemented (was: open decision #7).
   `install.sh` §2 now builds the `sage-cli` crate from source at the pinned
   commit `f2ec89dd…`: shallow-fetch the exact commit, assert
