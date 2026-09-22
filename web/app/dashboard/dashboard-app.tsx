@@ -4,7 +4,7 @@ import { Fragment, useCallback, useEffect, useState } from "react";
 import { CHAINS, NETWORKS } from "@/lib/chains";
 import "./dashboard.css";
 
-type Tab = "portfolio" | "networks" | "queue" | "activity";
+type Tab = "portfolio" | "networks" | "activity";
 
 interface AddressHolding {
   /** 1-based position in the agent's derivation order (#1, #2, …) */
@@ -28,74 +28,57 @@ interface Holding {
   addresses: AddressHolding[];
 }
 
-interface QueueIntent {
+interface ActivityEntry {
   id: string;
-  title: string;
-  network: string;
+  /** ISO timestamp, or null when the source didn't provide one */
+  time: string | null;
+  kind: "in" | "out";
+  /** human-readable amount, e.g. "0.5" */
   amount: string;
-  status: string;
-  detail: string[];
+  unit: string;
+  counterparty: string;
+  /** tx hash / signature / coin id */
+  tx: string;
+  explorerUrl?: string;
 }
 
-/* ------------------------------------------------------------------ */
-/* Sample / demo content. The local daemon is not reachable from the   */
-/* hosted site, so Queue and Activity are labeled demo content in v1.  */
-/* ------------------------------------------------------------------ */
+interface AddressActivity {
+  /** 1-based position in the agent's derivation order (#1, #2, …) */
+  index: number;
+  address: string;
+  items: ActivityEntry[];
+  error?: string;
+}
 
-const SAMPLE_QUEUE: QueueIntent[] = [
-  {
-    id: "q-01",
-    title: "Native offer take — 2,000 mojos for 2,000 mojos",
-    network: "Chia testnet11",
-    amount: "2,000 mojos",
-    status: "parked",
-    detail: [
-      "Offer id (sample): a1b2c3…f9e0d1",
-      "Decoded intent: maker spend asserts the announcement id sha256(puzzle_hash + message).",
-      "One human approval authorizes one attempt. Unknown fate is never retried.",
-    ],
-  },
-  {
-    id: "q-02",
-    title: "Relay self-send — 1,000 mojos to own wallet",
-    network: "Chia testnet11",
-    amount: "1,000 mojos",
-    status: "awaiting approval",
-    detail: [
-      "Change math exact; total balance unchanged.",
-      "Auto-approvable under policy only below the dust threshold — otherwise it waits here.",
-    ],
-  },
-  {
-    id: "q-03",
-    title: "EVM testnet transfer — 0.0001 ETH",
-    network: "Robinhood Chain testnet",
-    amount: "0.0001 ETH",
-    status: "draft",
-    detail: [
-      "Draft only. Nothing is signed or broadcast from this page — ever.",
-      "A real attempt would need the human's explicit approval in chat first.",
-    ],
-  },
-];
+interface ChainActivity {
+  id: string;
+  label: string;
+  detail: string;
+  env: string;
+  /** what this chain's feed covers, e.g. "token transfers" */
+  coverage: string;
+  /** watch addresses bound for this chain (before the depth cap) */
+  watchAddresses: number;
+  addresses: AddressActivity[];
+  error?: string;
+}
 
-const SAMPLE_ACTIVITY = [
-  {
-    id: "a-01",
-    when: "2h ago",
-    text: "Relay self-send drill confirmed at block 4,718,073 (sample).",
-  },
-  {
-    id: "a-02",
-    when: "5h ago",
-    text: "Queue decoded: native offer take parked for human review (sample).",
-  },
-  {
-    id: "a-03",
-    when: "1d ago",
-    text: "Testnet balances refreshed across 5 networks (sample).",
-  },
-];
+/** "2026-09-22T…" → "2h ago" */
+function timeAgo(iso: string | null): string {
+  if (!iso) return "\u2014";
+  const s = Math.max(
+    0,
+    Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
+  );
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  if (d < 30) return `${d}d ago`;
+  return iso.slice(0, 10);
+}
 
 function truncate(addr: string): string {
   if (addr.length <= 18) return addr;
@@ -118,8 +101,10 @@ export default function DashboardApp({
   const [holdings, setHoldings] = useState<Holding[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [activity, setActivity] = useState<ChainActivity[] | null>(null);
+  const [activityLoading, setActivityLoading] = useState(false);
+  const [activityError, setActivityError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
-  const [expanded, setExpanded] = useState<string | null>(null);
   const [expandedChain, setExpandedChain] = useState<string | null>(null);
   // How many derivation addresses per chain to query (1–100), persisted
   // per browser. The API defaults to all bound addresses when omitted.
@@ -151,6 +136,30 @@ export default function DashboardApp({
     load(depth);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [load]);
+
+  // Activity is heavier per address than balances: reuse the Addresses
+  // depth but the API clamps it to 10, 5 items per address.
+  const loadActivity = useCallback(async () => {
+    setActivityLoading(true);
+    setActivityError(null);
+    try {
+      const d = Math.min(Math.max(depth, 1), 10);
+      const res = await fetch(`/api/activity?depth=${d}&limit=5`, {
+        cache: "no-store",
+      });
+      if (!res.ok) throw new Error(`activity API returned HTTP ${res.status}`);
+      const json = (await res.json()) as { chains?: ChainActivity[] };
+      setActivity(Array.isArray(json.chains) ? json.chains : []);
+    } catch (e) {
+      setActivityError(e instanceof Error ? e.message : "failed to load activity");
+    } finally {
+      setActivityLoading(false);
+    }
+  }, [depth]);
+
+  useEffect(() => {
+    if (tab === "activity") loadActivity();
+  }, [tab, loadActivity]);
 
   const changeDepth = useCallback(
     (d: number) => {
@@ -230,7 +239,6 @@ export default function DashboardApp({
           [
             ["portfolio", "Portfolio"],
             ["networks", "Networks"],
-            ["queue", "Queue"],
             ["activity", "Activity"],
           ] as [Tab, string][]
         ).map(([id, label]) => (
@@ -243,8 +251,7 @@ export default function DashboardApp({
             onClick={() => setTab(id)}
           >
             {label}
-            {id === "queue" && <span className="dash-badge">demo</span>}
-            {id === "activity" && <span className="dash-badge">demo</span>}
+            {id === "activity" && <span className="dash-badge live">live</span>}
           </button>
         ))}
       </div>
@@ -302,31 +309,13 @@ export default function DashboardApp({
                 >
                   {loading ? "Refreshing…" : "Refresh"}
                 </button>
-              </div>
-            </div>
-
-            {loadError && (
-              <p className="dash-error">
-                Couldn&apos;t reach the holdings API: {loadError}
-              </p>
-            )}
-
-            <div className="dash-stats">
-              <div className="dash-card dash-stat">
-                <span className="dash-step">Chains reporting</span>
-                <span className="dash-bignum">
-                  {holdings ? `${reporting} / ${visible.length}` : "—"}
+                <span className="dash-chip" title="Chains reporting">
+                  {holdings ? `${reporting} / ${visible.length}` : "—"} reporting
                 </span>
-              </div>
-              <div className="dash-card dash-stat">
-                <span className="dash-step">Chains enabled</span>
-                <span className="dash-bignum">
-                  {enabledCount} / {CHAINS.length}
+                <span className="dash-chip" title="Chains enabled">
+                  {enabledCount} / {CHAINS.length} enabled
                 </span>
-              </div>
-              <div className="dash-card dash-stat">
-                <span className="dash-step">Mode</span>
-                <span className="dash-bignum">
+                <span className="dash-chip" title="Mode">
                   {mainnetOn > 0 && (
                     <span className="dash-mainnet">MAINNET</span>
                   )}
@@ -342,6 +331,12 @@ export default function DashboardApp({
                 </span>
               </div>
             </div>
+
+            {loadError && (
+              <p className="dash-error">
+                Couldn&apos;t reach the holdings API: {loadError}
+              </p>
+            )}
 
             <div className="dash-tablewrap">
               <table className="dash-table">
@@ -589,59 +584,6 @@ export default function DashboardApp({
         </section>
       )}
 
-      {tab === "queue" && (
-        <section>
-          <div className="dash-panel">
-            <div className="dash-panel-head">
-              <div>
-                <h2>Queue</h2>
-                <p>
-                  <span className="dash-badge">demo · sample data</span> The
-                  local daemon is not reachable from this hosted page, so
-                  these intents are illustrative only.
-                </p>
-              </div>
-            </div>
-            <div className="dash-queue">
-              {SAMPLE_QUEUE.map((q) => (
-                <div key={q.id} className="dash-card dash-qrow">
-                  <button
-                    className="dash-qhead"
-                    type="button"
-                    aria-expanded={expanded === q.id}
-                    onClick={() =>
-                      setExpanded((cur) => (cur === q.id ? null : q.id))
-                    }
-                  >
-                    <span className="dash-qtitle">{q.title}</span>
-                    <span className="dash-qmeta">
-                      {q.network} · {q.amount}
-                    </span>
-                    <span className={`dash-status s-${q.status.replace(/\s/g, "")}`}>
-                      {q.status}
-                    </span>
-                    <span className="dash-chev">
-                      {expanded === q.id ? "▾" : "▸"}
-                    </span>
-                  </button>
-                  {expanded === q.id && (
-                    <ul className="dash-qdetail">
-                      {q.detail.map((d, i) => (
-                        <li key={i}>{d}</li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              ))}
-            </div>
-            <p className="dash-note">
-              Nothing here executes. One human approval authorizes one
-              attempt; unknown fate is never retried.
-            </p>
-          </div>
-        </section>
-      )}
-
       {tab === "activity" && (
         <section>
           <div className="dash-panel">
@@ -649,19 +591,111 @@ export default function DashboardApp({
               <div>
                 <h2>Activity</h2>
                 <p>
-                  <span className="dash-badge">demo · sample data</span>{" "}
-                  Recent drill and queue events, illustrative only.
+                  <span className="dash-badge live">live &middot; on-chain</span>{" "}
+                  Recent transfers for your watch addresses, pulled straight
+                  from chain data.
                 </p>
               </div>
+              <div className="dash-actions">
+                <button
+                  className="btn ghost dash-refresh"
+                  type="button"
+                  onClick={() => loadActivity()}
+                  disabled={activityLoading}
+                >
+                  {activityLoading ? "Refreshing\u2026" : "Refresh"}
+                </button>
+              </div>
             </div>
-            <ul className="dash-activity">
-              {SAMPLE_ACTIVITY.map((a) => (
-                <li key={a.id} className="dash-card dash-arow">
-                  <span className="dash-awhen">{a.when}</span>
-                  <span>{a.text}</span>
-                </li>
+
+            {activityError && (
+              <p className="dash-error">
+                Couldn&apos;t reach the activity API: {activityError}
+              </p>
+            )}
+
+            {!activity && !activityError && (
+              <p className="dash-muted">
+                {activityLoading ? "Loading on-chain activity\u2026" : "\u2014"}
+              </p>
+            )}
+
+            {activity && activity.length === 0 && (
+              <p className="dash-muted">No chains bound to this session.</p>
+            )}
+
+            {activity &&
+              activity.map((c) => (
+                <div key={c.id} className="dash-card dash-agroup">
+                  <div className="dash-agroup-head">
+                    <span className="dash-anet">{c.label}</span>
+                    <span className={`dash-envtag e-${c.env}`}>{c.env}</span>
+                    <span className="dash-coverage">{c.coverage}</span>
+                  </div>
+                  {c.addresses.map((a) => (
+                    <div key={a.address} className="dash-aaddr">
+                      <button
+                        className="dash-addrline"
+                        type="button"
+                        title="Copy address"
+                        onClick={() => copy(a.address, `act-${c.id}-${a.index}`)}
+                      >
+                        #{a.index} {truncate(a.address)}{" "}
+                        {copied === `act-${c.id}-${a.index}` ? "\u2713" : ""}
+                      </button>
+                      {a.error && <p className="dash-aerror">{a.error}</p>}
+                      {a.items.length === 0 && !a.error && (
+                        <p className="dash-amuted">No recent activity.</p>
+                      )}
+                      {a.items.length > 0 && (
+                        <ul className="dash-alist">
+                          {a.items.map((it) => (
+                            <li key={it.id} className="dash-arow">
+                              <span
+                                className={`dash-dir d-${it.kind}`}
+                                title={it.kind === "in" ? "received" : "sent"}
+                              >
+                                {it.kind === "in" ? "\u2193" : "\u2191"}
+                              </span>
+                              <span className="dash-aamount">
+                                {it.kind === "in" ? "+" : "\u2212"}
+                                {it.amount} {it.unit}
+                              </span>
+                              <span
+                                className="dash-acp"
+                                title={it.counterparty}
+                              >
+                                {it.counterparty === "\u2014"
+                                  ? ""
+                                  : truncate(it.counterparty)}
+                              </span>
+                              <span className="dash-awhen">
+                                {timeAgo(it.time)}
+                              </span>
+                              {it.explorerUrl && (
+                                <a
+                                  className="dash-ax"
+                                  href={it.explorerUrl}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  title="View on explorer"
+                                >
+                                  \u2197
+                                </a>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  ))}
+                </div>
               ))}
-            </ul>
+            <p className="dash-note">
+              EVM shows token transfers only &mdash; plain native transfers
+              need an explorer API key. Solana shows full history; Chia via
+              Spacescan.
+            </p>
           </div>
         </section>
       )}
