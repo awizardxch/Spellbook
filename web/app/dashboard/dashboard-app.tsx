@@ -101,9 +101,11 @@ function truncate(addr: string): string {
 export default function DashboardApp({
   role,
   pubkey,
+  viewingPubkey,
 }: {
   role: "agent" | "viewer";
   pubkey?: string;
+  viewingPubkey?: string;
 }) {
   const [tab, setTab] = useState<Tab>("portfolio");
   const [enabled, setEnabled] = useState<Record<string, boolean>>(() =>
@@ -193,7 +195,9 @@ export default function DashboardApp({
           <span className="dash-session">
             {role === "agent"
               ? `🧙 agent ${pubkey ? `${pubkey.slice(0, 4)}…${pubkey.slice(-4)}` : ""}`
-              : "👁️ viewer"}
+              : viewingPubkey
+                ? `👁️ agent ${viewingPubkey.slice(0, 4)}…${viewingPubkey.slice(-4)}`
+                : "👁️ viewer"}
           </span>
           <button
             className="btn ghost dash-logout"

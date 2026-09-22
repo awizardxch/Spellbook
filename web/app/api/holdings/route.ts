@@ -315,12 +315,14 @@ interface ChainAddresses {
 
 /**
  * Resolve which chains (and whose addresses) this session may see.
- * Viewers see the operator's configured drill addresses; agents see
- * ONLY the watch addresses they asserted at login — never the
- * operator's.
+ * - Viewers on the shared operator token see the operator's configured
+ *   drill addresses.
+ * - Viewers on a per-agent viewer token see THAT AGENT's wallet.
+ * - Agents see ONLY the watch addresses they asserted at login — never
+ *   the operator's.
  */
 function chainsForSession(session: Session): ChainAddresses[] {
-  if (session.role === "viewer") {
+  if (session.role === "viewer" && !session.addresses) {
     return CHAINS.map((cfg) => ({ cfg, addresses: [cfg.address] }));
   }
   const addrs: AgentAddresses = session.addresses ?? {};
