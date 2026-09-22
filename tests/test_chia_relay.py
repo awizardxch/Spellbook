@@ -459,3 +459,50 @@ class TestBroadcastStatusShape:
         r._request = fake_request
         with pytest.raises(RelayError, match="HTTP 404"):
             r.broadcast_status("ab" * 32)
+
+
+class TestNetworkSelector:
+    """The optional network selector is passed through to the relay;
+    omitted, requests are exactly the historical shape."""
+
+    def _spy(self):
+        r = RelayRpc("https://relay.example.com", "a" * 32)
+        calls = []
+
+        def fake_request(method, path, body=None):
+            calls.append((method, path, body))
+            return {"ok": True, "coins": [], "not_found": [],
+                    "network": "testnet11", "peak_height": 1, "peers": []}
+
+        r._request = fake_request
+        return r, calls
+
+    def test_coins_omitted_by_default(self):
+        r, calls = self._spy()
+        r.coins(["ab" * 32])
+        assert calls == [("POST", "/v1/coins", {"puzzle_hashes": ["ab" * 32]})]
+
+    def test_coins_network_in_body(self):
+        r, calls = self._spy()
+        r.coins(["ab" * 32], network="mainnet")
+        method, path, body = calls[0]
+        assert body["network"] == "mainnet"
+        assert body["puzzle_hashes"] == ["ab" * 32]
+
+    def test_coin_network_in_query(self):
+        r, calls = self._spy()
+        r.coin("ab" * 32, network="mainnet")
+        method, path, body = calls[0]
+        assert method == "GET" and path == "/v1/coin/{0}?network=mainnet".format("ab" * 32)
+
+    def test_status_network_in_query(self):
+        r, calls = self._spy()
+        r.status(network="mainnet")
+        assert calls[0][1] == "/v1/status?network=mainnet"
+
+    def test_broadcast_network_in_body(self):
+        r, calls = self._spy()
+        r._request = lambda m, p, body=None: (calls.append((m, p, body)),
+                                              {"ok": True, "txid": "ab" * 32})[1]
+        r.broadcast("00" * 32, network="mainnet")
+        assert calls[0][2]["network"] == "mainnet"

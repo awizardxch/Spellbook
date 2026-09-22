@@ -69,8 +69,18 @@ pointing a wallet at any public full node.
 │   daemon     │ ───────────────────────▶ │ spellbook-chia-   │ ───────────────▶ │ testnet11  │
 │ keys + BLS   │   coins / broadcast /    │ relay (Railway)   │  persistent peer │ full nodes │
 │ signing HERE │   tx status              │ no keys, no seeds │  connections     │ :58444     │
-└──────────────┘                          └───────────────────┘                  └────────────┘
+└──────────────┘   + "network" selector   └───────────────────┘                  ├────────────┤
+                                                  one peer pool                  │ mainnet    │
+                                                  per enabled network            │ full nodes │
+                                                                                 │ :8444      │
+                                                                                 └────────────┘
 ```
+
+One deployment serves both networks (`RELAY_NETWORKS`, default
+`testnet11,mainnet`). Every endpoint takes an optional `network`
+selector (`"network"` in POST bodies, `?network=` on GETs); omitted,
+requests use `RELAY_NETWORK` (default `testnet11`), so old clients keep
+working unchanged.
 
 What the relay **never** receives: seeds, private keys, mnemonics.
 What the relay **does** receive: puzzle hashes (public), signed spend
@@ -151,13 +161,15 @@ from a pure network client.
 - Bearer token from env `RELAY_API_TOKEN` (32+ bytes, generated at
   deploy). Constant-time compare. No token, no access — including
   `/v1/status` (which leaks watched addresses).
-- Network pinning: `RELAY_NETWORK` (`testnet11` default). The relay
-  verifies the peer's handshake `network_id` equals `"testnet11"` (the
-  protocol network identifier) and drops the peer otherwise. The
-  genesis challenge
-  (`37a90eb5…36615`) pins the AGG_SIG_ME domain separately. Mainnet
-  requires explicitly setting `RELAY_NETWORK=mainnet` — there is no
-  silent fallback.
+- Network pinning, per pool: `RELAY_NETWORKS` (default
+  `testnet11,mainnet`) starts one peer pool per network. The relay
+  verifies each peer's handshake `network_id` matches its pool's network
+  and drops the peer otherwise. Requests select a pool with an optional
+  `network` selector (`"network"` in POST bodies, `?network=` on GETs);
+  omitted, they use `RELAY_NETWORK` (default `testnet11`) — there is no
+  silent fallback to another network. The genesis challenge
+  (`37a90eb5…36615` on testnet11) pins the AGG_SIG_ME domain separately
+  at signing time, on the daemon.
 - Request limits: ≤ 50 puzzle hashes per `/v1/coins` call; ≤ 5 MB
   bundle per `/v1/broadcast`; naive per-IP rate limit (60 req/min).
   Bodies are schema-validated; anything else is a 400.
