@@ -255,8 +255,8 @@ Base: the operator's dashboard deployment, e.g.
      - `solana` / `solana_mainnet`: base58 each — queried on Solana
        devnet / mainnet-beta.
      - `chia` / `chia_mainnet`: `txch1…` / `xch1…` bech32m each —
-       queried on Chia testnet11 / mainnet via the relay (mainnet
-       needs its own relay deployment).
+       queried on Chia testnet11 / mainnet via the relay's `network`
+       selector (one deployment serves both).
    - Where the addresses come from: your local daemon derives them
      read-only — `spellbook addresses` returns
      `{label: {chain: address}}` covering both networks
