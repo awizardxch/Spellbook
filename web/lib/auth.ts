@@ -120,8 +120,17 @@ export interface Session {
   exp: number;
   /** agent identity (role === "agent" only): self-asserted Ed25519 pubkey */
   pubkey?: string;
-  /** agent's own watch addresses (role === "agent" only) */
+  /**
+   * Watch addresses: the agent's own (role === "agent"), or the viewed
+   * agent's (role === "viewer" via a per-agent viewer token). Absent for
+   * the shared operator drill view.
+   */
   addresses?: AgentAddresses;
+  /**
+   * role === "viewer" via a per-agent viewer token: the pubkey of the
+   * agent whose wallet is being viewed (for the badge).
+   */
+  viewingPubkey?: string;
 }
 
 /* ---------------- configuration ---------------- */
@@ -267,6 +276,7 @@ interface SessionPayload {
   exp: number;
   pubkey?: string;
   addresses?: AgentAddresses;
+  viewingPubkey?: string;
 }
 
 export interface AgentIdentity {
@@ -275,14 +285,18 @@ export interface AgentIdentity {
 }
 
 /**
- * Mint a signed session cookie value. Agent sessions carry the agent's
- * self-asserted identity (pubkey + own watch addresses). Null when
- * sessions aren't configured.
+ * Mint a signed session cookie value.
+ * - role "agent": identity is the agent's own self-asserted identity
+ *   (pubkey + own watch addresses).
+ * - role "viewer" with identity: read-only session on THAT AGENT's wallet,
+ *   from a per-agent viewer token; the badge shows the viewed pubkey.
+ * - role "viewer" without identity: the shared operator drill view.
+ * Null when sessions aren't configured.
  */
-export function mintSession(role: Role, agent?: AgentIdentity): string | null {
+export function mintSession(role: Role, identity?: AgentIdentity): string | null {
   const secret = sessionSecret();
   if (!secret) return null;
-  if (role === "agent" && !agent) return null;
+  if (role === "agent" && !identity) return null;
   const now = Date.now();
   const payload: SessionPayload = {
     v: 1,
@@ -290,9 +304,10 @@ export function mintSession(role: Role, agent?: AgentIdentity): string | null {
     iat: now,
     exp: now + SESSION_MAX_AGE * 1000,
   };
-  if (agent) {
-    payload.pubkey = agent.pubkey.toLowerCase();
-    payload.addresses = agent.addresses;
+  if (identity) {
+    payload.addresses = identity.addresses;
+    if (role === "agent") payload.pubkey = identity.pubkey.toLowerCase();
+    else payload.viewingPubkey = identity.pubkey.toLowerCase();
   }
   const body = Buffer.from(JSON.stringify(payload), "utf8").toString(
     "base64url"
@@ -330,6 +345,18 @@ export function readSession(cookieValue: string | undefined): Session | null {
       session.pubkey = payload.pubkey;
       session.addresses = addresses;
     }
+    if (payload.role === "viewer" && payload.viewingPubkey !== undefined) {
+      // Per-agent viewer token session: bound to the viewed agent's wallet.
+      if (
+        typeof payload.viewingPubkey !== "string" ||
+        !/^[0-9a-f]{64}$/.test(payload.viewingPubkey)
+      )
+        return null;
+      const addresses = parseAgentAddresses(payload.addresses);
+      if (!addresses) return null;
+      session.viewingPubkey = payload.viewingPubkey;
+      session.addresses = addresses;
+    }
     return session;
   } catch {
     return null;
@@ -352,9 +379,81 @@ export function viewerTokenValid(token: string): boolean {
 export function authConfigured(): { agent: boolean; viewer: boolean } {
   // The agent path needs no per-agent server config: any agent that
   // installed the Spellbook logs in with its own key + addresses.
+  // Per-agent viewer tokens work whenever sessions are configured; the
+  // shared operator token additionally needs SPELLBOOK_VIEWER_TOKEN.
   return {
     agent: sessionSecret() !== null,
-    viewer:
-      sessionSecret() !== null && !!process.env.SPELLBOOK_VIEWER_TOKEN,
+    viewer: sessionSecret() !== null,
   };
+}
+
+/* ---------------- per-agent viewer tokens ---------------- */
+
+/**
+ * A per-agent viewer token is a signed bearer credential an agent hands to
+ * their human: pasting it into the dashboard's viewer field opens a
+ * read-only session on THAT AGENT's wallet (not the operator drill view).
+ * Verified by HMAC with the session secret — no database, no expiry.
+ * Revocation is break-glass: rotate SPELLBOOK_SESSION_SECRET, which
+ * invalidates every session and viewer token on the deployment.
+ */
+interface AgentViewerTokenPayload {
+  v: number;
+  kind: "agent-viewer";
+  pubkey: string;
+  addresses: AgentAddresses;
+  iat: number;
+}
+
+/** Mint a viewer token for the given agent identity. */
+export function mintAgentViewerToken(
+  pubkey: string,
+  addresses: AgentAddresses
+): string | null {
+  const secret = sessionSecret();
+  if (!secret) return null;
+  const clean = pubkey.trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(clean)) return null;
+  const parsed = parseAgentAddresses(addresses);
+  if (!parsed) return null;
+  const payload: AgentViewerTokenPayload = {
+    v: 2,
+    kind: "agent-viewer",
+    pubkey: clean,
+    addresses: parsed,
+    iat: Date.now(),
+  };
+  const body = Buffer.from(JSON.stringify(payload), "utf8").toString(
+    "base64url"
+  );
+  return `sbv2.${body}.${hmacHex(secret, body)}`;
+}
+
+/** Verify a per-agent viewer token. Returns the viewed identity or null. */
+export function readAgentViewerToken(
+  token: string | undefined
+): AgentIdentity | null {
+  const secret = sessionSecret();
+  if (!secret || typeof token !== "string") return null;
+  const parts = token.split(".");
+  if (parts.length !== 3 || parts[0] !== "sbv2") return null;
+  const body = parts[1];
+  const sig = parts[2];
+  if (!safeEqualHex(sig.toLowerCase(), hmacHex(secret, body))) return null;
+  try {
+    const payload = JSON.parse(
+      Buffer.from(body, "base64url").toString("utf8")
+    ) as AgentViewerTokenPayload;
+    if (payload.v !== 2 || payload.kind !== "agent-viewer") return null;
+    if (
+      typeof payload.pubkey !== "string" ||
+      !/^[0-9a-f]{64}$/.test(payload.pubkey)
+    )
+      return null;
+    const addresses = parseAgentAddresses(payload.addresses);
+    if (!addresses) return null;
+    return { pubkey: payload.pubkey, addresses };
+  } catch {
+    return null;
+  }
 }

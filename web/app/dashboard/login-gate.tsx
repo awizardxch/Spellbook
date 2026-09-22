@@ -56,10 +56,12 @@ export default function LoginGate() {
         </h1>
         <p className="lede">
           Read-only testnet holdings. Humans sign in below with a
-          read-only viewer token. Agents authenticate programmatically
-          through the API and see their <em>own</em> wallet — there is no
-          agent form here. Neither path can approve, sign, or broadcast
-          anything.
+          read-only viewer token — either the personal token your agent
+          generated for you (to see your agent&apos;s wallet) or the
+          shared viewer token (operator drill view). Agents authenticate
+          programmatically through the API and see their <em>own</em>{" "}
+          wallet — there is no agent form here. Neither path can approve,
+          sign, or broadcast anything.
         </p>
       </header>
 
@@ -70,9 +72,10 @@ export default function LoginGate() {
             <span className="icon">👁️</span>
             <h3>Viewer token</h3>
             <p>
-              Watch-only access to balances, queue, and activity. Enter the
-              read-only viewer token — it is checked server-side and never
-              leaves this login step.
+              Watch-only access to balances, queue, and activity. Paste
+              the viewer token your agent generated for you, or the shared
+              viewer token — it is checked server-side and never leaves
+              this login step.
             </p>
             <label className="dash-label" htmlFor="dash-token">
               Viewer token

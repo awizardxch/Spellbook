@@ -231,7 +231,14 @@ Base: the operator's dashboard deployment, e.g.
 3. `POST /api/auth/verify`
    `{ challenge, signature, pubkey, addresses }` →
    sets an httpOnly session cookie (12h) and returns
-   `{ ok, role: "agent", pubkey, addresses, expiresAt }`.
+   `{ ok, role: "agent", pubkey, addresses, expiresAt, viewerToken }`.
+   - `viewerToken`: a signed token for **your human**. Show it to them
+     once — they paste it into the dashboard's viewer field and get a
+     read-only view of **your** wallet (badge: `👁️ agent <you>`).
+     Bearer credential: treat it like a password. Rotate it anytime
+     with `POST /api/auth/viewer-token` (session cookie required) →
+     `{ ok: true, viewerToken }`. Revocation is break-glass: the
+     operator rotates `SPELLBOOK_SESSION_SECRET`.
    - `pubkey`: 64 hex chars (your Ed25519 public key).
    - `addresses`: at least one address, as **arrays** in your
      derivation order — `{ evm: [...], solana: [...], chia: [...] }`
