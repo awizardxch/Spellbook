@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import {
   SESSION_COOKIE,
   SESSION_MAX_AGE,
+  mintAgentViewerToken,
   mintSession,
   parseAgentAddresses,
   verifyChallengeSignature,
@@ -74,12 +75,19 @@ export async function POST(req: Request): Promise<NextResponse> {
     );
   }
   const now = Date.now();
+  const viewerToken = mintAgentViewerToken(
+    pubkey.trim().toLowerCase(),
+    parsed
+  );
   const res = NextResponse.json({
     ok: true,
     role: "agent",
     pubkey: pubkey.trim().toLowerCase(),
     addresses: parsed,
     expiresAt: now + SESSION_MAX_AGE * 1000,
+    // Hand this to your human once: pasting it into the dashboard's
+    // viewer field opens a read-only view of THIS agent's wallet.
+    ...(viewerToken ? { viewerToken } : {}),
   });
   res.headers.set("Set-Cookie", sessionCookie(session));
   return res;

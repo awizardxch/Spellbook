@@ -41,16 +41,50 @@ const CHALLENGE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 export type Role = "agent" | "viewer";
 
-/** Watch addresses an agent asserts at login. At least one is required. */
+/** Maximum watch addresses per chain an agent may bind at login. */
+export const MAX_WATCH_ADDRESSES = 100;
+
+/**
+ * Watch addresses an agent asserts at login, in the agent's own
+ * derivation order (e.g. the label order from `spellbook addresses`).
+ * At least one address across all chains is required.
+ */
 export interface AgentAddresses {
-  evm?: string;
-  solana?: string;
-  chia?: string;
+  evm?: string[];
+  solana?: string[];
+  chia?: string[];
 }
 
 const EVM_RE = /^0x[0-9a-fA-F]{40}$/;
 const SOLANA_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const CHIA_RE = /^(txch1|xch1)[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+$/;
+
+/** Normalize a single chain's input: one address string or an array of
+ * them. Returns the trimmed list, or null when empty/oversized. */
+function addressList(value: unknown): string[] | null {
+  const items = Array.isArray(value) ? value : [value];
+  if (items.length === 0 || items.length > MAX_WATCH_ADDRESSES) return null;
+  const out: string[] = [];
+  for (const item of items) {
+    if (typeof item !== "string") return null;
+    const t = item.trim();
+    if (!t) return null;
+    out.push(t);
+  }
+  return out;
+}
+
+/** Drop duplicates (case-insensitive for EVM hex), keeping first-seen
+ * order — the agent's derivation order. */
+function dedupe(list: string[], foldCase: boolean): string[] {
+  const seen = new Set<string>();
+  return list.filter((s) => {
+    const k = foldCase ? s.toLowerCase() : s;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
 
 /**
  * Validate agent-supplied watch addresses. Returns the normalized set,
@@ -62,22 +96,20 @@ export function parseAgentAddresses(input: unknown): AgentAddresses | null {
   const rec = input as Record<string, unknown>;
   const out: AgentAddresses = {};
   if (rec.evm !== undefined) {
-    if (typeof rec.evm !== "string" || !EVM_RE.test(rec.evm.trim()))
-      return null;
-    out.evm = rec.evm.trim();
+    const list = addressList(rec.evm);
+    if (!list || !list.every((a) => EVM_RE.test(a))) return null;
+    out.evm = dedupe(list, true);
   }
   if (rec.solana !== undefined) {
-    if (typeof rec.solana !== "string" || !SOLANA_RE.test(rec.solana.trim()))
-      return null;
-    out.solana = rec.solana.trim();
+    const list = addressList(rec.solana);
+    if (!list || !list.every((a) => SOLANA_RE.test(a))) return null;
+    out.solana = dedupe(list, false);
   }
   if (rec.chia !== undefined) {
-    if (
-      typeof rec.chia !== "string" ||
-      !CHIA_RE.test(rec.chia.trim().toLowerCase())
-    )
+    const list = addressList(rec.chia);
+    if (!list || !list.every((a) => CHIA_RE.test(a.toLowerCase())))
       return null;
-    out.chia = rec.chia.trim().toLowerCase();
+    out.chia = dedupe(list.map((a) => a.toLowerCase()), false);
   }
   if (!out.evm && !out.solana && !out.chia) return null;
   return out;
@@ -88,8 +120,17 @@ export interface Session {
   exp: number;
   /** agent identity (role === "agent" only): self-asserted Ed25519 pubkey */
   pubkey?: string;
-  /** agent's own watch addresses (role === "agent" only) */
+  /**
+   * Watch addresses: the agent's own (role === "agent"), or the viewed
+   * agent's (role === "viewer" via a per-agent viewer token). Absent for
+   * the shared operator drill view.
+   */
   addresses?: AgentAddresses;
+  /**
+   * role === "viewer" via a per-agent viewer token: the pubkey of the
+   * agent whose wallet is being viewed (for the badge).
+   */
+  viewingPubkey?: string;
 }
 
 /* ---------------- configuration ---------------- */
@@ -235,6 +276,7 @@ interface SessionPayload {
   exp: number;
   pubkey?: string;
   addresses?: AgentAddresses;
+  viewingPubkey?: string;
 }
 
 export interface AgentIdentity {
@@ -243,14 +285,18 @@ export interface AgentIdentity {
 }
 
 /**
- * Mint a signed session cookie value. Agent sessions carry the agent's
- * self-asserted identity (pubkey + own watch addresses). Null when
- * sessions aren't configured.
+ * Mint a signed session cookie value.
+ * - role "agent": identity is the agent's own self-asserted identity
+ *   (pubkey + own watch addresses).
+ * - role "viewer" with identity: read-only session on THAT AGENT's wallet,
+ *   from a per-agent viewer token; the badge shows the viewed pubkey.
+ * - role "viewer" without identity: the shared operator drill view.
+ * Null when sessions aren't configured.
  */
-export function mintSession(role: Role, agent?: AgentIdentity): string | null {
+export function mintSession(role: Role, identity?: AgentIdentity): string | null {
   const secret = sessionSecret();
   if (!secret) return null;
-  if (role === "agent" && !agent) return null;
+  if (role === "agent" && !identity) return null;
   const now = Date.now();
   const payload: SessionPayload = {
     v: 1,
@@ -258,9 +304,10 @@ export function mintSession(role: Role, agent?: AgentIdentity): string | null {
     iat: now,
     exp: now + SESSION_MAX_AGE * 1000,
   };
-  if (agent) {
-    payload.pubkey = agent.pubkey.toLowerCase();
-    payload.addresses = agent.addresses;
+  if (identity) {
+    payload.addresses = identity.addresses;
+    if (role === "agent") payload.pubkey = identity.pubkey.toLowerCase();
+    else payload.viewingPubkey = identity.pubkey.toLowerCase();
   }
   const body = Buffer.from(JSON.stringify(payload), "utf8").toString(
     "base64url"
@@ -298,6 +345,18 @@ export function readSession(cookieValue: string | undefined): Session | null {
       session.pubkey = payload.pubkey;
       session.addresses = addresses;
     }
+    if (payload.role === "viewer" && payload.viewingPubkey !== undefined) {
+      // Per-agent viewer token session: bound to the viewed agent's wallet.
+      if (
+        typeof payload.viewingPubkey !== "string" ||
+        !/^[0-9a-f]{64}$/.test(payload.viewingPubkey)
+      )
+        return null;
+      const addresses = parseAgentAddresses(payload.addresses);
+      if (!addresses) return null;
+      session.viewingPubkey = payload.viewingPubkey;
+      session.addresses = addresses;
+    }
     return session;
   } catch {
     return null;
@@ -320,9 +379,81 @@ export function viewerTokenValid(token: string): boolean {
 export function authConfigured(): { agent: boolean; viewer: boolean } {
   // The agent path needs no per-agent server config: any agent that
   // installed the Spellbook logs in with its own key + addresses.
+  // Per-agent viewer tokens work whenever sessions are configured; the
+  // shared operator token additionally needs SPELLBOOK_VIEWER_TOKEN.
   return {
     agent: sessionSecret() !== null,
-    viewer:
-      sessionSecret() !== null && !!process.env.SPELLBOOK_VIEWER_TOKEN,
+    viewer: sessionSecret() !== null,
   };
+}
+
+/* ---------------- per-agent viewer tokens ---------------- */
+
+/**
+ * A per-agent viewer token is a signed bearer credential an agent hands to
+ * their human: pasting it into the dashboard's viewer field opens a
+ * read-only session on THAT AGENT's wallet (not the operator drill view).
+ * Verified by HMAC with the session secret — no database, no expiry.
+ * Revocation is break-glass: rotate SPELLBOOK_SESSION_SECRET, which
+ * invalidates every session and viewer token on the deployment.
+ */
+interface AgentViewerTokenPayload {
+  v: number;
+  kind: "agent-viewer";
+  pubkey: string;
+  addresses: AgentAddresses;
+  iat: number;
+}
+
+/** Mint a viewer token for the given agent identity. */
+export function mintAgentViewerToken(
+  pubkey: string,
+  addresses: AgentAddresses
+): string | null {
+  const secret = sessionSecret();
+  if (!secret) return null;
+  const clean = pubkey.trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(clean)) return null;
+  const parsed = parseAgentAddresses(addresses);
+  if (!parsed) return null;
+  const payload: AgentViewerTokenPayload = {
+    v: 2,
+    kind: "agent-viewer",
+    pubkey: clean,
+    addresses: parsed,
+    iat: Date.now(),
+  };
+  const body = Buffer.from(JSON.stringify(payload), "utf8").toString(
+    "base64url"
+  );
+  return `sbv2.${body}.${hmacHex(secret, body)}`;
+}
+
+/** Verify a per-agent viewer token. Returns the viewed identity or null. */
+export function readAgentViewerToken(
+  token: string | undefined
+): AgentIdentity | null {
+  const secret = sessionSecret();
+  if (!secret || typeof token !== "string") return null;
+  const parts = token.split(".");
+  if (parts.length !== 3 || parts[0] !== "sbv2") return null;
+  const body = parts[1];
+  const sig = parts[2];
+  if (!safeEqualHex(sig.toLowerCase(), hmacHex(secret, body))) return null;
+  try {
+    const payload = JSON.parse(
+      Buffer.from(body, "base64url").toString("utf8")
+    ) as AgentViewerTokenPayload;
+    if (payload.v !== 2 || payload.kind !== "agent-viewer") return null;
+    if (
+      typeof payload.pubkey !== "string" ||
+      !/^[0-9a-f]{64}$/.test(payload.pubkey)
+    )
+      return null;
+    const addresses = parseAgentAddresses(payload.addresses);
+    if (!addresses) return null;
+    return { pubkey: payload.pubkey, addresses };
+  } catch {
+    return null;
+  }
 }

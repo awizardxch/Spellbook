@@ -328,6 +328,91 @@
   border-color: var(--accent);
 }
 
+/* Multi-address: expandable per-address rows + depth stepper. */
+
+.dash-addr-toggle {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.dash-addr-toggle:hover {
+  color: var(--text);
+}
+
+.dash-chev {
+  color: var(--accent);
+  font-size: 0.8rem;
+}
+
+.dash-subrow td {
+  background: rgba(139, 92, 246, 0.04);
+  padding-top: 10px;
+  padding-bottom: 10px;
+  font-size: 0.84rem;
+}
+
+.dash-subrow td:first-child {
+  padding-left: 16px;
+}
+
+.dash-idx {
+  font-family: var(--mono);
+  color: var(--faint);
+  margin-right: 8px;
+}
+
+.dash-depth {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  padding: 4px 6px;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.dash-depth-label {
+  color: var(--faint);
+  margin-right: 2px;
+}
+
+.dash-depth-num {
+  font-family: var(--mono);
+  color: var(--text);
+  min-width: 2.2em;
+  text-align: center;
+}
+
+.dash-depth-btn {
+  background: none;
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.9rem;
+  line-height: 1;
+  padding: 2px 9px;
+}
+
+.dash-depth-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.dash-depth-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
 .dash-error {
   color: var(--ember);
   font-size: 0.9rem;
