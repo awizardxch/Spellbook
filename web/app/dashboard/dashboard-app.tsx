@@ -185,12 +185,12 @@ export default function DashboardApp({
 
   return (
     <div className="wrap">
-      <nav className="nav dash-nav">
+      <nav className="nav dash-nav" data-circuit-rail="navigation">
         <a className="brand" href="/">
           <span className="brand-mark">🪄</span>
-          <span className="dash-wordmark">Spellbook</span>
+          <span className="brand-name">Spellbook</span>
         </a>
-        <div className="nav-links">
+        <div className="nav-links bar-scroll">
           <a href="/">Home</a>
           <span className="dash-session">
             {role === "agent"
@@ -215,7 +215,7 @@ export default function DashboardApp({
         </div>
       </nav>
 
-      <div className="dash-tabs" role="tablist" aria-label="Dashboard sections">
+      <div className="dash-tabs bar-scroll" role="tablist" aria-label="Dashboard sections" data-circuit-rail="tabs">
         {(
           [
             ["portfolio", "Portfolio"],

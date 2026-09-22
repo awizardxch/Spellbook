@@ -1,12 +1,14 @@
 /* Spellbook dashboard — forge-style glow treatment.
  *
  * Verified live on forge.awizard.dev:
- * - NO mouse-tracking glow, NO cursor-following spotlight, NO mousemove-driven
- *   visuals. The cursor is the native system arrow everywhere.
+ * - No cursor-following spotlight; the cursor is the native system arrow.
+ *   Pointer movement over the empty background does send pulses along the
+ *   grid (grid-energy.tsx, shared by every page) -- never over a card.
  * - Main panels: constant soft electric-cyan halo (always on).
- * - Cards: dim border by default; on :hover the border goes 2px solid #22d3ee
- *   with a soft outer glow — uniform, INSTANT (no transition).
- * - Header: thin cyan glow band + cyan text-shadow on the wordmark.
+ * - Cards: dim border by default; on :hover the Forge's glow -- cyan border,
+ *   ember + cyan halo, 0.2s -- shared with every page (globals.css).
+ * - Header: thin cyan glow band + cyan text-shadow on the wordmark -- now
+ *   shared by every page (.nav and .brand-name in globals.css).
  * - Glow color is cyan (#00d5ff–#22d3ee) only; ember/violet stay as accents.
  */
 
@@ -42,13 +44,7 @@
   gap: 18px;
 }
 
-/* ---------- header glow band (forge: box-shadow 0 0 20px 5px cyan) ---------- */
-.dash-nav {
-  border-bottom: 1px solid rgba(34, 211, 238, 0.25);
-  box-shadow: 0 0 20px 5px rgba(0, 213, 255, 0.35);
-  padding-bottom: 18px;
-  margin-bottom: 6px;
-}
+/* header glow band and wordmark: shared by every page's .nav, in globals.css */
 
 .dash-session {
   font-size: 0.82rem;
@@ -117,7 +113,7 @@
   cursor: default;
 }
 
-/* ---------- cards: dim border; instant cyan border glow on hover ---------- */
+/* ---------- cards: dim border; Forge hover glow (globals.css) ---------- */
 .dash-card {
   background: var(--card);
   border: 1px solid var(--card-border);
@@ -157,21 +153,15 @@
   margin-bottom: 10px;
 }
 
-/* forge hover: 2px solid #22d3ee + 0 0 18px rgba(34,211,238,.55), instant */
-@media (hover: hover) {
-  .dash-card:hover {
-    border: 2px solid #22d3ee;
-    box-shadow: 0 0 18px rgba(34, 211, 238, 0.55);
-    padding: 21px 19px; /* compensate so the 2px border doesn't shift layout */
-  }
-}
+/* hover glow: shared with every page's containers, in globals.css */
 
 /* ---------- tabs ---------- */
 .dash-tabs {
   display: flex;
   gap: 6px;
   margin-top: 18px;
-  border-bottom: 1px solid rgba(139, 92, 246, 0.2);
+  /* the second circuit rail (data-circuit-rail="tabs"), as on the Forge */
+  border-bottom: 1px solid rgba(34, 211, 238, 0.2);
 }
 
 .dash-tab {
@@ -195,7 +185,8 @@
 
 .dash-tab.active {
   color: var(--text);
-  border-bottom-color: var(--accent);
+  border-bottom-color: #22d3ee;
+  text-shadow: 0 0 10px rgba(0, 213, 255, 0.45);
 }
 
 .dash-badge {

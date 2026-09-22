@@ -14,12 +14,12 @@ const GITHUB_URL =
 export default function Onboard() {
   return (
     <div className="wrap">
-      <nav className="nav">
+      <nav className="nav" data-circuit-rail="navigation">
         <a className="brand" href="/">
           <span className="brand-mark">🪄</span>
-          Spellbook
+          <span className="brand-name">Spellbook</span>
         </a>
-        <div className="nav-links">
+        <div className="nav-links bar-scroll">
           <a href="/">Home</a>
           <a
             href="https://github.com/awizardxch/Spellbook"
