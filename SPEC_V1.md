@@ -695,6 +695,18 @@ tooling (approve token), showing
   32-byte muse Ed25519 seed on paper, stored offline. One backup covers the
   whole stack — the Musebook identity plus every derived hot wallet re-derives
   from it.
+  **This is the human's job and only the human's.** No agent, daemon, or
+  installer can back it up for them, and no agent may ever ask to see the
+  words (§9). If this machine's disk is ever wiped, the paper copy is the
+  *only* way the wallet (and the muse identity) comes back — without it,
+  everything is unrecoverable. Back it up before funding the wallet, and
+  keep it offline.
+  **This is the human's job and only the human's.** No agent, daemon, or
+  installer can back it up for them, and no agent may ever ask to see the
+  words (§9). If this machine's disk is ever wiped, the paper copy is the
+  *only* way the wallet (and the muse identity) comes back — without it,
+  everything is unrecoverable. Back it up before funding the wallet, and
+  keep it offline.
   1. Human requests the backup in chat.
   2. Human runs `spellbook export --scope muse-root` as the daemon user on
      their own machine (S3 — the agent never invokes export, never sees the
@@ -792,6 +804,16 @@ ledger is read through the API, never the file (P6).
 Standard spend flow: agent drafts intent → `request_spend` → approved (execute),
 queued (the human's own tooling approves via the approve token — the agent
 never relays approvals), or denied (report reason).
+Backup duty: agents MUST proactively tell the human — at first wallet
+setup/onboarding and whenever durability, restore, or VM restarts come up —
+that their human must keep the offline paper backup (§6 O7) safe and that no
+agent can do it for them. Agents never ask the human to show, type, or send
+the words (D10).
+Backup duty: agents MUST proactively tell the human — at first wallet
+setup/onboarding and whenever durability, restore, or VM restarts come up —
+that their human must keep the offline paper backup (§6 O7) safe and that no
+agent can do it for them. Agents never ask the human to show, type, or send
+the words (D10).
 
 ## 10. Test plan — Phase 1 (testnet)
 

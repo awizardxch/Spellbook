@@ -412,6 +412,12 @@ INSTALL COMPLETE — off-chain drill green.
 
 PAPER BACKUP (§6) — write these down NOW, on paper, offline.
 Shown ONCE and never again. Two copies, two places.
+This backup is YOUR job as the human — no agent or tooling can do it for you.
+If this disk is ever wiped, this paper copy is the ONLY way the wallet comes back.
+Do not fund the wallet until the paper backup is stored safely offline.
+This backup is YOUR job as the human — no agent or tooling can do it for you.
+If this disk is ever wiped, this paper copy is the ONLY way the wallet comes back.
+Do not fund the wallet until the paper backup is stored safely offline.
 Anyone holding EITHER set below holds the wallet.
 
 ----------------------------------------------------------------
