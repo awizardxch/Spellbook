@@ -9,7 +9,7 @@
 //   {challenge, signature} to /api/auth/verify. The server checks the HMAC
 //   (proves it issued the challenge and it hasn't expired), enforces
 //   best-effort single-use, and verifies the Ed25519 signature against
-//   SPELLBOOK_AGENT_PUBKEY.
+//   any key in SPELLBOOK_AGENT_PUBKEYS.
 //
 //   Path B — human viewer token. POST /api/auth/viewer {token} compares
 //   (timing-safe) against SPELLBOOK_VIEWER_TOKEN.
@@ -47,10 +47,23 @@ function sessionSecret(): Buffer | null {
   return s ? Buffer.from(s, "utf8") : null;
 }
 
-function agentPubkey(): Buffer | null {
-  const h = process.env.SPELLBOOK_AGENT_PUBKEY;
-  if (!h || !/^[0-9a-fA-F]{64}$/.test(h)) return null;
-  return Buffer.from(h, "hex");
+/**
+ * Authorized agent public keys: comma-separated 64-hex-char Ed25519 keys.
+ * Any agent holding one of the matching private keys can log in via the
+ * challenge-response path. To onboard a new agent, append its public key
+ * and redeploy. (The singular SPELLBOOK_AGENT_PUBKEY is still honored as
+ * a fallback for the first key.)
+ */
+function agentPubkeys(): Buffer[] {
+  const raw =
+    process.env.SPELLBOOK_AGENT_PUBKEYS ??
+    process.env.SPELLBOOK_AGENT_PUBKEY ??
+    "";
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => /^[0-9a-fA-F]{64}$/.test(s))
+    .map((s) => Buffer.from(s, "hex"));
 }
 
 /** Wrap a raw 32-byte Ed25519 public key in SPKI DER for Node's crypto. */
@@ -96,7 +109,7 @@ interface ChallengePayload {
 /** Mint a server-bound challenge. Null when agent login isn't configured. */
 export function mintChallenge(): Challenge | null {
   const secret = sessionSecret();
-  if (!secret || !agentPubkey()) return null;
+  if (!secret || agentPubkeys().length === 0) return null;
   const now = Date.now();
   const payload: ChallengePayload = {
     v: 1,
@@ -115,24 +128,24 @@ export function mintChallenge(): Challenge | null {
 
 /**
  * Verify a {challenge, signature} pair. The signature must be a 128-hex-char
- * Ed25519 signature over the exact challenge string, from the configured
- * agent public key.
+ * Ed25519 signature over the exact challenge string, from one of the
+ * configured agent public keys. Returns the index of the matching key, or -1.
  */
 export function verifyChallengeSignature(
   challenge: string,
   signatureHex: string
-): boolean {
+): number {
   const secret = sessionSecret();
-  const pubkey = agentPubkey();
-  if (!secret || !pubkey) return false;
-  if (typeof challenge !== "string" || challenge.length > 512) return false;
-  if (!/^[0-9a-fA-F]{128}$/.test(signatureHex)) return false;
+  const pubkeys = agentPubkeys();
+  if (!secret || pubkeys.length === 0) return -1;
+  if (typeof challenge !== "string" || challenge.length > 512) return -1;
+  if (!/^[0-9a-fA-F]{128}$/.test(signatureHex)) return -1;
 
   const dot = challenge.lastIndexOf(".");
-  if (dot <= 0) return false;
+  if (dot <= 0) return -1;
   const body = challenge.slice(0, dot);
   const mac = challenge.slice(dot + 1);
-  if (!safeEqualHex(mac.toLowerCase(), hmacHex(secret, body))) return false;
+  if (!safeEqualHex(mac.toLowerCase(), hmacHex(secret, body))) return -1;
 
   let payload: ChallengePayload;
   try {
@@ -140,7 +153,7 @@ export function verifyChallengeSignature(
       Buffer.from(body, "base64url").toString("utf8")
     ) as ChallengePayload;
   } catch {
-    return false;
+    return -1;
   }
   if (
     payload.v !== 1 ||
@@ -148,31 +161,31 @@ export function verifyChallengeSignature(
     typeof payload.exp !== "number" ||
     Date.now() > payload.exp
   ) {
-    return false;
+    return -1;
   }
 
   pruneSeen();
-  if (seenNonces.has(payload.nonce)) return false; // replay
+  if (seenNonces.has(payload.nonce)) return -1; // replay
 
-  let ok = false;
-  try {
-    const key = createPublicKey({
-      key: spkiDer(pubkey),
-      format: "der",
-      type: "spki",
-    });
-    ok = verify(
-      null,
-      Buffer.from(challenge, "utf8"),
-      key,
-      Buffer.from(signatureHex, "hex")
-    );
-  } catch {
-    return false;
+  // The signature is valid if it verifies against ANY authorized key.
+  const msg = Buffer.from(challenge, "utf8");
+  const sig = Buffer.from(signatureHex, "hex");
+  for (let i = 0; i < pubkeys.length; i++) {
+    try {
+      const key = createPublicKey({
+        key: spkiDer(pubkeys[i]),
+        format: "der",
+        type: "spki",
+      });
+      if (verify(null, msg, key, sig)) {
+        seenNonces.set(payload.nonce, payload.exp);
+        return i;
+      }
+    } catch {
+      // try the next key
+    }
   }
-  if (!ok) return false;
-  seenNonces.set(payload.nonce, payload.exp);
-  return true;
+  return -1;
 }
 
 /* ---------------- sessions ---------------- */
@@ -239,7 +252,7 @@ export function viewerTokenValid(token: string): boolean {
 /** True when at least one login path is fully configured. */
 export function authConfigured(): { agent: boolean; viewer: boolean } {
   return {
-    agent: sessionSecret() !== null && agentPubkey() !== null,
+    agent: sessionSecret() !== null && agentPubkeys().length > 0,
     viewer:
       sessionSecret() !== null && !!process.env.SPELLBOOK_VIEWER_TOKEN,
   };

@@ -23,15 +23,17 @@ an API for agent software, not for this browser.
 - `/dashboard` — read-only **testnet** holdings dashboard behind a real
   login gate with two paths: **agent challenge-sign** (the server issues
   a 5-minute HMAC-bound challenge; the agent signs it with its Ed25519
-  identity key; the server verifies against `SPELLBOOK_AGENT_PUBKEY`)
-  and **human viewer token** (timing-safe check against
-  `SPELLBOOK_VIEWER_TOKEN`). Success sets a signed, httpOnly session
-  cookie; both `/dashboard` and `/api/holdings` require it. Portfolio tab
-  reads live testnet balances from `/api/holdings` (Robinhood Chain
-  testnet, Base Sepolia, ETH Sepolia, Solana devnet, Chia testnet11) for
-  the fixed drill addresses in `lib/chains.ts`; Networks tab toggles which
-  networks display; Queue and Activity tabs are labeled demo/sample
-  content in v1 (the local daemon isn't reachable from the hosted site).
+  identity key; the server verifies the signature against any key in the
+  `SPELLBOOK_AGENT_PUBKEYS` allowlist) and **human viewer token**
+  (timing-safe check against `SPELLBOOK_VIEWER_TOKEN`). Any agent whose
+  public key is listed can log in — to onboard a new agent, append its
+  key and redeploy. Success sets a signed, httpOnly session cookie; both
+  `/dashboard` and `/api/holdings` require it. Portfolio tab reads live
+  testnet balances from `/api/holdings` (Robinhood Chain testnet, Base
+  Sepolia, ETH Sepolia, Solana devnet, Chia testnet11) for the fixed drill
+  addresses in `lib/chains.ts`; Networks tab toggles which networks
+  display; Queue and Activity tabs are labeled demo/sample content in v1
+  (the local daemon isn't reachable from the hosted site).
 
 ## Environment variables (Speechless sets at deploy time)
 
@@ -49,9 +51,11 @@ Dashboard auth (all server-only — never exposed to client JS):
 
 - `SPELLBOOK_SESSION_SECRET` — random 32+ bytes, hex (e.g.
   `openssl rand -hex 32`). Signs challenges and session cookies.
-- `SPELLBOOK_AGENT_PUBKEY` — the agent's Ed25519 public key, 64 hex chars.
-  The agent signs login challenges with the matching private key, which
-  never leaves the agent's machine.
+- `SPELLBOOK_AGENT_PUBKEYS` — comma-separated allowlist of agent Ed25519
+  public keys, 64 hex chars each. Any agent holding a matching private key
+  can log in via the challenge-response path; append a new agent's key and
+  redeploy to onboard it. (The singular `SPELLBOOK_AGENT_PUBKEY` is still
+  honored as a fallback.)
 - `SPELLBOOK_VIEWER_TOKEN` — the human read-only viewer token (generate
   with `openssl rand -hex 32`; share with the human out of band).
 

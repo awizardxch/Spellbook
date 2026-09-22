@@ -33,7 +33,8 @@ export async function POST(req: Request): Promise<NextResponse> {
   if (typeof challenge !== "string" || typeof signature !== "string") {
     return NextResponse.json({ error: "bad request" }, { status: 400 });
   }
-  if (!verifyChallengeSignature(challenge, signature)) {
+  const keyIndex = verifyChallengeSignature(challenge, signature);
+  if (keyIndex < 0) {
     return NextResponse.json(
       { error: "invalid challenge or signature" },
       { status: 401 }
@@ -46,7 +47,7 @@ export async function POST(req: Request): Promise<NextResponse> {
       { status: 503 }
     );
   }
-  const res = NextResponse.json({ ok: true, role: "agent" });
+  const res = NextResponse.json({ ok: true, role: "agent", keyIndex });
   res.headers.set("Set-Cookie", sessionCookie(session));
   return res;
 }
