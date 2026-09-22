@@ -6,13 +6,19 @@
 //   short-lived challenge bound with an HMAC (no server-side nonce store
 //   needed, so it works on stateless serverless). The agent signs the full
 //   challenge string with its Ed25519 identity key and POSTs
-//   {challenge, signature} to /api/auth/verify. The server checks the HMAC
-//   (proves it issued the challenge and it hasn't expired), enforces
-//   best-effort single-use, and verifies the Ed25519 signature against
-//   any key in SPELLBOOK_AGENT_PUBKEYS.
+//   {challenge, signature, pubkey, addresses} to /api/auth/verify. The
+//   server checks the HMAC (proves it issued the challenge and it hasn't
+//   expired), enforces best-effort single-use, and verifies the Ed25519
+//   signature against the pubkey the agent presented (self-asserted
+//   identity — any agent that installed the Spellbook can log in; no
+//   server-side key allowlist). The session carries the agent's own
+//   watch addresses, so each agent sees their OWN wallet — never the
+//   operator's. The signature proves key ownership; the addresses are
+//   self-asserted public data (holdings are public chain reads).
 //
 //   Path B — human viewer token. POST /api/auth/viewer {token} compares
-//   (timing-safe) against SPELLBOOK_VIEWER_TOKEN.
+//   (timing-safe) against SPELLBOOK_VIEWER_TOKEN. Viewer sessions see the
+//   operator's configured drill addresses (lib/chains.ts).
 //
 // Success mints a signed session cookie (HMAC with SPELLBOOK_SESSION_SECRET,
 // httpOnly). /dashboard renders the gate or the dashboard based on the
@@ -35,9 +41,55 @@ const CHALLENGE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 export type Role = "agent" | "viewer";
 
+/** Watch addresses an agent asserts at login. At least one is required. */
+export interface AgentAddresses {
+  evm?: string;
+  solana?: string;
+  chia?: string;
+}
+
+const EVM_RE = /^0x[0-9a-fA-F]{40}$/;
+const SOLANA_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+const CHIA_RE = /^(txch1|xch1)[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+$/;
+
+/**
+ * Validate agent-supplied watch addresses. Returns the normalized set,
+ * or null when missing/invalid. Holdings are public chain data, so these
+ * are self-asserted — the checks here are format-only.
+ */
+export function parseAgentAddresses(input: unknown): AgentAddresses | null {
+  if (typeof input !== "object" || input === null) return null;
+  const rec = input as Record<string, unknown>;
+  const out: AgentAddresses = {};
+  if (rec.evm !== undefined) {
+    if (typeof rec.evm !== "string" || !EVM_RE.test(rec.evm.trim()))
+      return null;
+    out.evm = rec.evm.trim();
+  }
+  if (rec.solana !== undefined) {
+    if (typeof rec.solana !== "string" || !SOLANA_RE.test(rec.solana.trim()))
+      return null;
+    out.solana = rec.solana.trim();
+  }
+  if (rec.chia !== undefined) {
+    if (
+      typeof rec.chia !== "string" ||
+      !CHIA_RE.test(rec.chia.trim().toLowerCase())
+    )
+      return null;
+    out.chia = rec.chia.trim().toLowerCase();
+  }
+  if (!out.evm && !out.solana && !out.chia) return null;
+  return out;
+}
+
 export interface Session {
   role: Role;
   exp: number;
+  /** agent identity (role === "agent" only): self-asserted Ed25519 pubkey */
+  pubkey?: string;
+  /** agent's own watch addresses (role === "agent" only) */
+  addresses?: AgentAddresses;
 }
 
 /* ---------------- configuration ---------------- */
@@ -47,24 +99,7 @@ function sessionSecret(): Buffer | null {
   return s ? Buffer.from(s, "utf8") : null;
 }
 
-/**
- * Authorized agent public keys: comma-separated 64-hex-char Ed25519 keys.
- * Any agent holding one of the matching private keys can log in via the
- * challenge-response path. To onboard a new agent, append its public key
- * and redeploy. (The singular SPELLBOOK_AGENT_PUBKEY is still honored as
- * a fallback for the first key.)
- */
-function agentPubkeys(): Buffer[] {
-  const raw =
-    process.env.SPELLBOOK_AGENT_PUBKEYS ??
-    process.env.SPELLBOOK_AGENT_PUBKEY ??
-    "";
-  return raw
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => /^[0-9a-fA-F]{64}$/.test(s))
-    .map((s) => Buffer.from(s, "hex"));
-}
+/* ---------------- challenges (Path A) ---------------- */
 
 /** Wrap a raw 32-byte Ed25519 public key in SPKI DER for Node's crypto. */
 function spkiDer(raw: Buffer): Buffer {
@@ -106,10 +141,10 @@ interface ChallengePayload {
   exp: number;
 }
 
-/** Mint a server-bound challenge. Null when agent login isn't configured. */
+/** Mint a server-bound challenge. Null when sessions aren't configured. */
 export function mintChallenge(): Challenge | null {
   const secret = sessionSecret();
-  if (!secret || agentPubkeys().length === 0) return null;
+  if (!secret) return null;
   const now = Date.now();
   const payload: ChallengePayload = {
     v: 1,
@@ -127,25 +162,27 @@ export function mintChallenge(): Challenge | null {
 }
 
 /**
- * Verify a {challenge, signature} pair. The signature must be a 128-hex-char
- * Ed25519 signature over the exact challenge string, from one of the
- * configured agent public keys. Returns the index of the matching key, or -1.
+ * Verify a {challenge, signature, pubkey} triple. The signature must be a
+ * 128-hex-char Ed25519 signature over the exact challenge string, made by
+ * the presented 64-hex-char pubkey (self-asserted agent identity — any
+ * agent that installed the Spellbook can log in).
  */
 export function verifyChallengeSignature(
   challenge: string,
-  signatureHex: string
-): number {
+  signatureHex: string,
+  pubkeyHex: string
+): boolean {
   const secret = sessionSecret();
-  const pubkeys = agentPubkeys();
-  if (!secret || pubkeys.length === 0) return -1;
-  if (typeof challenge !== "string" || challenge.length > 512) return -1;
-  if (!/^[0-9a-fA-F]{128}$/.test(signatureHex)) return -1;
+  if (!secret) return false;
+  if (typeof challenge !== "string" || challenge.length > 512) return false;
+  if (!/^[0-9a-fA-F]{128}$/.test(signatureHex)) return false;
+  if (!/^[0-9a-fA-F]{64}$/.test(pubkeyHex)) return false;
 
   const dot = challenge.lastIndexOf(".");
-  if (dot <= 0) return -1;
+  if (dot <= 0) return false;
   const body = challenge.slice(0, dot);
   const mac = challenge.slice(dot + 1);
-  if (!safeEqualHex(mac.toLowerCase(), hmacHex(secret, body))) return -1;
+  if (!safeEqualHex(mac.toLowerCase(), hmacHex(secret, body))) return false;
 
   let payload: ChallengePayload;
   try {
@@ -153,7 +190,7 @@ export function verifyChallengeSignature(
       Buffer.from(body, "base64url").toString("utf8")
     ) as ChallengePayload;
   } catch {
-    return -1;
+    return false;
   }
   if (
     payload.v !== 1 ||
@@ -161,31 +198,32 @@ export function verifyChallengeSignature(
     typeof payload.exp !== "number" ||
     Date.now() > payload.exp
   ) {
-    return -1;
+    return false;
   }
 
   pruneSeen();
-  if (seenNonces.has(payload.nonce)) return -1; // replay
+  if (seenNonces.has(payload.nonce)) return false; // replay
 
-  // The signature is valid if it verifies against ANY authorized key.
-  const msg = Buffer.from(challenge, "utf8");
-  const sig = Buffer.from(signatureHex, "hex");
-  for (let i = 0; i < pubkeys.length; i++) {
-    try {
-      const key = createPublicKey({
-        key: spkiDer(pubkeys[i]),
-        format: "der",
-        type: "spki",
-      });
-      if (verify(null, msg, key, sig)) {
-        seenNonces.set(payload.nonce, payload.exp);
-        return i;
-      }
-    } catch {
-      // try the next key
-    }
+  // Verify the signature against the agent-presented public key.
+  let ok = false;
+  try {
+    const key = createPublicKey({
+      key: spkiDer(Buffer.from(pubkeyHex, "hex")),
+      format: "der",
+      type: "spki",
+    });
+    ok = verify(
+      null,
+      Buffer.from(challenge, "utf8"),
+      key,
+      Buffer.from(signatureHex, "hex")
+    );
+  } catch {
+    return false;
   }
-  return -1;
+  if (!ok) return false;
+  seenNonces.set(payload.nonce, payload.exp);
+  return true;
 }
 
 /* ---------------- sessions ---------------- */
@@ -195,12 +233,24 @@ interface SessionPayload {
   role: Role;
   iat: number;
   exp: number;
+  pubkey?: string;
+  addresses?: AgentAddresses;
 }
 
-/** Mint a signed session cookie value. Null when sessions aren't configured. */
-export function mintSession(role: Role): string | null {
+export interface AgentIdentity {
+  pubkey: string;
+  addresses: AgentAddresses;
+}
+
+/**
+ * Mint a signed session cookie value. Agent sessions carry the agent's
+ * self-asserted identity (pubkey + own watch addresses). Null when
+ * sessions aren't configured.
+ */
+export function mintSession(role: Role, agent?: AgentIdentity): string | null {
   const secret = sessionSecret();
   if (!secret) return null;
+  if (role === "agent" && !agent) return null;
   const now = Date.now();
   const payload: SessionPayload = {
     v: 1,
@@ -208,6 +258,10 @@ export function mintSession(role: Role): string | null {
     iat: now,
     exp: now + SESSION_MAX_AGE * 1000,
   };
+  if (agent) {
+    payload.pubkey = agent.pubkey.toLowerCase();
+    payload.addresses = agent.addresses;
+  }
   const body = Buffer.from(JSON.stringify(payload), "utf8").toString(
     "base64url"
   );
@@ -231,7 +285,20 @@ export function readSession(cookieValue: string | undefined): Session | null {
     if (payload.role !== "agent" && payload.role !== "viewer") return null;
     if (typeof payload.exp !== "number" || Date.now() > payload.exp)
       return null;
-    return { role: payload.role, exp: payload.exp };
+    const session: Session = { role: payload.role, exp: payload.exp };
+    if (payload.role === "agent") {
+      // Identity was validated at login; re-check shapes defensively.
+      if (
+        typeof payload.pubkey !== "string" ||
+        !/^[0-9a-f]{64}$/.test(payload.pubkey)
+      )
+        return null;
+      const addresses = parseAgentAddresses(payload.addresses);
+      if (!addresses) return null;
+      session.pubkey = payload.pubkey;
+      session.addresses = addresses;
+    }
+    return session;
   } catch {
     return null;
   }
@@ -251,8 +318,10 @@ export function viewerTokenValid(token: string): boolean {
 
 /** True when at least one login path is fully configured. */
 export function authConfigured(): { agent: boolean; viewer: boolean } {
+  // The agent path needs no per-agent server config: any agent that
+  // installed the Spellbook logs in with its own key + addresses.
   return {
-    agent: sessionSecret() !== null && agentPubkeys().length > 0,
+    agent: sessionSecret() !== null,
     viewer:
       sessionSecret() !== null && !!process.env.SPELLBOOK_VIEWER_TOKEN,
   };

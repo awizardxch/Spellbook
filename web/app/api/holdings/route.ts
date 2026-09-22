@@ -7,8 +7,12 @@
 
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { CHAINS, CHIA_PUZZLE_HASH, type ChainConfig } from "@/lib/chains";
-import { SESSION_COOKIE, readSession } from "@/lib/auth";
+import {
+  CHAINS,
+  chiaAddressToPuzzleHash,
+  type ChainConfig,
+} from "@/lib/chains";
+import { SESSION_COOKIE, readSession, type Session } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -149,7 +153,10 @@ interface RelayCoin {
   spent_height?: unknown;
 }
 
-async function readChia(cfg: ChainConfig): Promise<ChainHolding> {
+async function readChia(
+  cfg: ChainConfig,
+  puzzleHash: string | null
+): Promise<ChainHolding> {
   const base = holdingBase(cfg);
   const relayUrl =
     process.env.NEXT_PUBLIC_RELAY_URL ??
@@ -157,6 +164,9 @@ async function readChia(cfg: ChainConfig): Promise<ChainHolding> {
   const token = process.env.SPELLBOOK_RELAY_TOKEN;
   if (!token) {
     return { ...base, balance: null, error: "relay not configured" };
+  }
+  if (!puzzleHash) {
+    return { ...base, balance: null, error: "invalid chia address" };
   }
   try {
     const json = (await fetchJson(`${relayUrl}/v1/coins`, {
@@ -166,7 +176,7 @@ async function readChia(cfg: ChainConfig): Promise<ChainHolding> {
         Authorization: `Bearer ${token}`,
       },
       // The relay requires the body to be EXACTLY {"puzzle_hashes": [...]}.
-      body: JSON.stringify({ puzzle_hashes: [CHIA_PUZZLE_HASH] }),
+      body: JSON.stringify({ puzzle_hashes: [puzzleHash] }),
     })) as { ok?: unknown; coins?: unknown };
     if (json.ok !== true || !Array.isArray(json.coins))
       throw new Error("unexpected relay response");
@@ -196,19 +206,46 @@ export async function GET(): Promise<NextResponse> {
   if (!session) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
-  const chains = await Promise.all(
-    CHAINS.map((cfg) => {
+  const chains = chainsForSession(session);
+  const holdings = await Promise.all(
+    chains.map((cfg) => {
       switch (cfg.kind) {
         case "evm":
           return readEvm(cfg);
         case "solana":
           return readSolana(cfg);
         case "chia":
-          return readChia(cfg);
+          return readChia(cfg, chiaAddressToPuzzleHash(cfg.address));
       }
     })
   );
   // A failed chain returns { balance: null, error } — never fails the
   // whole response.
-  return NextResponse.json({ chains });
+  return NextResponse.json({ chains: holdings });
+}
+
+/**
+ * Resolve which chains (and whose addresses) this session may see.
+ * Viewers see the operator's configured drill addresses; agents see
+ * ONLY the watch addresses they asserted at login — never the
+ * operator's.
+ */
+function chainsForSession(session: Session): ChainConfig[] {
+  if (session.role === "viewer") return CHAINS;
+  const addrs = session.addresses ?? {};
+  const out: ChainConfig[] = [];
+  if (addrs.evm) {
+    for (const cfg of CHAINS) {
+      if (cfg.kind === "evm") out.push({ ...cfg, address: addrs.evm as string });
+    }
+  }
+  if (addrs.solana) {
+    const cfg = CHAINS.find((c) => c.kind === "solana");
+    if (cfg) out.push({ ...cfg, address: addrs.solana });
+  }
+  if (addrs.chia) {
+    const cfg = CHAINS.find((c) => c.kind === "chia");
+    if (cfg) out.push({ ...cfg, address: addrs.chia });
+  }
+  return out;
 }

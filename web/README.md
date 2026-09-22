@@ -23,17 +23,20 @@ an API for agent software, not for this browser.
 - `/dashboard` — read-only **testnet** holdings dashboard behind a real
   login gate with two paths: **agent challenge-sign** (the server issues
   a 5-minute HMAC-bound challenge; the agent signs it with its Ed25519
-  identity key; the server verifies the signature against any key in the
-  `SPELLBOOK_AGENT_PUBKEYS` allowlist) and **human viewer token**
-  (timing-safe check against `SPELLBOOK_VIEWER_TOKEN`). Any agent whose
-  public key is listed can log in — to onboard a new agent, append its
-  key and redeploy. Success sets a signed, httpOnly session cookie; both
-  `/dashboard` and `/api/holdings` require it. Portfolio tab reads live
-  testnet balances from `/api/holdings` (Robinhood Chain testnet, Base
-  Sepolia, ETH Sepolia, Solana devnet, Chia testnet11) for the fixed drill
-  addresses in `lib/chains.ts`; Networks tab toggles which networks
-  display; Queue and Activity tabs are labeled demo/sample content in v1
-  (the local daemon isn't reachable from the hosted site).
+  identity key and presents its public key plus its own watch addresses;
+  the server verifies the signature against the presented key) and
+  **human viewer token** (timing-safe check against
+  `SPELLBOOK_VIEWER_TOKEN`). Any agent that installed the Spellbook can
+  log in — no pre-registration. Agent sessions are bound to the
+  agent&apos;s own addresses, so each agent sees <em>their</em> wallet;
+  viewer sessions see the operator&apos;s configured drill addresses.
+  Success sets a signed, httpOnly session cookie; both `/dashboard`
+  and `/api/holdings` require it. Portfolio tab reads live testnet
+  balances from `/api/holdings` (Robinhood Chain testnet, Base Sepolia,
+  ETH Sepolia, Solana devnet, Chia testnet11); Networks tab toggles
+  which networks display; Queue and Activity tabs are labeled
+  demo/sample content in v1 (the local daemon isn&apos;t reachable from
+  the hosted site).
 
 ## Environment variables (Speechless sets at deploy time)
 
@@ -50,14 +53,13 @@ an API for agent software, not for this browser.
 Dashboard auth (all server-only — never exposed to client JS):
 
 - `SPELLBOOK_SESSION_SECRET` — random 32+ bytes, hex (e.g.
-  `openssl rand -hex 32`). Signs challenges and session cookies.
-- `SPELLBOOK_AGENT_PUBKEYS` — comma-separated allowlist of agent Ed25519
-  public keys, 64 hex chars each. Any agent holding a matching private key
-  can log in via the challenge-response path; append a new agent's key and
-  redeploy to onboard it. (The singular `SPELLBOOK_AGENT_PUBKEY` is still
-  honored as a fallback.)
+  `openssl rand -hex 32`). Signs challenges and session cookies. The only
+  secret the agent path needs — there is no per-agent key config; any
+  agent that installed the Spellbook logs in with its own key and its
+  own watch addresses.
 - `SPELLBOOK_VIEWER_TOKEN` — the human read-only viewer token (generate
-  with `openssl rand -hex 32`; share with the human out of band).
+  with `openssl rand -hex 32`; share with the human out of band). Viewer
+  sessions see the operator&apos;s drill addresses in `lib/chains.ts`.
 
 When `SPELLBOOK_SESSION_SECRET` is unset, both login paths report
 "not configured" and the gate stays closed. Each path also degrades
