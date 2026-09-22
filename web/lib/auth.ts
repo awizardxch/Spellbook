@@ -41,16 +41,50 @@ const CHALLENGE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 export type Role = "agent" | "viewer";
 
-/** Watch addresses an agent asserts at login. At least one is required. */
+/** Maximum watch addresses per chain an agent may bind at login. */
+export const MAX_WATCH_ADDRESSES = 100;
+
+/**
+ * Watch addresses an agent asserts at login, in the agent's own
+ * derivation order (e.g. the label order from `spellbook addresses`).
+ * At least one address across all chains is required.
+ */
 export interface AgentAddresses {
-  evm?: string;
-  solana?: string;
-  chia?: string;
+  evm?: string[];
+  solana?: string[];
+  chia?: string[];
 }
 
 const EVM_RE = /^0x[0-9a-fA-F]{40}$/;
 const SOLANA_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const CHIA_RE = /^(txch1|xch1)[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+$/;
+
+/** Normalize a single chain's input: one address string or an array of
+ * them. Returns the trimmed list, or null when empty/oversized. */
+function addressList(value: unknown): string[] | null {
+  const items = Array.isArray(value) ? value : [value];
+  if (items.length === 0 || items.length > MAX_WATCH_ADDRESSES) return null;
+  const out: string[] = [];
+  for (const item of items) {
+    if (typeof item !== "string") return null;
+    const t = item.trim();
+    if (!t) return null;
+    out.push(t);
+  }
+  return out;
+}
+
+/** Drop duplicates (case-insensitive for EVM hex), keeping first-seen
+ * order — the agent's derivation order. */
+function dedupe(list: string[], foldCase: boolean): string[] {
+  const seen = new Set<string>();
+  return list.filter((s) => {
+    const k = foldCase ? s.toLowerCase() : s;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
 
 /**
  * Validate agent-supplied watch addresses. Returns the normalized set,
@@ -62,22 +96,20 @@ export function parseAgentAddresses(input: unknown): AgentAddresses | null {
   const rec = input as Record<string, unknown>;
   const out: AgentAddresses = {};
   if (rec.evm !== undefined) {
-    if (typeof rec.evm !== "string" || !EVM_RE.test(rec.evm.trim()))
-      return null;
-    out.evm = rec.evm.trim();
+    const list = addressList(rec.evm);
+    if (!list || !list.every((a) => EVM_RE.test(a))) return null;
+    out.evm = dedupe(list, true);
   }
   if (rec.solana !== undefined) {
-    if (typeof rec.solana !== "string" || !SOLANA_RE.test(rec.solana.trim()))
-      return null;
-    out.solana = rec.solana.trim();
+    const list = addressList(rec.solana);
+    if (!list || !list.every((a) => SOLANA_RE.test(a))) return null;
+    out.solana = dedupe(list, false);
   }
   if (rec.chia !== undefined) {
-    if (
-      typeof rec.chia !== "string" ||
-      !CHIA_RE.test(rec.chia.trim().toLowerCase())
-    )
+    const list = addressList(rec.chia);
+    if (!list || !list.every((a) => CHIA_RE.test(a.toLowerCase())))
       return null;
-    out.chia = rec.chia.trim().toLowerCase();
+    out.chia = dedupe(list.map((a) => a.toLowerCase()), false);
   }
   if (!out.evm && !out.solana && !out.chia) return null;
   return out;

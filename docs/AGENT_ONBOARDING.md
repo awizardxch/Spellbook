@@ -233,15 +233,26 @@ Base: the operator's dashboard deployment, e.g.
    sets an httpOnly session cookie (12h) and returns
    `{ ok, role: "agent", pubkey, addresses, expiresAt }`.
    - `pubkey`: 64 hex chars (your Ed25519 public key).
-   - `addresses`: at least one of `{ evm, solana, chia }`.
-     - `evm`: `0x` + 40 hex — queried on Robinhood testnet, Base
-       Sepolia, and ETH Sepolia.
-     - `solana`: base58 — queried on Solana devnet.
-     - `chia`: `txch1…` / `xch1…` bech32m — queried on Chia testnet11
-       via the relay.
-4. `GET /api/holdings` with the session cookie →
-   `{ networks: [...] }` — live testnet balances for **your**
-   addresses only.
+   - `addresses`: at least one address, as **arrays** in your
+     derivation order — `{ evm: [...], solana: [...], chia: [...] }`
+     (a single string per chain is also accepted and treated as a
+     one-element array). Up to 100 addresses per chain.
+     - `evm`: `0x` + 40 hex each — queried on Robinhood testnet,
+       Base Sepolia, and ETH Sepolia.
+     - `solana`: base58 each — queried on Solana devnet.
+     - `chia`: `txch1…` / `xch1…` bech32m each — queried on Chia
+       testnet11 via the relay.
+   - Where the addresses come from: your local daemon derives them
+     read-only — `spellbook addresses` returns
+     `{label: {chain: address}}`. Submit the addresses in label
+     order; the dashboard never sees seeds or private keys.
+4. `GET /api/holdings?depth=N` with the session cookie →
+   `{ chains: [...] }` — live testnet balances for **your**
+   addresses only. Each chain reports its per-address balances plus
+   the exact total across the addresses that loaded:
+   `{ id, label, unit, watchAddresses, total, addresses: [{ address, balance }] }`.
+   - `depth` caps how many derivation addresses per chain are
+     queried (1–100). Omit it to query all bound addresses.
 5. `POST /api/auth/logout` → clears the session.
 
 Without a session, `/api/holdings` returns `401`.
@@ -277,8 +288,8 @@ CH=$(curl -s $BASE/api/auth/challenge | python3 -c "import json,sys; print(json.
 # sign $CH locally -> $SIG (128 hex), then:
 curl -s -c jar.txt -b jar.txt -X POST $BASE/api/auth/verify \
   -H 'Content-Type: application/json' \
-  -d "{\"challenge\":\"$CH\",\"signature\":\"$SIG\",\"pubkey\":\"$PUBKEY\",\"addresses\":{\"evm\":\"$EVM\",\"solana\":\"$SOL\",\"chia\":\"$CHIA\"}}"
-curl -s -b jar.txt $BASE/api/holdings | python3 -m json.tool | head -40
+  -d "{\"challenge\":\"$CH\",\"signature\":\"$SIG\",\"pubkey\":\"$PUBKEY\",\"addresses\":{\"evm\":[\"$EVM\"],\"solana\":[\"$SOL\"],\"chia\":[\"$CHIA\"]}}"
+curl -s -b jar.txt "$BASE/api/holdings?depth=5" | python3 -m json.tool | head -60
 curl -s -b jar.txt -X POST $BASE/api/auth/logout
 ```
 
