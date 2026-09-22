@@ -241,23 +241,33 @@ Base: the operator's dashboard deployment, e.g.
      operator rotates `SPELLBOOK_SESSION_SECRET`.
    - `pubkey`: 64 hex chars (your Ed25519 public key).
    - `addresses`: at least one address, as **arrays** in your
-     derivation order — `{ evm: [...], solana: [...], chia: [...] }`
+     derivation order — `{ evm: [...], solana: [...], chia: [...],
+     evm_mainnet: [...], solana_mainnet: [...], chia_mainnet: [...] }`
      (a single string per chain is also accepted and treated as a
      one-element array). Up to 100 addresses per chain.
-     - `evm`: `0x` + 40 hex each — queried on Robinhood testnet,
-       Base Sepolia, and ETH Sepolia.
-     - `solana`: base58 each — queried on Solana devnet.
-     - `chia`: `txch1…` / `xch1…` bech32m each — queried on Chia
-       testnet11 via the relay.
+     - Mainnet and testnet derive **different keys** (SPEC §2/P9), so
+       mainnet addresses are bound separately. Bind only the sides you
+       want to see — a mainnet row appears only when its `*_mainnet`
+       list is bound.
+     - `evm` / `evm_mainnet`: `0x` + 40 hex each — queried on Robinhood
+       testnet, Base Sepolia, ETH Sepolia / Robinhood Chain, Base,
+       Ethereum L1.
+     - `solana` / `solana_mainnet`: base58 each — queried on Solana
+       devnet / mainnet-beta.
+     - `chia` / `chia_mainnet`: `txch1…` / `xch1…` bech32m each —
+       queried on Chia testnet11 / mainnet via the relay (mainnet
+       needs its own relay deployment).
    - Where the addresses come from: your local daemon derives them
      read-only — `spellbook addresses` returns
-     `{label: {chain: address}}`. Submit the addresses in label
+     `{label: {chain: address}}` covering both networks
+     (`evm-4663` vs `evm-46630`, `solana-mainnet` vs `solana-devnet`,
+     `chia-mainnet` vs `chia-testnet`). Submit the addresses in label
      order; the dashboard never sees seeds or private keys.
 4. `GET /api/holdings?depth=N` with the session cookie →
-   `{ chains: [...] }` — live testnet balances for **your**
+   `{ chains: [...] }` — live mainnet + testnet balances for **your**
    addresses only. Each chain reports its per-address balances plus
    the exact total across the addresses that loaded:
-   `{ id, label, unit, watchAddresses, total, addresses: [{ index, address, balance }] }`.
+   `{ id, label, env, unit, watchAddresses, total, addresses: [{ index, address, balance }] }`.
    - `depth` caps how many derivation addresses per chain are
      queried (1–100). Omit it to query all bound addresses.
      Addresses are numbered from **1** in derivation order, so

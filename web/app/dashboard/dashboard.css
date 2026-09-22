@@ -223,6 +223,17 @@
   font-size: 1.3rem;
 }
 
+.dash-mainnet {
+  color: #fbbf24;
+  text-shadow: 0 0 12px rgba(251, 191, 36, 0.5);
+  font-size: 1.3rem;
+}
+
+.dash-modesep {
+  color: var(--faint);
+  font-size: 1.1rem;
+}
+
 .dash-tablewrap {
   overflow-x: auto;
 }
@@ -494,6 +505,49 @@
   left: 22px;
   background: #22d3ee;
   box-shadow: 0 0 10px rgba(34, 211, 238, 0.8);
+}
+
+/* Per-network mainnet / testnet toggle pairs */
+.dash-netenvs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: none;
+}
+
+.dash-netenv {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.dash-netenv.off {
+  opacity: 0.55;
+}
+
+.dash-envtag {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--card-border);
+  min-width: 74px;
+  text-align: center;
+  flex: none;
+}
+
+.dash-env-mainnet {
+  color: #fbbf24;
+  border-color: rgba(251, 191, 36, 0.45);
+  background: rgba(251, 191, 36, 0.08);
+}
+
+.dash-env-testnet {
+  color: #22d3ee;
+  border-color: rgba(34, 211, 238, 0.45);
+  background: rgba(34, 211, 238, 0.08);
 }
 
 /* ---------- queue ---------- */
