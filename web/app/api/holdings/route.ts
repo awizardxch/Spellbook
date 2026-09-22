@@ -1,10 +1,9 @@
 // Server-only read-only holdings proxy for /dashboard.
 //
 // GET fans out to public mainnet + testnet RPCs and the operator's Chia
-// relay(s) and returns normalized balances. Relay bearer tokens
-// (SPELLBOOK_RELAY_TOKEN, SPELLBOOK_RELAY_TOKEN_MAINNET) never leave the
-// server. Strictly read-only: no broadcast, no signing, no write
-// endpoints are ever called from here.
+// relay and returns normalized balances. The relay Bearer <redacted>
+// (SPELLBOOK_RELAY_TOKEN) never leaves the server. Strictly read-only:
+// no broadcast, no signing, no write endpoints are ever called from here.
 //
 // Multi-address: each chain carries the session's bound watch addresses
 // (up to 100 per chain, in the agent's derivation order). Mainnet and
@@ -275,21 +274,13 @@ async function readChiaBatch(
   const valid = pairs.filter(
     (p): p is { address: string; puzzleHash: string } => p.puzzleHash !== null
   );
-  // The relay is single-network. Testnet uses the existing relay URL;
-  // mainnet needs its own relay deployment, configured explicitly —
-  // there is no default, so an unconfigured mainnet relay degrades to
-  // "relay not configured" on the Chia mainnet row instead of silently
-  // reading the wrong network.
+  // One relay deployment serves both Chia networks (PR #14): the request
+  // selects the pool with the "network" body key. No separate mainnet
+  // relay URL is needed.
   const relayUrl =
-    cfg.env === "mainnet"
-      ? process.env.SPELLBOOK_RELAY_URL_MAINNET
-      : (process.env.NEXT_PUBLIC_RELAY_URL ??
-        "https://spellbook-production.up.railway.app");
-  const token =
-    cfg.env === "mainnet"
-      ? (process.env.SPELLBOOK_RELAY_TOKEN_MAINNET ??
-        process.env.SPELLBOOK_RELAY_TOKEN)
-      : process.env.SPELLBOOK_RELAY_TOKEN;
+    process.env.NEXT_PUBLIC_RELAY_URL ??
+    "https://spellbook-production.up.railway.app";
+  const token = process.env.SPELLBOOK_RELAY_TOKEN;
   if (!relayUrl || !token) {
     return batchError(addresses, "relay not configured");
   }
@@ -308,10 +299,14 @@ async function readChiaBatch(
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
-      // The relay requires the body to be EXACTLY {"puzzle_hashes": [...]}.
+      // The relay takes an optional "network" selector alongside
+      // puzzle_hashes (one deployment serves testnet11 + mainnet).
       // Coins come back tagged with their puzzle_hash, so one call
       // covers every address.
-      body: JSON.stringify({ puzzle_hashes: valid.map((p) => p.puzzleHash) }),
+      body: JSON.stringify({
+        puzzle_hashes: valid.map((p) => p.puzzleHash),
+        network: cfg.env === "mainnet" ? "mainnet" : "testnet11",
+      }),
     })) as { ok?: unknown; coins?: unknown };
     if (json.ok !== true || !Array.isArray(json.coins))
       throw new Error("unexpected relay response");
