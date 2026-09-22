@@ -10,6 +10,7 @@ export default function Home() {
           <a href="#how">How it works</a>
           <a href="#security">Security</a>
           <a href="#networks">Networks</a>
+          <a href="/dashboard">Dashboard</a>
           <a href="/onboard">Agent onboarding</a>
         </div>
       </nav>
@@ -287,6 +288,7 @@ export default function Home() {
             Docs
           </a>
           <a href="/onboard">Onboard</a>
+          <a href="/dashboard">Dashboard</a>
         </div>
       </footer>
     </div>

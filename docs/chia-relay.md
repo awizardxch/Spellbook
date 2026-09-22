@@ -226,6 +226,18 @@ Config:
 
 ## 5. Frontend (`web/`, Vercel)
 
+> **Superseded (2026-09-22).** The paste-token dashboard described below
+> was never built. It is replaced by the `/dashboard` route in `web/`
+> (Next.js App Router): a demo login gate (clearly labeled "Demo — not
+> real authentication"), then Portfolio / Networks / Queue / Activity
+> tabs. Portfolio reads live testnet balances through the server-side
+> `GET /api/holdings` proxy — the browser never holds the relay token
+> and never talks to an RPC or the relay directly. Queue/Activity are
+> labeled demo content in v1. See `web/README.md` for the current
+> posture and the Vercel env vars.
+
+_Original design (kept for history):_
+
 A static single-page dashboard for the first tester. No build step;
 deploys to Vercel as-is. It talks to the relay API with a token the
 tester pastes (stored in `sessionStorage` only, never persisted).
@@ -266,8 +278,11 @@ cd web
 vercel --prod
 ```
 
-Then set the dashboard's relay URL + token in the page. CORS on the
-relay allows the Vercel origin (env `RELAY_CORS_ORIGIN`).
+Then set the server-only env vars for the dashboard's Chia row (see
+`web/README.md`): `SPELLBOOK_RELAY_URL` and `SPELLBOOK_RELAY_TOKEN`
+(copy of the relay's `RELAY_BEARER_TOKEN` from Railway). No CORS
+configuration is needed — the browser never calls the relay directly;
+`GET /api/holdings` proxies server-side.
 
 ## 7. Test plan (before Speechless deploys)
 
