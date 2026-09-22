@@ -6,7 +6,9 @@ export const dynamic = "force-dynamic";
 /**
  * GET /api/auth/challenge — mint a short-lived login challenge for the
  * agent path. The agent signs the returned `challenge` string with its
- * Ed25519 identity key and POSTs {challenge, signature} to /api/auth/verify.
+ * Ed25519 identity key and POSTs
+ * {challenge, signature, pubkey, addresses} to /api/auth/verify, where
+ * addresses are the agent's own watch addresses {evm?, solana?, chia?}.
  */
 export async function GET(): Promise<NextResponse> {
   const c = mintChallenge();

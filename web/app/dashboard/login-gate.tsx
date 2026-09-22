@@ -14,7 +14,11 @@ export default function LoginGate() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [challenge, setChallenge] = useState("");
   const [expiresAt, setExpiresAt] = useState(0);
+  const [pubkey, setPubkey] = useState("");
   const [signature, setSignature] = useState("");
+  const [evm, setEvm] = useState("");
+  const [solana, setSolana] = useState("");
+  const [chia, setChia] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -50,12 +54,18 @@ export default function LoginGate() {
     setBusy(true);
     setError(null);
     try {
+      const addresses: Record<string, string> = {};
+      if (evm.trim()) addresses.evm = evm.trim();
+      if (solana.trim()) addresses.solana = solana.trim();
+      if (chia.trim()) addresses.chia = chia.trim();
       const res = await fetch("/api/auth/verify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           challenge,
           signature: signature.trim().toLowerCase(),
+          pubkey: pubkey.trim().toLowerCase(),
+          addresses,
         }),
       });
       const json = (await res.json()) as { ok?: boolean; error?: string };
@@ -111,10 +121,11 @@ export default function LoginGate() {
           Spellbook <span className="dash-wordmark">dashboard</span>
         </h1>
         <p className="lede">
-          Read-only testnet holdings. Pick how you sign in — the agent path
-          uses a real challenge-response signature, the human path uses a
-          read-only viewer token. Neither path can approve, sign, or
-          broadcast anything.
+          Read-only testnet holdings. Agents sign in with a real
+          challenge-response signature and see their <em>own</em> wallet;
+          humans use a read-only viewer token to see the
+          operator&apos;s. Neither path can approve, sign, or broadcast
+          anything.
         </p>
       </header>
 
@@ -127,10 +138,12 @@ export default function LoginGate() {
             {phase === "idle" && (
               <>
                 <p>
-                  The server issues a short-lived challenge. Sign it locally
-                  with the agent&apos;s Ed25519 identity key and paste the
-                  signature below — the server verifies it against the
-                  configured agent public key.
+                  Any agent that installed the Spellbook can sign in — no
+                  pre-registration. The server issues a short-lived
+                  challenge; sign it locally with your Ed25519 identity
+                  key, then enter your public key, your signature, and
+                  your own watch addresses. You&apos;ll see{" "}
+                  <em>your</em> wallet, never the operator&apos;s.
                 </p>
                 <button
                   className="btn"
@@ -155,6 +168,18 @@ export default function LoginGate() {
                   rows={3}
                   onFocus={(e) => e.target.select()}
                 />
+                <label className="dash-label" htmlFor="dash-pubkey">
+                  Your Ed25519 public key (64 hex chars)
+                </label>
+                <input
+                  id="dash-pubkey"
+                  className="dash-input"
+                  value={pubkey}
+                  onChange={(e) => setPubkey(e.target.value)}
+                  placeholder="paste public key…"
+                  autoComplete="off"
+                  spellCheck={false}
+                />
                 <label className="dash-label" htmlFor="dash-sig">
                   Ed25519 signature (128 hex chars)
                 </label>
@@ -167,12 +192,58 @@ export default function LoginGate() {
                   autoComplete="off"
                   spellCheck={false}
                 />
+                <p className="dash-note" style={{ marginTop: 12 }}>
+                  Your watch addresses — at least one. The dashboard shows
+                  holdings for these addresses only.
+                </p>
+                <label className="dash-label" htmlFor="dash-evm">
+                  EVM address (0x… — Robinhood testnet, Base &amp; ETH
+                  Sepolia)
+                </label>
+                <input
+                  id="dash-evm"
+                  className="dash-input"
+                  value={evm}
+                  onChange={(e) => setEvm(e.target.value)}
+                  placeholder="0x…"
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <label className="dash-label" htmlFor="dash-sol">
+                  Solana address (devnet, base58)
+                </label>
+                <input
+                  id="dash-sol"
+                  className="dash-input"
+                  value={solana}
+                  onChange={(e) => setSolana(e.target.value)}
+                  placeholder="base58…"
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <label className="dash-label" htmlFor="dash-chia">
+                  Chia address (txch1… / xch1…, testnet11)
+                </label>
+                <input
+                  id="dash-chia"
+                  className="dash-input"
+                  value={chia}
+                  onChange={(e) => setChia(e.target.value)}
+                  placeholder="txch1…"
+                  autoComplete="off"
+                  spellCheck={false}
+                />
                 <div className="dash-formrow">
                   <button
                     className="btn"
                     type="button"
                     onClick={verifySignature}
-                    disabled={busy || signature.trim().length === 0}
+                    disabled={
+                      busy ||
+                      signature.trim().length === 0 ||
+                      pubkey.trim().length === 0 ||
+                      (!evm.trim() && !solana.trim() && !chia.trim())
+                    }
                   >
                     {busy ? "Verifying…" : "Verify & enter →"}
                   </button>
