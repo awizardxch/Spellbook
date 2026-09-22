@@ -73,7 +73,14 @@ export async function POST(req: Request): Promise<NextResponse> {
       { status: 503 }
     );
   }
-  const res = NextResponse.json({ ok: true, role: "agent" });
+  const now = Date.now();
+  const res = NextResponse.json({
+    ok: true,
+    role: "agent",
+    pubkey: pubkey.trim().toLowerCase(),
+    addresses: parsed,
+    expiresAt: now + SESSION_MAX_AGE * 1000,
+  });
   res.headers.set("Set-Cookie", sessionCookie(session));
   return res;
 }

@@ -200,3 +200,94 @@ any import by comparing the shown addresses.
 - Agent quickstart (daemon client): `docs/agent-quickstart.md`
 - Relay internals: `relay/README.md`
 - Spec: `SPEC_V1.md`
+
+## 8. Dashboard API (agent sign-in)
+
+The holdings dashboard (`/dashboard` on the operator's deployment) is
+read-only testnet data. **There is no agent login form** — agents
+authenticate programmatically. Any agent that installed the Spellbook can
+sign in with its own Ed25519 identity key; no pre-registration, no
+allowlist. Each agent session is bound to the agent's **own** watch
+addresses and sees only its own wallet. (Humans use a viewer token in the
+browser; that path is not for agents.)
+
+Auth model: the server issues a short-lived, single-use challenge; you
+sign the exact challenge string locally and POST the signature with your
+public key and addresses. The server verifies the signature against the
+**presented** public key — the signature proves possession of the key,
+not membership in any list.
+
+### Endpoints
+
+Base: the operator's dashboard deployment, e.g.
+`https://spellbook.awizard.dev`.
+
+1. `GET /api/auth/challenge` → `{ challenge, expiresAt }`
+   - `challenge` is a `<base64url>.<hmac>` string. Sign it **verbatim**.
+   - Valid 5 minutes, single use (replay rejected).
+2. Sign `challenge` as UTF-8 bytes with your Ed25519 identity key.
+   The private key never leaves your machine — only the 64-byte
+   signature (128 hex chars) is sent.
+3. `POST /api/auth/verify`
+   `{ challenge, signature, pubkey, addresses }` →
+   sets an httpOnly session cookie (12h) and returns
+   `{ ok, role: "agent", pubkey, addresses, expiresAt }`.
+   - `pubkey`: 64 hex chars (your Ed25519 public key).
+   - `addresses`: at least one of `{ evm, solana, chia }`.
+     - `evm`: `0x` + 40 hex — queried on Robinhood testnet, Base
+       Sepolia, and ETH Sepolia.
+     - `solana`: base58 — queried on Solana devnet.
+     - `chia`: `txch1…` / `xch1…` bech32m — queried on Chia testnet11
+       via the relay.
+4. `GET /api/holdings` with the session cookie →
+   `{ networks: [...] }` — live testnet balances for **your**
+   addresses only.
+5. `POST /api/auth/logout` → clears the session.
+
+Without a session, `/api/holdings` returns `401`.
+
+### Signing examples
+
+Node (no dependencies):
+
+```js
+import { createPrivateKey, sign } from "node:crypto";
+// seed: your 32-byte Ed25519 seed (never transmitted anywhere)
+const seed = Buffer.from(process.env.MY_ED25519_SEED_HEX, "hex");
+const pkcs8 = Buffer.concat([
+  Buffer.from("302e020100300506032b657004220420", "hex"), seed,
+]);
+const key = createPrivateKey({ key: pkcs8, format: "der", type: "pkcs8" });
+const signatureHex = sign(null, Buffer.from(challenge, "utf8"), key).toString("hex");
+```
+
+Python (`cryptography` package):
+
+```python
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(seed_hex))
+signature_hex = key.sign(challenge.encode("utf-8")).hex()
+```
+
+### curl cookbook
+
+```bash
+BASE=https://spellbook.awizard.dev
+CH=$(curl -s $BASE/api/auth/challenge | python3 -c "import json,sys; print(json.load(sys.stdin)['challenge'])")
+# sign $CH locally -> $SIG (128 hex), then:
+curl -s -c jar.txt -b jar.txt -X POST $BASE/api/auth/verify \
+  -H 'Content-Type: application/json' \
+  -d "{\"challenge\":\"$CH\",\"signature\":\"$SIG\",\"pubkey\":\"$PUBKEY\",\"addresses\":{\"evm\":\"$EVM\",\"solana\":\"$SOL\",\"chia\":\"$CHIA\"}}"
+curl -s -b jar.txt $BASE/api/holdings | python3 -m json.tool | head -40
+curl -s -b jar.txt -X POST $BASE/api/auth/logout
+```
+
+Notes:
+
+- The session cookie is `HttpOnly; SameSite=Lax` (12h). Keep the
+  cookie jar; every `/api/holdings` call needs it.
+- Challenges expire after 5 minutes and each nonce is accepted once —
+  if verify returns `invalid challenge, signature, or public key`,
+  fetch a fresh challenge and sign again; never reuse a signature.
+- The dashboard is strictly read-only: it cannot approve, sign,
+  broadcast, or mint anything, for either role.
