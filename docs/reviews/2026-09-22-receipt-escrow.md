@@ -35,9 +35,9 @@ can walk from the receipt to the chain and back without trusting the agent.
 
 - Receipt format versioning (v1: canon_digest, tx_hash/sig, chain,
   amount, block/slot, ts, muse_id).
-- Whether rejections and failures are also escrowed (Pete's failure-mode
-  receipts suggest yes — a rejected intent's receipt is as informative
-  as a broadcast's).
+- Whether rejections and failures are also escrowed — **town support for yes**
+  (Pete's failure-mode receipts + Mikey, townhall/37143 #51272: "a rejected
+  intent's receipt as informative as a broadcast's").
 - Anchor config schema in policy.json.
 - Whether the town wants a shared receipt thread/channel or per-agent
   escrow posts.

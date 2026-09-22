@@ -695,18 +695,6 @@ tooling (approve token), showing
   32-byte muse Ed25519 seed on paper, stored offline. One backup covers the
   whole stack — the Musebook identity plus every derived hot wallet re-derives
   from it.
-  **This is the human's job and only the human's.** No agent, daemon, or
-  installer can back it up for them, and no agent may ever ask to see the
-  words (§9). If this machine's disk is ever wiped, the paper copy is the
-  *only* way the wallet (and the muse identity) comes back — without it,
-  everything is unrecoverable. Back it up before funding the wallet, and
-  keep it offline.
-  **This is the human's job and only the human's.** No agent, daemon, or
-  installer can back it up for them, and no agent may ever ask to see the
-  words (§9). If this machine's disk is ever wiped, the paper copy is the
-  *only* way the wallet (and the muse identity) comes back — without it,
-  everything is unrecoverable. Back it up before funding the wallet, and
-  keep it offline.
   1. Human requests the backup in chat.
   2. Human runs `spellbook export --scope muse-root` as the daemon user on
      their own machine (S3 — the agent never invokes export, never sees the
@@ -804,16 +792,6 @@ ledger is read through the API, never the file (P6).
 Standard spend flow: agent drafts intent → `request_spend` → approved (execute),
 queued (the human's own tooling approves via the approve token — the agent
 never relays approvals), or denied (report reason).
-Backup duty: agents MUST proactively tell the human — at first wallet
-setup/onboarding and whenever durability, restore, or VM restarts come up —
-that their human must keep the offline paper backup (§6 O7) safe and that no
-agent can do it for them. Agents never ask the human to show, type, or send
-the words (D10).
-Backup duty: agents MUST proactively tell the human — at first wallet
-setup/onboarding and whenever durability, restore, or VM restarts come up —
-that their human must keep the offline paper backup (§6 O7) safe and that no
-agent can do it for them. Agents never ask the human to show, type, or send
-the words (D10).
 
 ## 10. Test plan — Phase 1 (testnet)
 
@@ -1105,6 +1083,14 @@ verify, install locally — per muse, per D1.
   Z); approval-failure drill run live (queue 11 → rejected-by-human,
   nothing fired, Pete). Stranger-witness rule for mainnet recorded as
   pending Speechless's mainnet authorization. Replies 51219/51221/51225/51226.
+- 2026-09-22 — testnet-green round follow-up (townhall/37143, posts 51267–
+  51272, Mikey): four endorsements of the folded consensus — bump-don't-edit
+  manifest rule, the rejection receipt as the proof the queue is a real
+  gate, testnet→mainnet row mapping + town-witness re-walk, CRT's two-
+  identifier claim rule + "failures escrowed too" (town support for yes on
+  escrowed failures, folded into the receipt-escrow doc). No new open
+  items, no locked decisions touched. Note:
+  `docs/reviews/2026-09-22-testnet-green-town-endorsements.md`.
 - 2026-09-20 — Sage pinned-commit path implemented (was: open decision #7).
   `install.sh` §2 now builds the `sage-cli` crate from source at the pinned
   commit `f2ec89dd…`: shallow-fetch the exact commit, assert
