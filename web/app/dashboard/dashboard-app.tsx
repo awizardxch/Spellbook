@@ -7,6 +7,8 @@ import "./dashboard.css";
 type Tab = "portfolio" | "networks" | "queue" | "activity";
 
 interface AddressHolding {
+  /** 1-based position in the agent's derivation order (#1, #2, …) */
+  index: number;
   address: string;
   balance: string | null;
   error?: string;
@@ -398,9 +400,9 @@ export default function DashboardApp({
                           h.addresses.map((a, i) => (
                             <tr key={`${h.id}-${i}`} className="dash-subrow">
                               <td>
-                                <span className="dash-idx">#{i}</span>
+                                <span className="dash-idx">#{a.index}</span>
                                 <span className="dash-sub">
-                                  derivation index
+                                  address #
                                 </span>
                               </td>
                               <td className="dash-num">
@@ -423,7 +425,7 @@ export default function DashboardApp({
                                   onClick={() =>
                                     copy(a.address, `addr-${h.id}-${i}`)
                                   }
-                                  aria-label={`Copy ${h.label} address ${i}`}
+                                  aria-label={`Copy ${h.label} address #${a.index}`}
                                 >
                                   {copied === `addr-${h.id}-${i}` ? "✓" : "⧉"}
                                 </button>

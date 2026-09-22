@@ -7,8 +7,9 @@
 //
 // Multi-address: each chain carries the session's bound watch addresses
 // (up to 100 per chain, in the agent's derivation order). ?depth=N caps
-// how many are queried (default: all bound). Every chain reports its
-// per-address balances plus the exact total across the addresses that
+// how many are queried (default: all bound) — depth=N queries addresses
+// #1–#N. Every chain reports its per-address balances (each tagged with
+// its 1-based `index`) plus the exact total across the addresses that
 // loaded.
 
 import { NextResponse } from "next/server";
@@ -32,6 +33,12 @@ const TIMEOUT_MS = 8000;
 const MAX_DEPTH = 100;
 
 export interface AddressHolding {
+  /**
+   * 1-based position in the agent's derivation order — address #1, #2, ….
+   * Key derivation itself stays 0-based; this is the human-facing lookup
+   * index, stable for a given bound address list. `depth=N` queries #1–#N.
+   */
+  index: number;
   address: string;
   /** human-readable balance in `unit`, or null when this address failed */
   balance: string | null;
@@ -147,7 +154,12 @@ interface RpcResultItem {
 }
 
 function batchError(addresses: string[], err: string): AddressHolding[] {
-  return addresses.map((address) => ({ address, balance: null, error: err }));
+  return addresses.map((address, i) => ({
+    index: i + 1,
+    address,
+    balance: null,
+    error: err,
+  }));
 }
 
 async function readEvmBatch(
@@ -172,6 +184,7 @@ async function readEvmBatch(
       const item = items.find((r) => r.id === i);
       if (!item || typeof item.result !== "string") {
         return {
+          index: i + 1,
           address,
           balance: null,
           error: item?.error?.message ?? "unexpected rpc response",
@@ -179,6 +192,7 @@ async function readEvmBatch(
       }
       try {
         return {
+          index: i + 1,
           address,
           balance: formatDecimalUnits(
             hexToDecimalString(item.result),
@@ -186,7 +200,12 @@ async function readEvmBatch(
           ),
         };
       } catch {
-        return { address, balance: null, error: "bad balance value" };
+        return {
+          index: i + 1,
+          address,
+          balance: null,
+          error: "bad balance value",
+        };
       }
     });
   } catch (e) {
@@ -217,12 +236,14 @@ async function readSolanaBatch(
       const value = (item?.result as { value?: unknown } | undefined)?.value;
       if (typeof value !== "number") {
         return {
+          index: i + 1,
           address,
           balance: null,
           error: item?.error?.message ?? "unexpected rpc response",
         };
       }
       return {
+        index: i + 1,
         address,
         balance: formatDecimalUnits(String(Math.trunc(value)), cfg.decimals),
       };
@@ -257,7 +278,8 @@ async function readChiaBatch(
     return batchError(addresses, "relay not configured");
   }
   if (valid.length === 0) {
-    return pairs.map(({ address }) => ({
+    return pairs.map(({ address }, i) => ({
+      index: i + 1,
       address,
       balance: null,
       error: "invalid chia address",
@@ -291,11 +313,17 @@ async function readChiaBatch(
         (mojosByHash.get(coin.puzzle_hash) ?? 0) + coin.amount_mojos
       );
     }
-    return pairs.map(({ address, puzzleHash }) => {
+    return pairs.map(({ address, puzzleHash }, i) => {
       if (!puzzleHash) {
-        return { address, balance: null, error: "invalid chia address" };
+        return {
+          index: i + 1,
+          address,
+          balance: null,
+          error: "invalid chia address",
+        };
       }
       return {
+        index: i + 1,
         address,
         balance: formatDecimalUnits(
           String(Math.trunc(mojosByHash.get(puzzleHash) ?? 0)),
