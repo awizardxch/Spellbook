@@ -52,6 +52,8 @@ body {
 .app-shell {
   position: relative;
   z-index: 1;
+  overflow-x: hidden;
+  overflow-x: clip;
   min-height: 100vh;
   min-height: 100dvh;
 }
@@ -102,7 +104,62 @@ a:hover {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 22px 0 14px;
+  gap: 16px;
+  padding: 22px 0 18px;
+  margin-bottom: 6px;
+  position: relative;
+}
+
+/* The Forge's header band: a thin cyan rule with a soft glow under it, the
+ * full width of the window. The nav sits in the centred column, so the band is
+ * a full-bleed pseudo-element -- on the nav itself the glow boxed its sides in.
+ * .app-shell clips the 100vw overhang (100vw counts the scrollbar). The nav is
+ * also the top circuit rail (data-circuit-rail) on every page. */
+.nav::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 100vw;
+  transform: translateX(-50%);
+  border-bottom: 1px solid rgba(34, 211, 238, 0.25);
+  box-shadow: 0 0 20px 5px rgba(0, 213, 255, 0.35);
+  pointer-events: none;
+}
+
+.nav .brand {
+  flex-shrink: 0;
+}
+
+/* Bars that must stay on one line and cannot always fit one -- the nav links
+ * and the dashboard tabs, on a phone. Ported from the Forge (chia-cfmm
+ * src/App.css): wrapping would move the item you were aiming at, so the row
+ * scrolls sideways instead, with the scrollbar hidden (it sits under a glow
+ * where a gutter looks like a mistake; drag, wheel and keyboard still work).
+ * overscroll-behavior keeps a swipe off the end from becoming a navigation. */
+.bar-scroll {
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+
+.bar-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.bar-scroll > * {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* the Forge's wordmark: cyan with a glow, same on every page */
+.brand-name {
+  color: #22d3ee;
+  text-shadow: 0 0 12px rgba(0, 213, 255, 0.6);
 }
 
 .brand {

@@ -4,9 +4,9 @@ export default function Home() {
       <nav className="nav" data-circuit-rail="navigation">
         <a className="brand" href="/">
           <span className="brand-mark">🪄</span>
-          Spellbook
+          <span className="brand-name">Spellbook</span>
         </a>
-        <div className="nav-links">
+        <div className="nav-links bar-scroll">
           <a href="#how">How it works</a>
           <a href="#security">Security</a>
           <a href="#networks">Networks</a>

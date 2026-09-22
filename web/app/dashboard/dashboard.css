@@ -7,7 +7,8 @@
  * - Main panels: constant soft electric-cyan halo (always on).
  * - Cards: dim border by default; on :hover the Forge's glow -- cyan border,
  *   ember + cyan halo, 0.2s -- shared with every page (globals.css).
- * - Header: thin cyan glow band + cyan text-shadow on the wordmark.
+ * - Header: thin cyan glow band + cyan text-shadow on the wordmark -- now
+ *   shared by every page (.nav and .brand-name in globals.css).
  * - Glow color is cyan (#00d5ff–#22d3ee) only; ember/violet stay as accents.
  */
 
@@ -43,13 +44,7 @@
   gap: 18px;
 }
 
-/* ---------- header glow band (forge: box-shadow 0 0 20px 5px cyan) ---------- */
-.dash-nav {
-  border-bottom: 1px solid rgba(34, 211, 238, 0.25);
-  box-shadow: 0 0 20px 5px rgba(0, 213, 255, 0.35);
-  padding-bottom: 18px;
-  margin-bottom: 6px;
-}
+/* header glow band and wordmark: shared by every page's .nav, in globals.css */
 
 .dash-session {
   font-size: 0.82rem;
@@ -165,7 +160,8 @@
   display: flex;
   gap: 6px;
   margin-top: 18px;
-  border-bottom: 1px solid rgba(139, 92, 246, 0.2);
+  /* the second circuit rail (data-circuit-rail="tabs"), as on the Forge */
+  border-bottom: 1px solid rgba(34, 211, 238, 0.2);
 }
 
 .dash-tab {
@@ -189,7 +185,8 @@
 
 .dash-tab.active {
   color: var(--text);
-  border-bottom-color: var(--accent);
+  border-bottom-color: #22d3ee;
+  text-shadow: 0 0 10px rgba(0, 213, 255, 0.45);
 }
 
 .dash-badge {
