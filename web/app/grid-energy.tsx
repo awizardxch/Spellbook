@@ -13,14 +13,26 @@
  * panel; Spellbook has no tabs, so the whole .app-shell is the board, and the
  * cards are this site's own classes (CHIP_SELECTOR). Rails are still any
  * element marked data-circuit-rail -- here, each page's <nav>.
+ *
+ * The board lives in PAGE coordinates, not viewport ones. The Forge's pages
+ * barely scroll, so it lays the circuit out against the viewport and redoes it
+ * on every scroll event; on a long Spellbook page that re-snapped every trace
+ * to the grid and re-measured it to the window edges each frame, so the traces
+ * jumped and stretched while the cards slid past. Here the layout runs only
+ * when the layout changes, and a scroll just repaints the same board shifted
+ * by scrollY. The dot grid scrolls with the page (globals.css), so dots,
+ * traces and cards move as one sheet.
  */
 
 import { useEffect, useRef } from "react";
 
 type Point = { x: number; y: number };
 type ChipBounds = { left: number; top: number; width: number; height: number };
-type PulseKind = 'grid' | 'circuit';
+type PulseKind = "grid" | "circuit";
 type Pulse = { paths: Point[][]; born: number; duration: number; interactive: boolean; kind: PulseKind };
+// One recorded stroke or dot on the board, with its vertical extent so a
+// repaint only replays what is on screen.
+type BoardItem = { top: number; bottom: number; paint: (target: CanvasRenderingContext2D) => void };
 
 const GRID_SIZE = 28;
 const GRID_OFFSET = GRID_SIZE / 2;
@@ -28,6 +40,8 @@ const GRID_OFFSET = GRID_SIZE / 2;
 // between the nav rail and the cards, and traces must route around the words.
 const CHIP_SELECTOR = ".glass, .callout, .dash-panel, .dash-card, .glow-shell, .glow-card, .hero, .dash-hero, .section-head, .footer";
 const QUIET_SELECTOR = `button, a, input, textarea, select, [role="dialog"], [role="tab"], ${CHIP_SELECTOR}`;
+const TRACE = "rgba(42, 157, 184, 0.22)";
+const TRACE_LIT = "rgba(90, 203, 220, 0.4)";
 const snap = (value: number) => Math.round((value - GRID_OFFSET) / GRID_SIZE) * GRID_SIZE + GRID_OFFSET;
 
 export function GridEnergy() {
@@ -36,14 +50,17 @@ export function GridEnergy() {
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    const context = canvas?.getContext('2d');
+    const context = canvas?.getContext("2d");
     const circuit = circuitRef.current;
-    const board = circuit?.getContext('2d');
+    const board = circuit?.getContext("2d");
     if (!canvas || !context || !circuit || !board) return;
 
-    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    // Viewport size (the canvases are fixed to it) and page height (the board).
     let width = 0;
     let height = 0;
+    let pageHeight = 0;
+    let pixelRatio = 1;
     let frame = 0;
     let lastFrame = 0;
     let nextAmbient = 0;
@@ -52,18 +69,52 @@ export function GridEnergy() {
     let pendingPointer: Point | null = null;
     let pulses: Pulse[] = [];
     let routes: Point[][] = [];
+    let items: BoardItem[] = [];
     let layoutFrame = 0;
-    let layoutSignature = '';
+    let paintFrame = 0;
+    let layoutSignature = "";
     let chipElements: Element[] = [];
     let chipBounds: ChipBounds[] = [];
 
+    // Page-space rows currently on screen, with a little slack for glow.
+    const viewTop = () => window.scrollY - GRID_SIZE;
+    const viewBottom = () => window.scrollY + height + GRID_SIZE;
+
+    // Punch every on-screen chip out of the drawable area. Expects the target
+    // already translated into page space.
     const maskChips = (target: CanvasRenderingContext2D) => {
+      const top = viewTop();
+      const bottom = viewBottom();
       for (const chip of chipBounds) {
+        if (chip.top + chip.height < top || chip.top > bottom) continue;
         target.beginPath();
-        target.rect(0, 0, width, height);
+        target.rect(0, top, width, bottom - top);
         target.rect(chip.left, chip.top, chip.width, chip.height);
-        target.clip('evenodd');
+        target.clip("evenodd");
       }
+    };
+
+    const toPageSpace = (target: CanvasRenderingContext2D) => {
+      target.setTransform(pixelRatio, 0, 0, pixelRatio, 0, -window.scrollY * pixelRatio);
+    };
+
+    const paintBoard = () => {
+      board.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+      board.clearRect(0, 0, width, height);
+      toPageSpace(board);
+      board.save();
+      maskChips(board);
+      const top = viewTop();
+      const bottom = viewBottom();
+      for (const item of items) {
+        if (item.bottom >= top && item.top <= bottom) item.paint(board);
+      }
+      board.restore();
+    };
+
+    const record = (points: Point[], paint: BoardItem["paint"]) => {
+      const ys = points.map(point => point.y);
+      items.push({ top: Math.min(...ys) - 4, bottom: Math.max(...ys) + 4, paint });
     };
 
     const drawRoute = (corners: Point[]) => {
@@ -80,15 +131,21 @@ export function GridEnergy() {
         }
       }
       routes.push(route);
-      board.beginPath();
-      board.moveTo(route[0].x, route[0].y);
-      for (const point of route.slice(1)) board.lineTo(point.x, point.y);
-      board.stroke();
+      record(route, target => {
+        target.strokeStyle = TRACE;
+        target.lineWidth = 1;
+        target.lineJoin = "round";
+        target.beginPath();
+        target.moveTo(route[0].x, route[0].y);
+        for (const point of route.slice(1)) target.lineTo(point.x, point.y);
+        target.stroke();
+      });
       return route;
     };
 
-    const resize = () => {
+    const layout = () => {
       const bounds = canvas.getBoundingClientRect();
+      const scrollY = window.scrollY;
       const panel = document.querySelector(".app-shell");
       const candidates = Array.from(panel?.querySelectorAll(CHIP_SELECTOR) ?? []).filter(element => {
         const rect = element.getBoundingClientRect();
@@ -102,38 +159,47 @@ export function GridEnergy() {
         if (!chipElements.includes(element)) layoutObserver.observe(element);
       }
       chipElements = nextChips;
-      const chips = chipElements.map(element => element.getBoundingClientRect()).filter(rect => rect.width > 0 && rect.height > 0);
-      const rails = Array.from(document.querySelectorAll('[data-circuit-rail]')).map(element => {
+      // Everything below is in page space: viewport rect plus scrollY, which
+      // does not change as the page scrolls.
+      const chips = chipElements
+        .map(element => element.getBoundingClientRect())
+        .filter(rect => rect.width > 0 && rect.height > 0)
+        .map(rect => ({ left: rect.left - bounds.left, top: rect.top + scrollY, width: rect.width, height: rect.height }));
+      const rails = Array.from(document.querySelectorAll("[data-circuit-rail]")).map(element => {
         const rect = element.getBoundingClientRect();
-        return { left: rect.left - bounds.left, right: rect.right - bounds.left, y: rect.bottom - bounds.top + 1 };
+        return { left: rect.left - bounds.left, right: rect.right - bounds.left, y: rect.bottom + scrollY + 1 };
       });
-      width = bounds.width;
-      height = bounds.height;
-      const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
-      const signature = [width, height, pixelRatio, chips.length, ...chips.flatMap(chip => [chip.left, chip.top, chip.width, chip.height]), ...rails.flatMap(rail => [rail.left, rail.right, rail.y])].join(':');
+      const nextRatio = Math.min(window.devicePixelRatio || 1, 2);
+      const nextPageHeight = Math.max(document.documentElement.scrollHeight, bounds.height);
+      const round = (value: number) => Math.round(value);
+      const signature = [
+        bounds.width, bounds.height, nextPageHeight, nextRatio, chips.length,
+        ...chips.flatMap(chip => [chip.left, chip.top, chip.width, chip.height].map(round)),
+        ...rails.flatMap(rail => [rail.left, rail.right, rail.y].map(round)),
+      ].join(":");
       if (signature === layoutSignature) return;
       layoutSignature = signature;
-      canvas.width = Math.round(width * pixelRatio);
-      canvas.height = Math.round(height * pixelRatio);
-      context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-      circuit.width = canvas.width;
-      circuit.height = canvas.height;
-      board.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-      board.strokeStyle = 'rgba(42, 157, 184, 0.22)';
-      board.lineWidth = 1;
-      board.lineJoin = 'round';
+      if (bounds.width !== width || bounds.height !== height || nextRatio !== pixelRatio) {
+        width = bounds.width;
+        height = bounds.height;
+        pixelRatio = nextRatio;
+        canvas.width = Math.round(width * pixelRatio);
+        canvas.height = Math.round(height * pixelRatio);
+        circuit.width = canvas.width;
+        circuit.height = canvas.height;
+      }
+      pageHeight = nextPageHeight;
       routes = [];
+      items = [];
       pulses = [];
-      chipBounds = chips.map(chip => ({ left: chip.left - bounds.left, top: chip.top - bounds.top, width: chip.width, height: chip.height }));
-      board.save();
-      maskChips(board);
+      chipBounds = chips;
       for (const rail of rails) {
-        if (rail.y >= 0 && rail.y <= height) drawRoute([{ x: rail.left, y: rail.y }, { x: rail.right, y: rail.y }]);
+        if (rail.y >= 0 && rail.y <= pageHeight) drawRoute([{ x: rail.left, y: rail.y }, { x: rail.right, y: rail.y }]);
       }
       for (let index = 1; index < rails.length; index += 1) {
         const upper = rails[index - 1];
         const lower = rails[index];
-        if (lower.y <= upper.y || lower.y < 0 || upper.y > height) continue;
+        if (lower.y <= upper.y || lower.y < 0 || upper.y > pageHeight) continue;
         for (const direction of [-1, 1]) {
           const edge = direction < 0 ? lower.left : lower.right;
           const room = direction < 0 ? edge - upper.left : upper.right - edge;
@@ -154,7 +220,7 @@ export function GridEnergy() {
           { start: { x: left, y: top }, normal: { x: -1, y: 0 }, tangent: { x: 0, y: 1 }, extent: chip.height, space: left },
           { start: { x: right, y: top }, normal: { x: 1, y: 0 }, tangent: { x: 0, y: 1 }, extent: chip.height, space: width - right },
           { start: { x: left, y: top }, normal: { x: 0, y: -1 }, tangent: { x: 1, y: 0 }, extent: chip.width, space: upperRail ? top - upperRail.y + GRID_OFFSET : top },
-          { start: { x: left, y: bottom }, normal: { x: 0, y: 1 }, tangent: { x: 1, y: 0 }, extent: chip.width, space: height - bottom },
+          { start: { x: left, y: bottom }, normal: { x: 0, y: 1 }, tangent: { x: 1, y: 0 }, extent: chip.width, space: pageHeight - bottom },
         ];
         for (const side of sides) {
           let available = side.space - GRID_OFFSET;
@@ -217,40 +283,55 @@ export function GridEnergy() {
               connectedToRail = true;
             }
             const route = drawRoute(corners);
-            board.save();
-            board.strokeStyle = 'rgba(90, 203, 220, 0.4)';
-            board.lineWidth = 3;
-            board.beginPath();
-            board.moveTo(origin.x, origin.y);
-            board.lineTo(origin.x + side.normal.x * Math.min(9, available), origin.y + side.normal.y * Math.min(9, available));
-            board.stroke();
-            board.restore();
+            const stub = Math.min(9, available);
+            const stubEnd = { x: origin.x + side.normal.x * stub, y: origin.y + side.normal.y * stub };
+            record([origin, stubEnd], target => {
+              target.strokeStyle = TRACE_LIT;
+              target.lineWidth = 3;
+              target.beginPath();
+              target.moveTo(origin.x, origin.y);
+              target.lineTo(stubEnd.x, stubEnd.y);
+              target.stroke();
+            });
             const terminal = route[route.length - 1];
-            board.beginPath();
-            board.arc(terminal.x, terminal.y, connectedToRail || linkedChip ? 1.8 : 3.5, 0, Math.PI * 2);
-            board.fillStyle = connectedToRail || linkedChip ? 'rgba(90, 203, 220, 0.4)' : '#060810';
-            board.fill();
-            board.stroke();
+            const joined = connectedToRail || linkedChip;
+            record([terminal], target => {
+              target.strokeStyle = TRACE;
+              target.lineWidth = 1;
+              target.beginPath();
+              target.arc(terminal.x, terminal.y, joined ? 1.8 : 3.5, 0, Math.PI * 2);
+              target.fillStyle = joined ? TRACE_LIT : "#060810";
+              target.fill();
+              target.stroke();
+            });
           }
         }
       }
-      board.restore();
+      paintBoard();
     };
 
     const scheduleLayout = () => {
       if (layoutFrame) return;
       layoutFrame = window.requestAnimationFrame(() => {
         layoutFrame = 0;
-        resize();
+        layout();
+      });
+    };
+    // A scroll moves nothing on the board, so it only repaints it.
+    const schedulePaint = () => {
+      if (paintFrame) return;
+      paintFrame = window.requestAnimationFrame(() => {
+        paintFrame = 0;
+        paintBoard();
       });
     };
     const layoutObserver = new ResizeObserver(scheduleLayout);
     const panelObserver = new MutationObserver(scheduleLayout);
-    const shell = document.querySelector('.app-shell');
+    const shell = document.querySelector(".app-shell");
     if (shell) {
       layoutObserver.observe(shell);
-      for (const rail of Array.from(shell.querySelectorAll('[data-circuit-rail]'))) layoutObserver.observe(rail);
-      panelObserver.observe(shell, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-state'] });
+      for (const rail of Array.from(shell.querySelectorAll("[data-circuit-rail]"))) layoutObserver.observe(rail);
+      panelObserver.observe(shell, { childList: true, subtree: true });
     }
 
     const spawn = (origin: Point, now: number, interactive: boolean, kind: PulseKind) => {
@@ -259,7 +340,7 @@ export function GridEnergy() {
         const oldest = pulses.findIndex(pulse => pulse.interactive && pulse.kind === kind);
         pulses.splice(oldest, 1);
       }
-      if (kind === 'grid') {
+      if (kind === "grid") {
         const paths: Point[][] = [];
         const heading = Math.random() * Math.PI * 2;
         for (let branch = 0; branch < 2; branch += 1) {
@@ -272,7 +353,7 @@ export function GridEnergy() {
               x: previous.x + Math.round(Math.cos(angle)) * GRID_SIZE,
               y: previous.y + Math.round(Math.sin(angle)) * GRID_SIZE,
             };
-            if (point.x < 0 || point.x > width || point.y < 0 || point.y > height) break;
+            if (point.x < 0 || point.x > width || point.y < 0 || point.y > pageHeight) break;
             path.push(point);
           }
           paths.push(path);
@@ -280,13 +361,15 @@ export function GridEnergy() {
         pulses.push({ paths, born: now, duration: interactive ? 420 : 1800 + Math.random() * 600, interactive, kind });
         return;
       }
+      const top = window.scrollY;
+      const bottom = top + height;
       let nearestRoute: Point[] | undefined;
       let nearestIndex = 0;
       let nearestDistance = Infinity;
       for (const route of routes) {
         for (let index = 0; index < route.length; index += 1) {
           const point = route[index];
-          if (point.x < 0 || point.x > width || point.y < 0 || point.y > height) continue;
+          if (point.x < 0 || point.x > width || point.y < top || point.y > bottom) continue;
           if (chipBounds.some(chip => point.x > chip.left && point.x < chip.left + chip.width && point.y > chip.top && point.y < chip.top + chip.height)) continue;
           const distance = (point.x - origin.x) ** 2 + (point.y - origin.y) ** 2;
           if (distance < nearestDistance) {
@@ -309,27 +392,29 @@ export function GridEnergy() {
       frame = window.requestAnimationFrame(draw);
       if (now - lastFrame < 1000 / 60 - 1) return;
       lastFrame = now;
+      context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
       context.clearRect(0, 0, width, height);
       pulses = pulses.filter(pulse => now - pulse.born < pulse.duration);
       if (pendingPointer && now - lastPointerTime >= 40) {
         if (!lastPointer || Math.hypot(pendingPointer.x - lastPointer.x, pendingPointer.y - lastPointer.y) >= 8) {
-          spawn(pendingPointer, now, true, 'grid');
-          spawn(pendingPointer, now, true, 'circuit');
+          spawn(pendingPointer, now, true, "grid");
+          spawn(pendingPointer, now, true, "circuit");
           lastPointer = pendingPointer;
           lastPointerTime = now;
         }
         pendingPointer = null;
       }
       if (now >= nextAmbient) {
-        const origin = { x: Math.random() * width, y: Math.random() * height };
-        spawn(origin, now, false, 'grid');
-        spawn({ x: width - origin.x, y: Math.random() * height }, now, false, 'circuit');
+        const origin = { x: Math.random() * width, y: window.scrollY + Math.random() * height };
+        spawn(origin, now, false, "grid");
+        spawn({ x: width - origin.x, y: window.scrollY + Math.random() * height }, now, false, "circuit");
         nextAmbient = now + 1100 + Math.random() * 450;
       }
       context.save();
+      toPageSpace(context);
       maskChips(context);
-      context.lineCap = 'round';
-      context.lineJoin = 'round';
+      context.lineCap = "round";
+      context.lineJoin = "round";
       for (const pulse of pulses) {
         const progress = (now - pulse.born) / pulse.duration;
         const envelope = pulse.interactive
@@ -337,9 +422,9 @@ export function GridEnergy() {
           : Math.sin(progress * Math.PI);
         const peak = pulse.interactive ? 0.18 : 0.4;
         const reach = progress < peak ? progress / peak : (1 - progress) / (1 - peak);
-        context.strokeStyle = pulse.interactive ? '#8cefff' : '#35cce6';
-        context.fillStyle = '#b9f7ff';
-        context.shadowColor = '#00d9ff';
+        context.strokeStyle = pulse.interactive ? "#8cefff" : "#35cce6";
+        context.fillStyle = "#b9f7ff";
+        context.shadowColor = "#00d9ff";
         for (const path of pulse.paths) {
           const visible = reach * (path.length - 1);
           context.beginPath();
@@ -379,19 +464,20 @@ export function GridEnergy() {
       lastPointerTime = 0;
     };
     const onPointerMove = (event: PointerEvent) => {
-      if (reducedMotion.matches || document.hidden || event.pointerType === 'touch') return;
+      if (reducedMotion.matches || document.hidden || event.pointerType === "touch") return;
       const target = event.target;
       if (target instanceof Element && target.closest(QUIET_SELECTOR)) {
         resetPointer();
         return;
       }
-      pendingPointer = { x: event.clientX, y: event.clientY };
+      pendingPointer = { x: event.clientX, y: event.clientY + window.scrollY };
     };
 
     const syncAnimation = () => {
       window.cancelAnimationFrame(frame);
       pulses = [];
       resetPointer();
+      context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
       context.clearRect(0, 0, width, height);
       if (!reducedMotion.matches && !document.hidden) {
         nextAmbient = performance.now() + 100;
@@ -399,27 +485,28 @@ export function GridEnergy() {
       }
     };
 
-    resize();
+    layout();
     syncAnimation();
-    window.addEventListener('resize', scheduleLayout);
-    window.addEventListener('scroll', scheduleLayout, true);
-    window.addEventListener('pointermove', onPointerMove, { passive: true });
-    window.addEventListener('blur', resetPointer);
-    document.addEventListener('pointerleave', resetPointer);
-    document.addEventListener('visibilitychange', syncAnimation);
-    reducedMotion.addEventListener('change', syncAnimation);
+    window.addEventListener("resize", scheduleLayout);
+    window.addEventListener("scroll", schedulePaint, { passive: true });
+    window.addEventListener("pointermove", onPointerMove, { passive: true });
+    window.addEventListener("blur", resetPointer);
+    document.addEventListener("pointerleave", resetPointer);
+    document.addEventListener("visibilitychange", syncAnimation);
+    reducedMotion.addEventListener("change", syncAnimation);
     return () => {
       window.cancelAnimationFrame(frame);
       window.cancelAnimationFrame(layoutFrame);
+      window.cancelAnimationFrame(paintFrame);
       layoutObserver.disconnect();
       panelObserver.disconnect();
-      window.removeEventListener('resize', scheduleLayout);
-      window.removeEventListener('scroll', scheduleLayout, true);
-      window.removeEventListener('pointermove', onPointerMove);
-      window.removeEventListener('blur', resetPointer);
-      document.removeEventListener('pointerleave', resetPointer);
-      document.removeEventListener('visibilitychange', syncAnimation);
-      reducedMotion.removeEventListener('change', syncAnimation);
+      window.removeEventListener("resize", scheduleLayout);
+      window.removeEventListener("scroll", schedulePaint);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("blur", resetPointer);
+      document.removeEventListener("pointerleave", resetPointer);
+      document.removeEventListener("visibilitychange", syncAnimation);
+      reducedMotion.removeEventListener("change", syncAnimation);
     };
   }, []);
 

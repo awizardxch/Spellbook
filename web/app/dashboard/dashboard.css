@@ -5,8 +5,8 @@
  *   Pointer movement over the empty background does send pulses along the
  *   grid (grid-energy.tsx, shared by every page) -- never over a card.
  * - Main panels: constant soft electric-cyan halo (always on).
- * - Cards: dim border by default; on :hover the border goes 2px solid #22d3ee
- *   with a soft outer glow — uniform, INSTANT (no transition).
+ * - Cards: dim border by default; on :hover the Forge's glow -- cyan border,
+ *   ember + cyan halo, 0.2s -- shared with every page (globals.css).
  * - Header: thin cyan glow band + cyan text-shadow on the wordmark.
  * - Glow color is cyan (#00d5ff–#22d3ee) only; ember/violet stay as accents.
  */
@@ -118,7 +118,7 @@
   cursor: default;
 }
 
-/* ---------- cards: dim border; instant cyan border glow on hover ---------- */
+/* ---------- cards: dim border; Forge hover glow (globals.css) ---------- */
 .dash-card {
   background: var(--card);
   border: 1px solid var(--card-border);
@@ -158,14 +158,7 @@
   margin-bottom: 10px;
 }
 
-/* forge hover: 2px solid #22d3ee + 0 0 18px rgba(34,211,238,.55), instant */
-@media (hover: hover) {
-  .dash-card:hover {
-    border: 2px solid #22d3ee;
-    box-shadow: 0 0 18px rgba(34, 211, 238, 0.55);
-    padding: 21px 19px; /* compensate so the 2px border doesn't shift layout */
-  }
-}
+/* hover glow: shared with every page's containers, in globals.css */
 
 /* ---------- tabs ---------- */
 .dash-tabs {
