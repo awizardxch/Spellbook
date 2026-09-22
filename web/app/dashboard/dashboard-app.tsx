@@ -1,19 +1,27 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import { CHAINS } from "@/lib/chains";
 import "./dashboard.css";
 
 type Tab = "portfolio" | "networks" | "queue" | "activity";
 
+interface AddressHolding {
+  address: string;
+  balance: string | null;
+  error?: string;
+}
+
 interface Holding {
   id: string;
   label: string;
   detail: string;
-  address: string;
-  balance: string | null;
   unit: string;
-  error?: string;
+  /** watch addresses bound for this chain (before the depth cap) */
+  watchAddresses: number;
+  /** exact total across the addresses that loaded */
+  total: string | null;
+  addresses: AddressHolding[];
 }
 
 interface QueueIntent {
@@ -106,12 +114,23 @@ export default function DashboardApp({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [expandedChain, setExpandedChain] = useState<string | null>(null);
+  // How many derivation addresses per chain to query (1–100), persisted
+  // per browser. The API defaults to all bound addresses when omitted.
+  const [depth, setDepth] = useState<number>(() => {
+    try {
+      const v = parseInt(localStorage.getItem("spellbook-depth") ?? "", 10);
+      return v >= 1 && v <= 100 ? v : 5;
+    } catch {
+      return 5;
+    }
+  });
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (d: number) => {
     setLoading(true);
     setLoadError(null);
     try {
-      const res = await fetch("/api/holdings", { cache: "no-store" });
+      const res = await fetch(`/api/holdings?depth=${d}`, { cache: "no-store" });
       if (!res.ok) throw new Error(`holdings API returned HTTP ${res.status}`);
       const json = (await res.json()) as { chains?: Holding[] };
       setHoldings(Array.isArray(json.chains) ? json.chains : []);
@@ -123,8 +142,23 @@ export default function DashboardApp({
   }, []);
 
   useEffect(() => {
-    load();
+    load(depth);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [load]);
+
+  const changeDepth = useCallback(
+    (d: number) => {
+      const next = Math.min(Math.max(d, 1), 100);
+      setDepth(next);
+      try {
+        localStorage.setItem("spellbook-depth", String(next));
+      } catch {
+        /* storage unavailable — no-op */
+      }
+      load(next);
+    },
+    [load]
+  );
 
   const copy = useCallback(async (text: string, key: string) => {
     try {
@@ -141,7 +175,7 @@ export default function DashboardApp({
   }, []);
 
   const visible = (holdings ?? []).filter((h) => enabled[h.id]);
-  const reporting = visible.filter((h) => h.balance !== null).length;
+  const reporting = visible.filter((h) => h.total !== null).length;
   const enabledCount = CHAINS.filter((c) => enabled[c.id]).length;
   const holdingById = (id: string) => holdings?.find((h) => h.id === id);
 
@@ -213,6 +247,31 @@ export default function DashboardApp({
                 </p>
               </div>
               <div className="dash-actions">
+                <div
+                  className="dash-depth"
+                  title="How many derivation addresses per chain to query (1–100)"
+                >
+                  <span className="dash-depth-label">Addresses</span>
+                  <button
+                    className="dash-depth-btn"
+                    type="button"
+                    onClick={() => changeDepth(depth - 1)}
+                    disabled={loading || depth <= 1}
+                    aria-label="Fewer addresses"
+                  >
+                    −
+                  </button>
+                  <span className="dash-depth-num">{depth}</span>
+                  <button
+                    className="dash-depth-btn"
+                    type="button"
+                    onClick={() => changeDepth(depth + 1)}
+                    disabled={loading || depth >= 100}
+                    aria-label="More addresses"
+                  >
+                    +
+                  </button>
+                </div>
                 <button
                   className="dash-netcount"
                   type="button"
@@ -224,7 +283,7 @@ export default function DashboardApp({
                 <button
                   className="btn ghost dash-refresh"
                   type="button"
-                  onClick={load}
+                  onClick={() => load(depth)}
                   disabled={loading}
                 >
                   {loading ? "Refreshing…" : "Refresh"}
@@ -262,58 +321,124 @@ export default function DashboardApp({
                 <thead>
                   <tr>
                     <th>Network</th>
-                    <th>Balance</th>
-                    <th>Address</th>
+                    <th>Total balance</th>
+                    <th>Addresses</th>
                     <th>Status</th>
                   </tr>
                 </thead>
                 <tbody>
                   {visible.map((h) => {
                     const cfg = CHAINS.find((c) => c.id === h.id);
+                    const open = expandedChain === h.id;
+                    const firstError = h.addresses.find(
+                      (a) => a.error
+                    )?.error;
                     return (
-                      <tr key={h.id}>
-                        <td>
-                          <span
-                            className="dash-dot"
-                            style={{ background: cfg?.color ?? "#8b5cf6" }}
-                          />
-                          {h.label}
-                          <span className="dash-sub">{h.detail}</span>
-                        </td>
-                        <td className="dash-num">
-                          {h.balance !== null ? (
-                            <>
-                              {h.balance}{" "}
-                              <span className="dash-unit">{h.unit}</span>
-                            </>
-                          ) : (
-                            <span className="dash-muted">—</span>
-                          )}
-                        </td>
-                        <td>
-                          <code title={h.address}>{truncate(h.address)}</code>{" "}
-                          <button
-                            className="dash-copy"
-                            type="button"
-                            onClick={() => copy(h.address, `addr-${h.id}`)}
-                            aria-label={`Copy ${h.label} address`}
-                          >
-                            {copied === `addr-${h.id}` ? "✓" : "⧉"}
-                          </button>
-                        </td>
-                        <td>
-                          {h.balance !== null ? (
-                            <span className="dash-ok">● live</span>
-                          ) : (
+                      <Fragment key={h.id}>
+                        <tr>
+                          <td>
                             <span
-                              className="dash-warn"
-                              title={h.error ?? "unavailable"}
+                              className="dash-dot"
+                              style={{ background: cfg?.color ?? "#8b5cf6" }}
+                            />
+                            {h.label}
+                            <span className="dash-sub">{h.detail}</span>
+                          </td>
+                          <td className="dash-num">
+                            {h.total !== null ? (
+                              <>
+                                {h.total}{" "}
+                                <span className="dash-unit">{h.unit}</span>
+                              </>
+                            ) : (
+                              <span className="dash-muted">—</span>
+                            )}
+                          </td>
+                          <td>
+                            <button
+                              className="dash-addr-toggle"
+                              type="button"
+                              aria-expanded={open}
+                              onClick={() =>
+                                setExpandedChain((cur) =>
+                                  cur === h.id ? null : h.id
+                                )
+                              }
+                              title={
+                                open
+                                  ? "Hide individual addresses"
+                                  : "Show individual addresses"
+                              }
                             >
-                              ● unavailable
-                            </span>
-                          )}
-                        </td>
-                      </tr>
+                              <span className="dash-chev">
+                                {open ? "▾" : "▸"}
+                              </span>
+                              {h.addresses.length} of {h.watchAddresses}{" "}
+                              {h.watchAddresses === 1 ? "address" : "addresses"}
+                            </button>
+                          </td>
+                          <td>
+                            {h.total !== null ? (
+                              <span className="dash-ok">● live</span>
+                            ) : (
+                              <span
+                                className="dash-warn"
+                                title={firstError ?? "unavailable"}
+                              >
+                                ● unavailable
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                        {open &&
+                          h.addresses.map((a, i) => (
+                            <tr key={`${h.id}-${i}`} className="dash-subrow">
+                              <td>
+                                <span className="dash-idx">#{i}</span>
+                                <span className="dash-sub">
+                                  derivation index
+                                </span>
+                              </td>
+                              <td className="dash-num">
+                                {a.balance !== null ? (
+                                  <>
+                                    {a.balance}{" "}
+                                    <span className="dash-unit">{h.unit}</span>
+                                  </>
+                                ) : (
+                                  <span className="dash-muted">—</span>
+                                )}
+                              </td>
+                              <td>
+                                <code title={a.address}>
+                                  {truncate(a.address)}
+                                </code>{" "}
+                                <button
+                                  className="dash-copy"
+                                  type="button"
+                                  onClick={() =>
+                                    copy(a.address, `addr-${h.id}-${i}`)
+                                  }
+                                  aria-label={`Copy ${h.label} address ${i}`}
+                                >
+                                  {copied === `addr-${h.id}-${i}` ? "✓" : "⧉"}
+                                </button>
+                              </td>
+                              <td>
+                                {a.balance !== null ? (
+                                  <span className="dash-ok">●</span>
+                                ) : (
+                                  <span
+                                    className="dash-warn"
+                                    title={a.error ?? "unavailable"}
+                                  >
+                                    ●
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                      </Fragment>
                     );
                   })}
                 </tbody>
@@ -370,9 +495,9 @@ export default function DashboardApp({
                       <span className="dash-sub">{cfg.detail}</span>
                     </div>
                     <div className="dash-netbal">
-                      {h?.balance != null ? (
+                      {h?.total != null ? (
                         <>
-                          {h.balance}{" "}
+                          {h.total}{" "}
                           <span className="dash-unit">{h.unit}</span>
                         </>
                       ) : (
