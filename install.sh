@@ -458,6 +458,9 @@ NEXT STEPS (all opt-in):
   - fund the derived addresses (testnet first — §10 needs explicit authorization)
   - town directory entry (§8)
   - the on-chain drill phases print in the drill output above
+  - dashboard sign-in for agents is API-only: docs/AGENT_ONBOARDING.md §8
+    (challenge -> local Ed25519 sign -> POST /api/auth/verify; your key
+    never leaves this machine)
 
 note: the default config is a signer, not a policy engine (S4).
 EOF

@@ -4,81 +4,17 @@ import { useState } from "react";
 import "./dashboard.css";
 
 /* ------------------------------------------------------------------ */
-/* Real login gate. Path A: agent challenge-response (Ed25519).        */
-/* Path B: human read-only viewer token. No demo simulation.           */
+/* Login gate — human viewer only. Agents authenticate via the API      */
+/* (docs/AGENT_ONBOARDING.md §8); there is no agent form here.        */
 /* ------------------------------------------------------------------ */
 
-type Phase = "idle" | "challenged" | "done";
+const ONBOARDING_URL =
+  "https://github.com/awizardxch/Spellbook/blob/main/docs/AGENT_ONBOARDING.md";
 
 export default function LoginGate() {
-  const [phase, setPhase] = useState<Phase>("idle");
-  const [challenge, setChallenge] = useState("");
-  const [expiresAt, setExpiresAt] = useState(0);
-  const [pubkey, setPubkey] = useState("");
-  const [signature, setSignature] = useState("");
-  const [evm, setEvm] = useState("");
-  const [solana, setSolana] = useState("");
-  const [chia, setChia] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
   const [token, setToken] = useState("");
   const [tokenBusy, setTokenBusy] = useState(false);
   const [tokenError, setTokenError] = useState<string | null>(null);
-
-  const requestChallenge = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch("/api/auth/challenge", { cache: "no-store" });
-      const json = (await res.json()) as {
-        challenge?: string;
-        expiresAt?: number;
-        error?: string;
-      };
-      if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
-      if (typeof json.challenge !== "string" || typeof json.expiresAt !== "number")
-        throw new Error("bad challenge response");
-      setChallenge(json.challenge);
-      setExpiresAt(json.expiresAt);
-      setSignature("");
-      setPhase("challenged");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "couldn't get a challenge");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const verifySignature = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const addresses: Record<string, string> = {};
-      if (evm.trim()) addresses.evm = evm.trim();
-      if (solana.trim()) addresses.solana = solana.trim();
-      if (chia.trim()) addresses.chia = chia.trim();
-      const res = await fetch("/api/auth/verify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          challenge,
-          signature: signature.trim().toLowerCase(),
-          pubkey: pubkey.trim().toLowerCase(),
-          addresses,
-        }),
-      });
-      const json = (await res.json()) as { ok?: boolean; error?: string };
-      if (!res.ok || json.ok !== true)
-        throw new Error(json.error ?? `HTTP ${res.status}`);
-      setPhase("done");
-      window.location.reload();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "verification failed");
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const viewerLogin = async () => {
     setTokenBusy(true);
@@ -100,8 +36,6 @@ export default function LoginGate() {
     }
   };
 
-  const secondsLeft = Math.max(0, Math.round((expiresAt - Date.now()) / 1000));
-
   return (
     <div className="wrap">
       <nav className="nav">
@@ -121,10 +55,10 @@ export default function LoginGate() {
           Spellbook <span className="dash-wordmark">dashboard</span>
         </h1>
         <p className="lede">
-          Read-only testnet holdings. Agents sign in with a real
-          challenge-response signature and see their <em>own</em> wallet;
-          humans use a read-only viewer token to see the
-          operator&apos;s. Neither path can approve, sign, or broadcast
+          Read-only testnet holdings. Humans sign in below with a
+          read-only viewer token. Agents authenticate programmatically
+          through the API and see their <em>own</em> wallet — there is no
+          agent form here. Neither path can approve, sign, or broadcast
           anything.
         </p>
       </header>
@@ -132,139 +66,9 @@ export default function LoginGate() {
       <div className="dash-panel">
         <div className="dash-grid2">
           <div className="dash-card">
-            <span className="dash-step">Path A</span>
-            <span className="icon">🧙</span>
-            <h3>Agent challenge-sign</h3>
-            {phase === "idle" && (
-              <>
-                <p>
-                  Any agent that installed the Spellbook can sign in — no
-                  pre-registration. The server issues a short-lived
-                  challenge; sign it locally with your Ed25519 identity
-                  key, then enter your public key, your signature, and
-                  your own watch addresses. You&apos;ll see{" "}
-                  <em>your</em> wallet, never the operator&apos;s.
-                </p>
-                <button
-                  className="btn"
-                  type="button"
-                  onClick={requestChallenge}
-                  disabled={busy}
-                >
-                  {busy ? "Requesting…" : "Request challenge →"}
-                </button>
-              </>
-            )}
-            {phase === "challenged" && (
-              <>
-                <p>
-                  Challenge — sign this exact string (expires in{" "}
-                  {secondsLeft}s):
-                </p>
-                <textarea
-                  className="dash-challenge"
-                  readOnly
-                  value={challenge}
-                  rows={3}
-                  onFocus={(e) => e.target.select()}
-                />
-                <label className="dash-label" htmlFor="dash-pubkey">
-                  Your Ed25519 public key (64 hex chars)
-                </label>
-                <input
-                  id="dash-pubkey"
-                  className="dash-input"
-                  value={pubkey}
-                  onChange={(e) => setPubkey(e.target.value)}
-                  placeholder="paste public key…"
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-                <label className="dash-label" htmlFor="dash-sig">
-                  Ed25519 signature (128 hex chars)
-                </label>
-                <input
-                  id="dash-sig"
-                  className="dash-input"
-                  value={signature}
-                  onChange={(e) => setSignature(e.target.value)}
-                  placeholder="paste signature…"
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-                <p className="dash-note" style={{ marginTop: 12 }}>
-                  Your watch addresses — at least one. The dashboard shows
-                  holdings for these addresses only.
-                </p>
-                <label className="dash-label" htmlFor="dash-evm">
-                  EVM address (0x… — Robinhood testnet, Base &amp; ETH
-                  Sepolia)
-                </label>
-                <input
-                  id="dash-evm"
-                  className="dash-input"
-                  value={evm}
-                  onChange={(e) => setEvm(e.target.value)}
-                  placeholder="0x…"
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-                <label className="dash-label" htmlFor="dash-sol">
-                  Solana address (devnet, base58)
-                </label>
-                <input
-                  id="dash-sol"
-                  className="dash-input"
-                  value={solana}
-                  onChange={(e) => setSolana(e.target.value)}
-                  placeholder="base58…"
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-                <label className="dash-label" htmlFor="dash-chia">
-                  Chia address (txch1… / xch1…, testnet11)
-                </label>
-                <input
-                  id="dash-chia"
-                  className="dash-input"
-                  value={chia}
-                  onChange={(e) => setChia(e.target.value)}
-                  placeholder="txch1…"
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-                <div className="dash-formrow">
-                  <button
-                    className="btn"
-                    type="button"
-                    onClick={verifySignature}
-                    disabled={
-                      busy ||
-                      signature.trim().length === 0 ||
-                      pubkey.trim().length === 0 ||
-                      (!evm.trim() && !solana.trim() && !chia.trim())
-                    }
-                  >
-                    {busy ? "Verifying…" : "Verify & enter →"}
-                  </button>
-                  <button
-                    className="btn ghost"
-                    type="button"
-                    onClick={() => setPhase("idle")}
-                    disabled={busy}
-                  >
-                    New challenge
-                  </button>
-                </div>
-              </>
-            )}
-            {error && <p className="dash-error">{error}</p>}
-          </div>
-
-          <div className="dash-card">
-            <span className="dash-step">Path B</span>
+            <span className="dash-step">Human</span>
             <span className="icon">👁️</span>
-            <h3>Human viewer token</h3>
+            <h3>Viewer token</h3>
             <p>
               Watch-only access to balances, queue, and activity. Enter the
               read-only viewer token — it is checked server-side and never
@@ -295,6 +99,41 @@ export default function LoginGate() {
               {tokenBusy ? "Checking…" : "Enter as viewer →"}
             </button>
             {tokenError && <p className="dash-error">{tokenError}</p>}
+          </div>
+
+          <div className="dash-card">
+            <span className="dash-step">Agents</span>
+            <span className="icon">🧙</span>
+            <h3>Agent sign-in is API-only</h3>
+            <p>
+              Any agent that installed the Spellbook signs in by passing
+              the right values to the API — no clicks, no form:
+            </p>
+            <p className="dash-note">
+              <code>GET /api/auth/challenge</code> → sign the challenge
+              locally with your Ed25519 identity key →{" "}
+              <code>
+                POST /api/auth/verify{" "}
+                {"{challenge, signature, pubkey, addresses}"}
+              </code>{" "}
+              → session cookie bound to <em>your</em> watch addresses.
+            </p>
+            <p>
+              Full recipe with signing examples in the onboarding doc, §8
+              “Dashboard API”:
+            </p>
+            <a
+              className="btn ghost"
+              href={ONBOARDING_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Dashboard API for agents →
+            </a>
+            <p className="dash-note" style={{ marginTop: 12 }}>
+              Your private key never leaves your machine — only the
+              signature over the server&apos;s challenge is sent.
+            </p>
           </div>
         </div>
         <p className="dash-note">

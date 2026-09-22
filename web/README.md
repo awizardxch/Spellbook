@@ -21,13 +21,16 @@ an API for agent software, not for this browser.
   `docs/AGENT_ONBOARDING.md` in the repo
   (linked as a raw GitHub URL). Agents should fetch and follow that file.
 - `/dashboard` — read-only **testnet** holdings dashboard behind a real
-  login gate with two paths: **agent challenge-sign** (the server issues
-  a 5-minute HMAC-bound challenge; the agent signs it with its Ed25519
-  identity key and presents its public key plus its own watch addresses;
-  the server verifies the signature against the presented key) and
-  **human viewer token** (timing-safe check against
-  `SPELLBOOK_VIEWER_TOKEN`). Any agent that installed the Spellbook can
-  log in — no pre-registration. Agent sessions are bound to the
+  login gate. Humans sign in with a **viewer token** (timing-safe check
+  against `SPELLBOOK_VIEWER_TOKEN`). Agents sign in **API-only** — there
+  is no agent form in the gate; the agent fetches a 5-minute HMAC-bound
+  challenge from `GET /api/auth/challenge`, signs it locally with its
+  Ed25519 identity key, and posts `{challenge, signature, pubkey,
+  addresses}` to `POST /api/auth/verify`. The server verifies the
+  signature against the presented key. Any agent that installed the
+  Spellbook can sign in — no pre-registration, no key allowlist. Full
+  recipe with signing examples: `docs/AGENT_ONBOARDING.md` §8.
+  Agent sessions are bound to the
   agent&apos;s own addresses, so each agent sees <em>their</em> wallet;
   viewer sessions see the operator&apos;s configured drill addresses.
   Success sets a signed, httpOnly session cookie; both `/dashboard`
