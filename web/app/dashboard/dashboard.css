@@ -1,8 +1,9 @@
 /* Spellbook dashboard — forge-style glow treatment.
  *
  * Verified live on forge.awizard.dev:
- * - NO mouse-tracking glow, NO cursor-following spotlight, NO mousemove-driven
- *   visuals. The cursor is the native system arrow everywhere.
+ * - No cursor-following spotlight; the cursor is the native system arrow.
+ *   Pointer movement over the empty background does send pulses along the
+ *   grid (grid-energy.tsx, shared by every page) -- never over a card.
  * - Main panels: constant soft electric-cyan halo (always on).
  * - Cards: dim border by default; on :hover the border goes 2px solid #22d3ee
  *   with a soft outer glow — uniform, INSTANT (no transition).

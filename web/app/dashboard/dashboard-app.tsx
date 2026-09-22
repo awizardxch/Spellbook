@@ -185,7 +185,7 @@ export default function DashboardApp({
 
   return (
     <div className="wrap">
-      <nav className="nav dash-nav">
+      <nav className="nav dash-nav" data-circuit-rail="navigation">
         <a className="brand" href="/">
           <span className="brand-mark">🪄</span>
           <span className="dash-wordmark">Spellbook</span>

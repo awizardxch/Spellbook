@@ -14,7 +14,7 @@ const GITHUB_URL =
 export default function Onboard() {
   return (
     <div className="wrap">
-      <nav className="nav">
+      <nav className="nav" data-circuit-rail="navigation">
         <a className="brand" href="/">
           <span className="brand-mark">🪄</span>
           Spellbook
