@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useState } from "react";
-import { CHAINS } from "@/lib/chains";
+import { CHAINS, NETWORKS } from "@/lib/chains";
 import "./dashboard.css";
 
 type Tab = "portfolio" | "networks" | "queue" | "activity";
@@ -18,6 +18,8 @@ interface Holding {
   id: string;
   label: string;
   detail: string;
+  /** "mainnet" | "testnet" */
+  env: string;
   unit: string;
   /** watch addresses bound for this chain (before the depth cap) */
   watchAddresses: number;
@@ -181,6 +183,12 @@ export default function DashboardApp({
   const visible = (holdings ?? []).filter((h) => enabled[h.id]);
   const reporting = visible.filter((h) => h.total !== null).length;
   const enabledCount = CHAINS.filter((c) => enabled[c.id]).length;
+  const mainnetOn = CHAINS.filter(
+    (c) => c.env === "mainnet" && enabled[c.id]
+  ).length;
+  const testnetOn = CHAINS.filter(
+    (c) => c.env === "testnet" && enabled[c.id]
+  ).length;
   const holdingById = (id: string) => holdings?.find((h) => h.id === id);
 
   /* ---------------- dashboard ---------------- */
@@ -284,7 +292,7 @@ export default function DashboardApp({
                   onClick={() => setTab("networks")}
                   title="Choose networks"
                 >
-                  {enabledCount} of {CHAINS.length} networks →
+                  {enabledCount} of {CHAINS.length} chains →
                 </button>
                 <button
                   className="btn ghost dash-refresh"
@@ -305,20 +313,33 @@ export default function DashboardApp({
 
             <div className="dash-stats">
               <div className="dash-card dash-stat">
-                <span className="dash-step">Networks reporting</span>
+                <span className="dash-step">Chains reporting</span>
                 <span className="dash-bignum">
                   {holdings ? `${reporting} / ${visible.length}` : "—"}
                 </span>
               </div>
               <div className="dash-card dash-stat">
-                <span className="dash-step">Networks enabled</span>
+                <span className="dash-step">Chains enabled</span>
                 <span className="dash-bignum">
                   {enabledCount} / {CHAINS.length}
                 </span>
               </div>
               <div className="dash-card dash-stat">
                 <span className="dash-step">Mode</span>
-                <span className="dash-bignum dash-testnet">TESTNET</span>
+                <span className="dash-bignum">
+                  {mainnetOn > 0 && (
+                    <span className="dash-mainnet">MAINNET</span>
+                  )}
+                  {mainnetOn > 0 && testnetOn > 0 && (
+                    <span className="dash-modesep"> + </span>
+                  )}
+                  {testnetOn > 0 && (
+                    <span className="dash-testnet">TESTNET</span>
+                  )}
+                  {mainnetOn === 0 && testnetOn === 0 && (
+                    <span className="dash-muted">OFF</span>
+                  )}
+                </span>
               </div>
             </div>
 
@@ -451,7 +472,7 @@ export default function DashboardApp({
               </table>
               {!loading && visible.length === 0 && (
                 <p className="dash-note">
-                  All networks are toggled off — enable at least one in the{" "}
+                  All chains are toggled off — enable at least one in the{" "}
                   <button
                     className="dash-linkbtn"
                     type="button"
@@ -464,8 +485,10 @@ export default function DashboardApp({
               )}
             </div>
             <p className="dash-note">
-              Testnet data · strictly read-only. This page cannot
-              approve, sign, or broadcast anything.
+              Mainnet and testnet balances side by side · strictly
+              read-only. This page cannot approve, sign, or broadcast
+              anything — mainnet rows are live balances, not a spending
+              interface.
             </p>
           </div>
         </section>
@@ -484,52 +507,83 @@ export default function DashboardApp({
               </div>
             </div>
             <div className="dash-netlist">
-              {CHAINS.map((cfg) => {
-                const h = holdingById(cfg.id);
-                const on = enabled[cfg.id];
+              {NETWORKS.map((net) => {
+                const pair = [ "mainnet", "testnet" ].map(
+                  (env) => net.chains.find((c) => c.env === env)!
+                );
+                const anyOn = pair.some((cfg) => enabled[cfg.id]);
                 return (
                   <div
-                    key={cfg.id}
-                    className={`dash-card dash-netrow${on ? "" : " off"}`}
+                    key={net.id}
+                    className={`dash-card dash-netrow${anyOn ? "" : " off"}`}
                   >
                     <span
                       className="dash-dot dash-dot-lg"
-                      style={{ background: cfg.color }}
+                      style={{ background: pair[0].color }}
                     />
                     <div className="dash-netinfo">
-                      <strong>{cfg.label}</strong>
-                      <span className="dash-sub">{cfg.detail}</span>
+                      <strong>{net.label}</strong>
+                      <span className="dash-sub">
+                        {pair[0].detail} · {pair[1].detail}
+                      </span>
                     </div>
-                    <div className="dash-netbal">
-                      {h?.total != null ? (
-                        <>
-                          {h.total}{" "}
-                          <span className="dash-unit">{h.unit}</span>
-                        </>
-                      ) : (
-                        <span className="dash-muted">
-                          {holdings ? "unavailable" : "…"}
-                        </span>
-                      )}
+                    <div className="dash-netenvs">
+                      {pair.map((cfg) => {
+                        const h = holdingById(cfg.id);
+                        const on = enabled[cfg.id];
+                        const firstError = h?.addresses.find(
+                          (a) => a.error
+                        )?.error;
+                        return (
+                          <div
+                            key={cfg.id}
+                            className={`dash-netenv${on ? "" : " off"}`}
+                          >
+                            <span
+                              className={`dash-envtag dash-env-${cfg.env}`}
+                            >
+                              {cfg.env === "mainnet" ? "Mainnet" : "Testnet"}
+                            </span>
+                            <span
+                              className="dash-netbal"
+                              title={firstError ?? undefined}
+                            >
+                              {h?.total != null ? (
+                                <>
+                                  {h.total}{" "}
+                                  <span className="dash-unit">{h.unit}</span>
+                                </>
+                              ) : (
+                                <span className="dash-muted">
+                                  {holdings ? "unavailable" : "…"}
+                                </span>
+                              )}
+                            </span>
+                            <button
+                              role="switch"
+                              aria-checked={on}
+                              aria-label={`Toggle ${net.label} ${cfg.env}`}
+                              className={`dash-switch${on ? " on" : ""}`}
+                              type="button"
+                              onClick={() => toggle(cfg.id)}
+                            >
+                              <span className="dash-knob" />
+                            </button>
+                          </div>
+                        );
+                      })}
                     </div>
-                    <button
-                      role="switch"
-                      aria-checked={on}
-                      aria-label={`Toggle ${cfg.label}`}
-                      className={`dash-switch${on ? " on" : ""}`}
-                      type="button"
-                      onClick={() => toggle(cfg.id)}
-                    >
-                      <span className="dash-knob" />
-                    </button>
                   </div>
                 );
               })}
             </div>
             <p className="dash-note">
-              Base Sepolia and ETH Sepolia read 0 until the shared address is
-              funded there. Mainnet networks stay gated behind explicit human
-              authorization — they are not listed here in v1.
+              Each side toggles independently and immediately refilters the
+              Portfolio. Base Sepolia and ETH Sepolia read 0 until funded
+              there. Chia mainnet reads through its own relay — without{" "}
+              <code>SPELLBOOK_RELAY_URL_MAINNET</code> it shows unavailable.
+              Everything here is read-only: the dashboard never signs or
+              broadcasts.
             </p>
           </div>
         </section>

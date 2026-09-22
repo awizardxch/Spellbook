@@ -48,11 +48,19 @@ export const MAX_WATCH_ADDRESSES = 100;
  * Watch addresses an agent asserts at login, in the agent's own
  * derivation order (e.g. the label order from `spellbook addresses`).
  * At least one address across all chains is required.
+ *
+ * Mainnet and testnet derive DIFFERENT keys (SPEC §2/P9), so mainnet
+ * watch addresses are bound separately: `evm_mainnet`, `solana_mainnet`,
+ * `chia_mainnet`. An agent that binds only testnet addresses simply sees
+ * no mainnet rows.
  */
 export interface AgentAddresses {
   evm?: string[];
   solana?: string[];
   chia?: string[];
+  evm_mainnet?: string[];
+  solana_mainnet?: string[];
+  chia_mainnet?: string[];
 }
 
 const EVM_RE = /^0x[0-9a-fA-F]{40}$/;
@@ -95,23 +103,40 @@ export function parseAgentAddresses(input: unknown): AgentAddresses | null {
   if (typeof input !== "object" || input === null) return null;
   const rec = input as Record<string, unknown>;
   const out: AgentAddresses = {};
-  if (rec.evm !== undefined) {
-    const list = addressList(rec.evm);
-    if (!list || !list.every((a) => EVM_RE.test(a))) return null;
-    out.evm = dedupe(list, true);
+  const evmFields = ["evm", "evm_mainnet"] as const;
+  const solanaFields = ["solana", "solana_mainnet"] as const;
+  const chiaFields = ["chia", "chia_mainnet"] as const;
+  for (const field of evmFields) {
+    if (rec[field] !== undefined) {
+      const list = addressList(rec[field]);
+      if (!list || !list.every((a) => EVM_RE.test(a))) return null;
+      out[field] = dedupe(list, true);
+    }
   }
-  if (rec.solana !== undefined) {
-    const list = addressList(rec.solana);
-    if (!list || !list.every((a) => SOLANA_RE.test(a))) return null;
-    out.solana = dedupe(list, false);
+  for (const field of solanaFields) {
+    if (rec[field] !== undefined) {
+      const list = addressList(rec[field]);
+      if (!list || !list.every((a) => SOLANA_RE.test(a))) return null;
+      out[field] = dedupe(list, false);
+    }
   }
-  if (rec.chia !== undefined) {
-    const list = addressList(rec.chia);
-    if (!list || !list.every((a) => CHIA_RE.test(a.toLowerCase())))
-      return null;
-    out.chia = dedupe(list.map((a) => a.toLowerCase()), false);
+  for (const field of chiaFields) {
+    if (rec[field] !== undefined) {
+      const list = addressList(rec[field]);
+      if (!list || !list.every((a) => CHIA_RE.test(a.toLowerCase())))
+        return null;
+      out[field] = dedupe(list.map((a) => a.toLowerCase()), false);
+    }
   }
-  if (!out.evm && !out.solana && !out.chia) return null;
+  if (
+    !out.evm &&
+    !out.solana &&
+    !out.chia &&
+    !out.evm_mainnet &&
+    !out.solana_mainnet &&
+    !out.chia_mainnet
+  )
+    return null;
   return out;
 }
 

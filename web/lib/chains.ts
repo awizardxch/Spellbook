@@ -1,24 +1,43 @@
 // Shared chain config for the /dashboard read-only holdings view.
 //
-// These are the operator's public testnet drill addresses — public chain
-// data, nothing secret. No key material, mnemonics, or tokens live here
-// (or anywhere in web/). The Chia relay bearer token is server-only
-// (see web/app/api/holdings/route.ts) and comes from Vercel env vars.
+// Mainnet is live: every network is listed as a mainnet + testnet pair,
+// each side independently toggleable. These are public chain reads — no
+// key material, mnemonics, or tokens live here (or anywhere in web/).
+// The Chia relay bearer token is server-only (see
+// web/app/api/holdings/route.ts) and comes from Vercel env vars.
+//
+// Mainnet and testnet derive DIFFERENT keys (SPEC §2/P9), so agents bind
+// their mainnet watch addresses separately at login (see web/lib/auth.ts).
+// The drill constants below are the operator's public testnet drill
+// addresses; mainnet drill addresses are not configured ("" = the chain
+// is skipped in the shared drill view).
 
 export type ChainKind = "evm" | "solana" | "chia";
 
+/** Which side of a network pair this entry is. */
+export type ChainEnv = "mainnet" | "testnet";
+
 export interface ChainConfig {
-  /** stable id used by the dashboard + holdings API */
+  /** stable id used by the dashboard + holdings API, e.g. "robinhood-mainnet" */
   id: string;
-  /** display name */
-  label: string;
+  /** groups a network's mainnet + testnet pair, e.g. "robinhood" */
+  networkId: string;
+  /** display name of the network, e.g. "Robinhood Chain" */
+  networkLabel: string;
+  /** mainnet or testnet side of the pair */
+  env: ChainEnv;
   kind: ChainKind;
   chainId?: number;
   rpcUrl?: string;
+  /**
+   * Drill fallback address for the shared operator view. Empty string =
+   * not configured: the chain is skipped in drill view (agents and
+   * per-agent viewer tokens bind their own addresses at login).
+   */
   address: string;
   unit: string;
   decimals: number;
-  /** sub-detail line shown in the Networks tab, e.g. "EVM · Chain 46630 · Testnet" */
+  /** sub-detail line shown in the dashboard, e.g. "EVM · Chain 4663 · Mainnet" */
   detail: string;
   /** network color dot (hex) */
   color: string;
@@ -114,8 +133,24 @@ export function chiaAddressToPuzzleHash(address: string): string | null {
 
 export const CHAINS: ChainConfig[] = [
   {
-    id: "robinhood",
-    label: "Robinhood Chain",
+    id: "robinhood-mainnet",
+    networkId: "robinhood",
+    networkLabel: "Robinhood Chain",
+    env: "mainnet",
+    kind: "evm",
+    chainId: 4663,
+    rpcUrl: "https://rpc.mainnet.chain.robinhood.com",
+    address: "",
+    unit: "ETH",
+    decimals: 18,
+    detail: "EVM · Chain 4663 · Mainnet",
+    color: "#34d399",
+  },
+  {
+    id: "robinhood-testnet",
+    networkId: "robinhood",
+    networkLabel: "Robinhood Chain",
+    env: "testnet",
     kind: "evm",
     chainId: 46630,
     rpcUrl: "https://rpc.testnet.chain.robinhood.com",
@@ -126,32 +161,79 @@ export const CHAINS: ChainConfig[] = [
     color: "#34d399",
   },
   {
-    id: "base-sepolia",
-    label: "Base",
+    id: "base-mainnet",
+    networkId: "base",
+    networkLabel: "Base",
+    env: "mainnet",
+    kind: "evm",
+    chainId: 8453,
+    rpcUrl: "https://mainnet.base.org",
+    address: "",
+    unit: "ETH",
+    decimals: 18,
+    detail: "EVM · Base · Chain 8453 · Mainnet",
+    color: "#60a5fa",
+  },
+  {
+    id: "base-testnet",
+    networkId: "base",
+    networkLabel: "Base",
+    env: "testnet",
     kind: "evm",
     chainId: 84532,
     rpcUrl: "https://sepolia.base.org",
     address: EVM_ADDRESS,
     unit: "ETH",
     decimals: 18,
-    detail: "EVM · Base Sepolia · Chain 84532",
+    detail: "EVM · Base Sepolia · Chain 84532 · Testnet",
     color: "#60a5fa",
   },
   {
-    id: "eth-sepolia",
-    label: "Ethereum L1",
+    id: "ethereum-mainnet",
+    networkId: "ethereum",
+    networkLabel: "Ethereum L1",
+    env: "mainnet",
+    kind: "evm",
+    chainId: 1,
+    rpcUrl: "https://ethereum-rpc.publicnode.com",
+    address: "",
+    unit: "ETH",
+    decimals: 18,
+    detail: "EVM · Ethereum · Chain 1 · Mainnet",
+    color: "#a78bfa",
+  },
+  {
+    id: "ethereum-testnet",
+    networkId: "ethereum",
+    networkLabel: "Ethereum L1",
+    env: "testnet",
     kind: "evm",
     chainId: 11155111,
     rpcUrl: "https://ethereum-sepolia-rpc.publicnode.com",
     address: EVM_ADDRESS,
     unit: "ETH",
     decimals: 18,
-    detail: "EVM · ETH Sepolia · Chain 11155111",
+    detail: "EVM · ETH Sepolia · Chain 11155111 · Testnet",
     color: "#a78bfa",
   },
   {
-    id: "solana",
-    label: "Solana",
+    id: "solana-mainnet",
+    networkId: "solana",
+    networkLabel: "Solana",
+    env: "mainnet",
+    kind: "solana",
+    rpcUrl: "https://api.mainnet-beta.solana.com",
+    address: "",
+    unit: "SOL",
+    decimals: 9,
+    detail: "Mainnet-beta",
+    color: "#22d3ee",
+  },
+  {
+    id: "solana-testnet",
+    networkId: "solana",
+    networkLabel: "Solana",
+    env: "testnet",
     kind: "solana",
     rpcUrl: "https://api.devnet.solana.com",
     address: SOLANA_ADDRESS,
@@ -161,8 +243,22 @@ export const CHAINS: ChainConfig[] = [
     color: "#22d3ee",
   },
   {
-    id: "chia",
-    label: "Chia",
+    id: "chia-mainnet",
+    networkId: "chia",
+    networkLabel: "Chia",
+    env: "mainnet",
+    kind: "chia",
+    address: "",
+    unit: "XCH",
+    decimals: 12,
+    detail: "Mainnet",
+    color: "#ff9d5c",
+  },
+  {
+    id: "chia-testnet",
+    networkId: "chia",
+    networkLabel: "Chia",
+    env: "testnet",
     kind: "chia",
     address: CHIA_ADDRESS,
     unit: "XCH",
@@ -171,6 +267,24 @@ export const CHAINS: ChainConfig[] = [
     color: "#ff9d5c",
   },
 ];
+
+/** The five networks, each as its [mainnet, testnet] pair, in display order. */
+export const NETWORKS: { id: string; label: string; chains: ChainConfig[] }[] =
+  (() => {
+    const order: string[] = [];
+    const byId = new Map<string, ChainConfig[]>();
+    for (const c of CHAINS) {
+      if (!byId.has(c.networkId)) {
+        byId.set(c.networkId, []);
+        order.push(c.networkId);
+      }
+      byId.get(c.networkId)!.push(c);
+    }
+    return order.map((networkId) => {
+      const chains = byId.get(networkId)!;
+      return { id: networkId, label: chains[0].networkLabel, chains };
+    });
+  })();
 
 export function chainById(id: string): ChainConfig | undefined {
   return CHAINS.find((c) => c.id === id);

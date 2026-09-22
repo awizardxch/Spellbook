@@ -1,12 +1,15 @@
 // Server-only read-only holdings proxy for /dashboard.
 //
-// GET fans out to public testnet RPCs + the operator's Chia relay and
-// returns normalized balances. The relay bearer token (SPELLBOOK_RELAY_TOKEN)
-// never leaves the server. Strictly read-only: no broadcast, no signing,
-// no write endpoints are ever called from here.
+// GET fans out to public mainnet + testnet RPCs and the operator's Chia
+// relay(s) and returns normalized balances. Relay bearer tokens
+// (SPELLBOOK_RELAY_TOKEN, SPELLBOOK_RELAY_TOKEN_MAINNET) never leave the
+// server. Strictly read-only: no broadcast, no signing, no write
+// endpoints are ever called from here.
 //
 // Multi-address: each chain carries the session's bound watch addresses
-// (up to 100 per chain, in the agent's derivation order). ?depth=N caps
+// (up to 100 per chain, in the agent's derivation order). Mainnet and
+// testnet derive different keys (SPEC §2/P9), so mainnet chains read the
+// agent's separately-bound `*_mainnet` address lists. ?depth=N caps
 // how many are queried (default: all bound) — depth=N queries addresses
 // #1–#N. Every chain reports its per-address balances (each tagged with
 // its 1-based `index`) plus the exact total across the addresses that
@@ -49,6 +52,8 @@ export interface ChainHolding {
   id: string;
   label: string;
   detail: string;
+  /** "mainnet" | "testnet" — mirrors the chain config's env */
+  env: string;
   unit: string;
   /** how many watch addresses are bound for this chain (pre-depth) */
   watchAddresses: number;
@@ -270,11 +275,22 @@ async function readChiaBatch(
   const valid = pairs.filter(
     (p): p is { address: string; puzzleHash: string } => p.puzzleHash !== null
   );
+  // The relay is single-network. Testnet uses the existing relay URL;
+  // mainnet needs its own relay deployment, configured explicitly —
+  // there is no default, so an unconfigured mainnet relay degrades to
+  // "relay not configured" on the Chia mainnet row instead of silently
+  // reading the wrong network.
   const relayUrl =
-    process.env.NEXT_PUBLIC_RELAY_URL ??
-    "https://spellbook-production.up.railway.app";
-  const token = process.env.SPELLBOOK_RELAY_TOKEN;
-  if (!token) {
+    cfg.env === "mainnet"
+      ? process.env.SPELLBOOK_RELAY_URL_MAINNET
+      : (process.env.NEXT_PUBLIC_RELAY_URL ??
+        "https://spellbook-production.up.railway.app");
+  const token =
+    cfg.env === "mainnet"
+      ? (process.env.SPELLBOOK_RELAY_TOKEN_MAINNET ??
+        process.env.SPELLBOOK_RELAY_TOKEN)
+      : process.env.SPELLBOOK_RELAY_TOKEN;
+  if (!relayUrl || !token) {
     return batchError(addresses, "relay not configured");
   }
   if (valid.length === 0) {
@@ -344,30 +360,46 @@ interface ChainAddresses {
 /**
  * Resolve which chains (and whose addresses) this session may see.
  * - Viewers on the shared operator token see the operator's configured
- *   drill addresses.
+ *   drill addresses (testnet only — mainnet drill addresses are not
+ *   configured, so those chains are skipped).
  * - Viewers on a per-agent viewer token see THAT AGENT's wallet.
  * - Agents see ONLY the watch addresses they asserted at login — never
  *   the operator's.
+ * Mainnet and testnet derive different keys (SPEC §2/P9): mainnet chains
+ * read the agent's separately-bound `*_mainnet` address lists.
  */
+function addressesForChain(
+  cfg: ChainConfig,
+  addrs: AgentAddresses
+): string[] | null {
+  const mainnet = cfg.env === "mainnet";
+  let list: string[] | undefined;
+  switch (cfg.kind) {
+    case "evm":
+      list = mainnet ? addrs.evm_mainnet : addrs.evm;
+      break;
+    case "solana":
+      list = mainnet ? addrs.solana_mainnet : addrs.solana;
+      break;
+    case "chia":
+      list = mainnet ? addrs.chia_mainnet : addrs.chia;
+      break;
+  }
+  return list && list.length > 0 ? list : null;
+}
+
 function chainsForSession(session: Session): ChainAddresses[] {
   if (session.role === "viewer" && !session.addresses) {
-    return CHAINS.map((cfg) => ({ cfg, addresses: [cfg.address] }));
+    return CHAINS.filter((cfg) => cfg.address).map((cfg) => ({
+      cfg,
+      addresses: [cfg.address],
+    }));
   }
   const addrs: AgentAddresses = session.addresses ?? {};
   const out: ChainAddresses[] = [];
-  if (addrs.evm && addrs.evm.length > 0) {
-    for (const cfg of CHAINS) {
-      if (cfg.kind === "evm")
-        out.push({ cfg, addresses: addrs.evm as string[] });
-    }
-  }
-  if (addrs.solana && addrs.solana.length > 0) {
-    const cfg = CHAINS.find((c) => c.kind === "solana");
-    if (cfg) out.push({ cfg, addresses: addrs.solana });
-  }
-  if (addrs.chia && addrs.chia.length > 0) {
-    const cfg = CHAINS.find((c) => c.kind === "chia");
-    if (cfg) out.push({ cfg, addresses: addrs.chia });
+  for (const cfg of CHAINS) {
+    const addresses = addressesForChain(cfg, addrs);
+    if (addresses) out.push({ cfg, addresses });
   }
   return out;
 }
@@ -409,8 +441,9 @@ export async function GET(req: Request): Promise<NextResponse> {
       // the whole response.
       return {
         id: cfg.id,
-        label: cfg.label,
+        label: cfg.networkLabel,
         detail: cfg.detail,
+        env: cfg.env,
         unit: cfg.unit,
         watchAddresses: addresses.length,
         addresses: per,

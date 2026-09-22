@@ -147,20 +147,20 @@ export default function Home() {
           <span className="pill">
             <span className="dot" /> Chia testnet11 — live now
           </span>
-          <span className="pill pending">
-            <span className="dot" /> Chia mainnet — gated, later
+          <span className="pill">
+            <span className="dot" /> Chia mainnet — live in dashboard
           </span>
           <span className="pill">
             <span className="dot" /> EVM testnets — live now
           </span>
-          <span className="pill pending">
-            <span className="dot" /> EVM mainnet — gated, later
+          <span className="pill">
+            <span className="dot" /> EVM mainnet — live in dashboard
           </span>
           <span className="pill">
             <span className="dot" /> Solana devnet — live now
           </span>
-          <span className="pill pending">
-            <span className="dot" /> Solana mainnet-beta — gated, later
+          <span className="pill">
+            <span className="dot" /> Solana mainnet-beta — live in dashboard
           </span>
         </div>
         <div className="grid2" style={{ marginTop: 26 }}>
@@ -169,7 +169,8 @@ export default function Home() {
             <h3>Chia</h3>
             <p>
               Testnet11 is the default network today — faucet-funded,
-              drills and validation live. Mainnet submission stays gated
+              drills and validation live. Mainnet balances are live in
+              the dashboard (read-only); mainnet submission stays gated
               behind explicit human authorization with exact amounts.
               Addresses: <code>txch1…</code> on testnet, <code>xch1…</code>{" "}
               on mainnet.
@@ -180,8 +181,9 @@ export default function Home() {
             <h3>EVM</h3>
             <p>
               Standard secp256k1 keys, plain transfers on testnets (e.g.
-              Robinhood Chain testnet). Mainnet is gated the same way as
-              Chia mainnet.
+              Robinhood Chain testnet). Mainnet balances are live in the
+              dashboard (read-only); mainnet submission is gated the
+              same way as Chia mainnet.
             </p>
           </div>
           <div className="glass">
@@ -190,7 +192,8 @@ export default function Home() {
             <p>
               Ed25519 keys, plain SOL transfers. Devnet is the default —
               the daemon talks to public HTTPS JSON-RPC directly, so there
-              is no relay to deploy; mainnet-beta stays gated behind
+              is no relay to deploy; mainnet-beta balances are live in
+              the dashboard (read-only), submission stays gated behind
               explicit human authorization. Backs up as base58 for Phantom
               import.
             </p>
