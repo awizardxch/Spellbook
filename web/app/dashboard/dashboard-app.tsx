@@ -90,7 +90,13 @@ function truncate(addr: string): string {
   return `${addr.slice(0, 10)}…${addr.slice(-6)}`;
 }
 
-export default function DashboardApp({ role }: { role: "agent" | "viewer" }) {
+export default function DashboardApp({
+  role,
+  pubkey,
+}: {
+  role: "agent" | "viewer";
+  pubkey?: string;
+}) {
   const [tab, setTab] = useState<Tab>("portfolio");
   const [enabled, setEnabled] = useState<Record<string, boolean>>(() =>
     Object.fromEntries(CHAINS.map((c) => [c.id, true]))
@@ -151,7 +157,9 @@ export default function DashboardApp({ role }: { role: "agent" | "viewer" }) {
         <div className="nav-links">
           <a href="/">Home</a>
           <span className="dash-session">
-            {role === "agent" ? "🧙 agent" : "👁️ viewer"}
+            {role === "agent"
+              ? `🧙 agent ${pubkey ? `${pubkey.slice(0, 4)}…${pubkey.slice(-4)}` : ""}`
+              : "👁️ viewer"}
           </span>
           <button
             className="btn ghost dash-logout"

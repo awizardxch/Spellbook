@@ -13,5 +13,5 @@ export const dynamic = "force-dynamic";
 export default function DashboardPage() {
   const session = readSession(cookies().get(SESSION_COOKIE)?.value);
   if (!session) return <LoginGate />;
-  return <DashboardApp role={session.role} />;
+  return <DashboardApp role={session.role} pubkey={session.pubkey} />;
 }
