@@ -543,3 +543,53 @@
     display: none;
   }
 }
+
+/* ---------- real login gate: forms ---------- */
+.dash-label {
+  display: block;
+  font-size: 0.78rem;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin: 14px 0 6px;
+}
+
+.dash-input,
+.dash-challenge {
+  width: 100%;
+  background: rgba(5, 3, 9, 0.72);
+  border: 1px solid var(--card-border);
+  border-radius: 10px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+
+.dash-input:focus,
+.dash-challenge:focus {
+  outline: none;
+  border-color: #22d3ee;
+  box-shadow: 0 0 12px rgba(34, 211, 238, 0.35);
+}
+
+.dash-challenge {
+  resize: vertical;
+  word-break: break-all;
+}
+
+.dash-formrow {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.dash-card .dash-error {
+  margin: 12px 0 0;
+}
+
+.dash-logout {
+  font-size: 0.78rem;
+  padding: 4px 12px;
+}

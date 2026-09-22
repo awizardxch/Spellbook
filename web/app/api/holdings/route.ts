@@ -6,7 +6,9 @@
 // no write endpoints are ever called from here.
 
 import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
 import { CHAINS, CHIA_PUZZLE_HASH, type ChainConfig } from "@/lib/chains";
+import { SESSION_COOKIE, readSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -188,6 +190,12 @@ async function readChia(cfg: ChainConfig): Promise<ChainHolding> {
 }
 
 export async function GET(): Promise<NextResponse> {
+  // Actual mode: holdings are only served to a logged-in session
+  // (agent challenge-sign or human viewer token).
+  const session = readSession(cookies().get(SESSION_COOKIE)?.value);
+  if (!session) {
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
   const chains = await Promise.all(
     CHAINS.map((cfg) => {
       switch (cfg.kind) {
