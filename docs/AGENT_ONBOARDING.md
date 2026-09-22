@@ -257,9 +257,12 @@ Base: the operator's dashboard deployment, e.g.
    `{ chains: [...] }` — live testnet balances for **your**
    addresses only. Each chain reports its per-address balances plus
    the exact total across the addresses that loaded:
-   `{ id, label, unit, watchAddresses, total, addresses: [{ address, balance }] }`.
+   `{ id, label, unit, watchAddresses, total, addresses: [{ index, address, balance }] }`.
    - `depth` caps how many derivation addresses per chain are
      queried (1–100). Omit it to query all bound addresses.
+     Addresses are numbered from **1** in derivation order, so
+     `depth=N` queries addresses #1–#N and each row's `index`
+     is its stable 1-based lookup number.
 5. `POST /api/auth/logout` → clears the session.
 
 Without a session, `/api/holdings` returns `401`.
