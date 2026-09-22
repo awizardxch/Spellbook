@@ -150,7 +150,7 @@ interface RelayCoin {
 async function readChia(cfg: ChainConfig): Promise<ChainHolding> {
   const base = holdingBase(cfg);
   const relayUrl =
-    process.env.SPELLBOOK_RELAY_URL ??
+    process.env.NEXT_PUBLIC_RELAY_URL ??
     "https://spellbook-production.up.railway.app";
   const token = process.env.SPELLBOOK_RELAY_TOKEN;
   if (!token) {

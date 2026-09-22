@@ -279,7 +279,7 @@ vercel --prod
 ```
 
 Then set the server-only env vars for the dashboard's Chia row (see
-`web/README.md`): `SPELLBOOK_RELAY_URL` and `SPELLBOOK_RELAY_TOKEN`
+`web/README.md`): `NEXT_PUBLIC_RELAY_URL` and `SPELLBOOK_RELAY_TOKEN`
 (copy of the relay's `RELAY_BEARER_TOKEN` from Railway). No CORS
 configuration is needed — the browser never calls the relay directly;
 `GET /api/holdings` proxies server-side.
