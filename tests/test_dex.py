@@ -225,18 +225,27 @@ def test_zerox_requires_key():
 
 def test_uniswap_flow(monkeypatch):
     calls = []
+    bodies = {}
 
     def fake_http(method, url, headers, body=None, timeout=25):
         calls.append(url)
         assert headers["x-api-key"] == "ukey"
         assert headers["X-Agent-Info"] == dex.AGENT_INFO
+        # X-Agent-Info must be the JSON object Uniswap's
+        # agent-attribution docs specify (a plain string is dropped
+        # as malformed by their parser).
+        info = json.loads(headers["X-Agent-Info"])
+        assert info["decision_origin"] == "human_mediated"
+        assert info["integration_name"] == "spellbook"
         if url.endswith("/check_approval"):
+            bodies["check_approval"] = body
             return {"approval": None}
         if url.endswith("/quote"):
             return {"routing": "CLASSIC",
                     "quote": {"input": {"amount": "1000"},
                               "output": {"amount": "950"}}}
         if url.endswith("/swap"):
+            bodies["swap"] = body
             assert body["routing"] == "CLASSIC"
             assert "permitData" not in body  # explicit nulls are stripped
             return {"swap": {"to": B, "from": C, "data": "0xabcd",
@@ -247,6 +256,9 @@ def test_uniswap_flow(monkeypatch):
     c = UniswapClient("ukey")
     ap = c.check_approval(8453, A, 1000, C)
     assert ap == {"approval_needed": False, "tx": None, "raw": {"approval": None}}
+    # the ApprovalRequest schema names the wallet field "walletAddress"
+    assert bodies["check_approval"]["walletAddress"] == C
+    assert "wallet" not in bodies["check_approval"]
     q = c.quote(8453, A, B, 1000, C)
     assert q["venue"] == "uniswap" and q["buy_amount"] == "950"
     # null-stripping: permitData null must not reach /swap
@@ -254,6 +266,46 @@ def test_uniswap_flow(monkeypatch):
            "quote": {"input": {"amount": "1000"}, "output": {"amount": "950"}}}
     s = c.swap(raw, 8453, A, B, 1000, C)
     assert s["tx"]["to"] == B and s["tx"]["data"] == "0xabcd"
+    # the /swap body is the /quote response itself, per the guide —
+    # no top-level token/amount fields are invented onto it
+    assert "tokenIn" not in bodies["swap"]
+    assert "swapper" not in bodies["swap"]
+    assert "amount" not in bodies["swap"]
+
+
+def test_uniswap_swap_requires_permit_signature(monkeypatch):
+    def fake_http(method, url, headers, body=None, timeout=25):
+        raise AssertionError("must refuse before any HTTP call")
+
+    monkeypatch.setattr(dex, "_http_json", fake_http)
+    c = UniswapClient("ukey")
+    raw = {"routing": "CLASSIC",
+           "permitData": {"permit": {"domain": {}}},
+           "quote": {"input": {"amount": "1000"},
+                     "output": {"amount": "950"}}}
+    with pytest.raises(DexError, match="EIP-712"):
+        c.swap(raw, 8453, A, B, 1000, C)
+
+
+def test_uniswap_swap_passes_permit_signature(monkeypatch):
+    seen = {}
+
+    def fake_http(method, url, headers, body=None, timeout=25):
+        if url.endswith("/swap"):
+            seen.update(body)
+            return {"swap": {"to": B, "from": C, "data": "0xabcd",
+                             "value": "0", "gasLimit": "200000"}}
+        raise AssertionError(url)
+
+    monkeypatch.setattr(dex, "_http_json", fake_http)
+    c = UniswapClient("ukey")
+    raw = {"routing": "CLASSIC",
+           "permitData": {"permit": {"domain": {}}},
+           "quote": {"input": {"amount": "1000"},
+                     "output": {"amount": "950"}}}
+    s = c.swap(raw, 8453, A, B, 1000, C, permit_signature="0xsig")
+    assert seen["signature"] == "0xsig"
+    assert s["tx"]["to"] == B
 
 
 def test_uniswap_refuses_chained_routing(monkeypatch):
@@ -262,6 +314,11 @@ def test_uniswap_refuses_chained_routing(monkeypatch):
     c = UniswapClient("ukey")
     with pytest.raises(DexError):
         c.swap({"routing": "DUTCH_V2"}, 8453, A, B, 1000, C)
+    # CHAINED routings go to /plan, not /order, per the guide's table
+    with pytest.raises(DexError, match="plan"):
+        c.swap({"routing": "CHAINED",
+                "quote": {"input": {}, "output": {}}},
+               8453, A, B, 1000, C)
 
 
 def test_uniswap_requires_key():
@@ -372,6 +429,19 @@ def test_validate_swap_native_value_mismatch():
         validate_swap_intent_against_quote(intent, q)
 
 
+def test_validate_swap_native_sell_zero_address():
+    # Uniswap's native representation is the zero address (their docs),
+    # not the 0x sentinel — the validator must accept both.
+    from spellbook.dex import NATIVE_ZERO
+    intent = _intent(sell_token=NATIVE_ZERO)
+    q = _quote(sell_token=NATIVE_ZERO, allowance_target=None,
+               tx={"to": "0xdef1c0ded9bec7f1a1670819833240f027b25eff",
+                   "data": "0x1234567890abcdef", "value": str(10**18)})
+    plan = validate_swap_intent_against_quote(intent, q)
+    assert plan["value_wei"] == 10**18
+    assert plan["needs_approval"] is False
+
+
 # --------------------------------------------------------------------------
 # Venue registry + user allowlist
 # --------------------------------------------------------------------------
@@ -395,14 +465,31 @@ def test_venue_serves_chain():
     assert venue_serves_chain("matcha", 1)
     assert venue_serves_chain("uniswap", 1)
     assert venue_serves_chain("uniswap", 8453)
-    # Both aggregators serve Robinhood Chain mainnet (user-verified
-    # on the frontends, 2026-09-23); the testnet is refused, never guessed.
+    # Both aggregators serve Robinhood Chain mainnet (per their official
+    # supported-chains docs, 2026-09-23); the testnet is refused, never guessed.
     assert venue_serves_chain("matcha", 4663)
     assert venue_serves_chain("uniswap", 4663)
     assert not venue_serves_chain("matcha", 46630)
     assert not venue_serves_chain("uniswap", 46630)
     # Unknown venue -> False (fail closed).
     assert not venue_serves_chain("sushiswap", 1)
+
+
+def test_chain_lists_mirror_official_docs():
+    # The chain lists are snapshots of the venues' official
+    # supported-chains pages (the docs are the authority). If a venue
+    # adds/removes a chain, update the list AND this snapshot together.
+    from spellbook.dex import ZEROX_CHAINS, UNISWAP_CHAINS
+    assert ZEROX_CHAINS == frozenset({
+        1, 2741, 42161, 5042, 43114, 8453, 80094, 56, 999, 57073,
+        59144, 5000, 143, 10, 9745, 137, 4663, 534352, 146, 4217,
+        130, 480,
+    })  # https://docs.0x.org/docs/introduction/supported-chains
+    assert UNISWAP_CHAINS == frozenset({
+        1, 10, 56, 130, 137, 143, 196, 324, 480, 1868, 4217, 4326,
+        4663, 5042, 8453, 42161, 42220, 43114, 57073, 59144,
+        7777777, 1301, 84532, 11155111,
+    })  # https://developers.uniswap.org/docs/trading/swapping-api/supported-chains
 
 
 # --------------------------------------------------------------------------

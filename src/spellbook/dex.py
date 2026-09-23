@@ -59,52 +59,94 @@ ZEROX_BASE = "https://api.0x.org"
 #: Uniswap Trading API base URL.
 UNISWAP_BASE = "https://trade-api.gateway.uniswap.org/v1"
 
-#: Chains the 0x Swap API v2 serves (from 0x docs; not exhaustive).
-#: Robinhood Chain mainnet (4663) added 2026-09-23 after the user's
-#: frontend verification — matcha.xyz quotes 4663 swaps.
+#: Chains the 0x Swap API v2 serves, mirrored from 0x's official
+#: supported-chains documentation — the docs are the authority; this
+#: list is re-checked against them, never hand-maintained:
+#: https://docs.0x.org/docs/introduction/supported-chains
 ZEROX_CHAINS = frozenset({
     1,       # Ethereum
-    8453,    # Base
-    4663,    # Robinhood Chain mainnet (user-verified 2026-09-23)
+    2741,    # Abstract
     42161,   # Arbitrum
-    10,      # Optimism
-    137,     # Polygon
-    56,      # BNB Chain
+    5042,    # Arc
     43114,   # Avalanche
-    81457,   # Blast
-    5000,    # Mantle
-    534352,  # Scroll
-    146,     # Sonic
-    130,     # Unichain
+    8453,    # Base
+    80094,   # Berachain
+    56,      # BNB Chain
     999,     # HyperEVM
     57073,   # Ink
     59144,   # Linea
-    34443,   # Mode
+    5000,    # Mantle
+    143,     # Monad
+    10,      # Optimism
+    9745,    # Plasma
+    137,     # Polygon
+    4663,    # Robinhood Chain mainnet
+    534352,  # Scroll
+    146,     # Sonic
+    4217,    # Tempo
+    130,     # Unichain
     480,     # World Chain
 })
 
-#: Chains the Uniswap Trading API serves for classic routing. This is a
-#: conservative subset — the API supports more; unknown chains are refused
-#: rather than guessed at. Robinhood Chain mainnet (4663) added
-#: 2026-09-23 after the user's frontend verification —
-#: app.uniswap.org routes 4663 swaps.
+#: Chains the Uniswap Trading API serves for swapping, mirrored from
+#: Uniswap's official supported-chains documentation — the docs are the
+#: authority; this list is re-checked against them, never hand-maintained:
+#: https://developers.uniswap.org/docs/trading/swapping-api/supported-chains
 UNISWAP_CHAINS = frozenset({
-    1,      # Ethereum
-    8453,   # Base
-    4663,   # Robinhood Chain mainnet (user-verified 2026-09-23)
-    42161,  # Arbitrum
-    10,     # Optimism
-    137,    # Polygon
-    56,     # BNB Chain
-    43114,  # Avalanche
-    130,    # Unichain
+    1,        # Ethereum
+    10,       # OP Mainnet
+    56,       # BNB Smart Chain
+    130,      # Unichain
+    137,      # Polygon
+    143,      # Monad
+    196,      # X Layer
+    324,      # zkSync
+    480,      # World Chain
+    1868,     # Soneium
+    4217,     # Tempo
+    4326,     # MegaETH
+    4663,     # Robinhood Chain mainnet
+    5042,     # Arc
+    8453,     # Base
+    42161,    # Arbitrum
+    42220,    # Celo
+    43114,    # Avalanche
+    57073,    # Ink
+    59144,    # Linea
+    7777777,  # Zora
+    1301,     # Unichain Sepolia (testnet)
+    84532,    # Base Sepolia (testnet)
+    11155111, # Ethereum Sepolia (testnet)
 })
 
-#: Sentinel for "native currency" as used by both APIs.
+#: 0x's sentinel for the native currency (per the 0x docs, native is
+#: represented as 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE).
 NATIVE_SENTINEL = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 
-#: Attribution header Uniswap asks AI-agent integrations to send.
-AGENT_INFO = "spellbook/dex ai-agent"
+#: Uniswap's native-currency representation (per the Uniswap
+#: supported-chains docs: "To swap native tokens, use the address
+#: 0x0000000000000000000000000000000000000000").
+NATIVE_ZERO = "0x0000000000000000000000000000000000000000"
+
+
+def _is_native_token(token: str) -> bool:
+    """True for either venue's native-currency representation."""
+    return (token or "").lower() in (NATIVE_SENTINEL, NATIVE_ZERO)
+
+
+#: Attribution header Uniswap asks AI-agent integrations to send. Per
+#: Uniswap's agent-attribution docs, X-Agent-Info is optional and
+#: analytics-only, and when sent its value must be a JSON object with a
+#: required ``decision_origin`` (exactly "autonomous" or
+#: "human_mediated", case-sensitive) plus optional ``integration_name``
+#: and ``version`` — a plain string is dropped as malformed:
+#: https://developers.uniswap.org/docs/trading/swapping-api/start-building/agent-attribution
+#: Spellbook swaps always carry the human's per-transaction approval, so
+#: the origin is "human_mediated".
+AGENT_INFO = json.dumps({
+    "decision_origin": "human_mediated",
+    "integration_name": "spellbook",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -380,15 +422,20 @@ class UniswapClient:
                        wallet: str) -> dict:
         """Returns ``{"approval_needed": bool, "tx": {...} | None}``.
 
-        The approval tx (if any) approves the exact ``amount`` — never an
-        unlimited allowance.
+        If an approval is needed, the API returns the unsigned approval
+        transaction to sign (Permit2 flow). Per Uniswap's docs the
+        approval's allowance depends on the API's ``permitAmount``
+        (FULL = max uint256, one approval forever; EXACT = this amount)
+        — review the returned ``tx`` rather than assuming an
+        exact-amount allowance. Confirm the approval on-chain before
+        the swap.
         """
         self._check_chain(chain_id)
         raw = self._post("/check_approval", {
             "chainId": chain_id,
             "token": _require_address(token, "token"),
             "amount": str(_require_positive_int(amount, "amount")),
-            "wallet": _require_address(wallet, "wallet"),
+            "walletAddress": _require_address(wallet, "wallet"),
         })
         approval = raw.get("approval")
         return {"approval_needed": bool(approval), "tx": approval, "raw": raw}
@@ -425,35 +472,52 @@ class UniswapClient:
 
     def swap(self, quote_raw: dict, chain_id: int, token_in: str,
              token_out: str, amount: int, swapper: str,
-             slippage_pct: float = 0.5) -> dict:
+             slippage_pct: float = 0.5,
+             permit_signature: str | None = None) -> dict:
         """Convert a ``quote`` response into an unsigned transaction.
 
+        Per Uniswap's integration guide, the /swap request body IS the
+        /quote response object itself (the guide's curl passes it
+        verbatim; the API reference documents the accepted fields as
+        ``quote``, ``signature``, ``permitData``, ``safetyMode``,
+        ``deadline`` and friends — see
+        https://developers.uniswap.org/docs/api-reference/create_swap_transaction).
         Only CLASSIC/WRAP/UNWRAP/BRIDGE routings are supported here —
-        chained/multi-step (UniswapX Dutch orders) need the /order flow and
-        are refused rather than half-built.
+        per the guide's endpoint table, DUTCH_V2/DUTCH_V3/PRIORITY/
+        LIMIT_ORDER quotes go to /order and CHAINED quotes go to /plan,
+        so those are refused rather than half-built.
+
+        If the quote returned non-null ``permitData``, the human's
+        EIP-712 signature over it is required — pass it as
+        ``permit_signature`` (it is sent in the ``signature`` field, per
+        the guide). Without it this raises instead of silently dropping
+        the permit: an unsigned permit is not a valid authorization.
         """
         self._check_chain(chain_id)
         routing = (quote_raw.get("routing") or "CLASSIC").upper()
         if routing not in ("CLASSIC", "WRAP", "UNWRAP", "BRIDGE"):
             raise DexError(
-                f"Uniswap routing {routing!r} needs the /order flow "
-                "(chained actions) — refused; re-quote or pick another venue")
-        body = dict(quote_raw)  # spread the quote, don't wrap it
-        body.update({
-            "routing": routing,
-            "swapper": _require_address(swapper, "swapper"),
-            "tokenIn": _require_address(token_in, "token in"),
-            "tokenOut": _require_address(token_out, "token out"),
-            "tokenInChainId": chain_id,
-            "tokenOutChainId": chain_id,
-            "amount": str(_require_positive_int(amount, "amount")),
-            "type": "EXACT_INPUT",
-            "slippageTolerance": slippage_pct,
-        })
+                f"Uniswap routing {routing!r} is not buildable via /swap: "
+                "the Uniswap integration guide sends DUTCH_V2/DUTCH_V3/"
+                "PRIORITY/LIMIT_ORDER quotes to /order and CHAINED quotes "
+                "to /plan — refused; re-quote or pick another venue")
+        if quote_raw.get("permitData") and not permit_signature:
+            raise DexError(
+                "Uniswap quote returned permitData: a Permit2 EIP-712 "
+                "signature from the human's wallet is required (pass "
+                "permit_signature); per the Uniswap docs /swap needs it "
+                "in the 'signature' field")
+        if not quote_raw.get("quote"):
+            raise DexError("Uniswap /swap needs the /quote response object "
+                           "(missing nested 'quote')")
+        body = dict(quote_raw)  # the guide passes the quote response itself
+        if permit_signature:
+            body["signature"] = permit_signature
         # The API chokes on explicit nulls — strip them.
         body = {k: v for k, v in body.items() if v is not None}
         raw = self._post("/swap", body)
-        # Response shapes vary; find the unsigned tx defensively.
+        # Documented shape is CreateSwapResponse: {"swap": {to, from,
+        # data, value, gasLimit, ...}, ...} — fall back defensively.
         tx = raw.get("swap") or raw.get("transaction") or raw
         to, data = tx.get("to"), tx.get("data")
         if not to or not data:
@@ -716,7 +780,7 @@ def compare_quotes(quotes: list[dict]) -> dict:
 __all__ = [
     "DexError",
     "ZEROX_BASE", "UNISWAP_BASE", "ZEROX_CHAINS", "UNISWAP_CHAINS",
-    "NATIVE_SENTINEL",
+    "NATIVE_SENTINEL", "NATIVE_ZERO",
     "VENUE_MATCHA", "VENUE_UNISWAP", "KNOWN_VENUES", "VENUE_ALIASES",
     "VENUE_CHAINS", "VENUE_ENV_KEYS", "DEFAULT_RECOMMENDED_VENUES",
     "normalize_venue", "venue_serves_chain",
@@ -785,7 +849,7 @@ def validate_swap_intent_against_quote(intent: dict, quote: dict) -> dict:
         raise DexError(f"quote tx value malformed: {tx.get('value')!r}")
     if value_wei < 0:
         raise DexError("quote tx value negative")
-    native_sell = intent["sell_token"].lower() == NATIVE_SENTINEL
+    native_sell = _is_native_token(intent["sell_token"])
     if native_sell and value_wei != sell_amount:
         raise DexError(
             f"native sell: tx value {value_wei} != sell_amount {sell_amount}")
