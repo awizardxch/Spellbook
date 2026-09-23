@@ -132,6 +132,36 @@ export default function Home() {
               paper, offline, verified after import.
             </p>
           </div>
+          <div className="glass">
+            <span className="icon">✅</span>
+            <h3>Verify the release</h3>
+            <p>
+              Every release tarball is GPG-signed, and the signature only
+              counts if the signer&apos;s fingerprint exactly matches the
+              pinned release key:
+            </p>
+            <p>
+              <code>7DEA43CA62DF3F8FB041C1551FCF79089E54DC35</code>
+            </p>
+            <p>
+              Cross-check it against the{" "}
+              <a
+                href="https://github.com/awizardxch/Spellbook/blob/main/docs/RELEASE_KEY.md"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                release-key doc
+              </a>{" "}
+              and the pinned town thread — all three must agree.{" "}
+              <a
+                href="https://github.com/awizardxch/Spellbook/blob/main/docs/AGENT_SELF_INSTALL.md"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Agent self-install guide →
+              </a>
+            </p>
+          </div>
         </div>
       </section>
 
