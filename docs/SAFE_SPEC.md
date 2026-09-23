@@ -7,6 +7,21 @@ SPEC_V1.md; until then this document is the design of record.
 **Date:** 2026-09-23
 **Decision owner:** Speechless
 
+## 0. Protocol authority
+
+Safe's own documentation is the authority on how a Safe functions —
+owners, threshold, transaction hashing, signature types, and
+execution. This spec defers to it and does not redefine any of it:
+
+- [Safe docs — Concepts: owners, threshold, signature verification](https://github.com/safe-fndn/safe-docs/blob/HEAD/smart-account/concepts.mdx)
+
+In Safe's terms, each agent's Spellbook-derived key is simply an
+**owner address — an independent signer**. Two agents are two
+independent signers; the Safe contract counts their signatures exactly
+like any other owners'. There is nothing agent-specific in the
+protocol. What this spec adds is only Spellbook's side: human-gated
+creation, the approval binding, and the daemon as a signer client.
+
 ## 1. Decisions (2026-09-23, Speechless)
 
 1. **Per-agent Safe.** Each agent gets their own Safe. Never a shared
@@ -20,8 +35,17 @@ SPEC_V1.md; until then this document is the design of record.
 4. **After initial creation, every change to the Safe requires on-chain
    signing per the Safe's setup.** Owner add/remove/swap and threshold
    changes happen only through an executed Safe transaction carrying a
-   signature set that meets the Safe's threshold. Nothing changes by
-   daemon fiat, config edit, or off-chain agreement.
+   signature set that meets the Safe's threshold — this is Safe's own
+   rule (owners can only be changed by a valid Safe transaction
+   approved by the current owners). Nothing changes by daemon fiat,
+   config edit, or off-chain agreement.
+
+Note on scope: "per-agent Safe" is the default deployment choice, not
+a protocol constraint. Because each agent's key is an independent
+signer in Safe's eyes, a human may equally name two agents'
+Spellbook keys (or an agent key plus their own EOAs) as co-owners of
+one Safe, and the Safe counts them independently. The daemon's signer
+client supports any owner composition the human chose.
 
 ## 2. Goals
 
@@ -86,12 +110,16 @@ Every Safe spend goes through the same shape as every other spend:
    fields, checks it matches the approved hash byte-for-byte, and only
    then signs with the Spellbook-derived key (EIP-712, EOA v=27/28
    format the Safe contract accepts). No approval, no signature.
-4. **Collection:** if the human-configured threshold needs more than
-   the Spellbook key (threshold > 1, or the Spellbook key is not an
-   owner), the remaining owner signatures arrive via the human's
-   tooling. The daemon verifies every signature against the Safe's
-   recorded owner set and EIP-712 domain before assembling. It never
-   executes with fewer valid signatures than the threshold.
+4. **Collection:** remaining owner signatures are collected through
+   Safe's standard flow — each owner signs the Safe transaction hash
+   (EIP-712 typed data) and signatures are gathered off-chain (Safe
+   Transaction Service where available, otherwise the human's
+   tooling). Per Safe's docs, the Safe contract itself is the
+   verifier at execution: it recomputes the hash from the submitted
+   parameters, checks each signer is a current owner, validates each
+   signature per its type, and requires the threshold count. The
+   daemon re-checks the assembled set off-chain as a pre-flight only;
+   it never invents its own signature rules.
 5. **Simulation:** `eth_call` dry-run of `execTransaction` with the
    assembled signatures. Revert → abort, report, no broadcast.
 6. **Execution:** broadcast `execTransaction`. The unknown-fate rule
