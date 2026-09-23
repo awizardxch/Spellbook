@@ -215,7 +215,7 @@ def test_zerox_quote_parses(monkeypatch):
 def test_zerox_refuses_unknown_chain():
     c = ZeroExClient("key123")
     with pytest.raises(DexError):
-        c.quote(4663, A, B, 100, C)  # Robinhood Chain not served by 0x
+        c.quote(46630, A, B, 100, C)  # Robinhood Chain testnet not served by 0x
 
 
 def test_zerox_requires_key():
@@ -395,10 +395,11 @@ def test_venue_serves_chain():
     assert venue_serves_chain("matcha", 1)
     assert venue_serves_chain("uniswap", 1)
     assert venue_serves_chain("uniswap", 8453)
-    # Neither aggregator serves Robinhood Chain — refused, never guessed.
-    assert not venue_serves_chain("matcha", 4663)
+    # Both aggregators serve Robinhood Chain mainnet (user-verified
+    # on the frontends, 2026-09-23); the testnet is refused, never guessed.
+    assert venue_serves_chain("matcha", 4663)
+    assert venue_serves_chain("uniswap", 4663)
     assert not venue_serves_chain("matcha", 46630)
-    assert not venue_serves_chain("uniswap", 4663)
     assert not venue_serves_chain("uniswap", 46630)
     # Unknown venue -> False (fail closed).
     assert not venue_serves_chain("sushiswap", 1)
@@ -512,13 +513,13 @@ def test_validate_swap_rejects_unknown_venue(tmp_path, monkeypatch):
 
 
 def test_validate_swap_rejects_unserved_chain_at_request_time(tmp_path):
-    # Robinhood Chain is in evm.CHAINS but served by neither venue: the
-    # refusal happens at request time with a clear reason, not as a
-    # confusing failure at execution.
+    # Robinhood Chain testnet (46630) is in evm.CHAINS but served by
+    # neither venue: the refusal happens at request time with a clear
+    # reason, not as a confusing failure at execution.
     from spellbook.evm import EvmError
     d = _daemon(tmp_path)
     with pytest.raises(EvmError, match="does not serve"):
-        d._validate_dex_swap(_swap_params(chain="evm-4663"))
+        d._validate_dex_swap(_swap_params(chain="evm-46630"))
 
 
 def test_rt_dex_venues(tmp_path):
@@ -529,4 +530,5 @@ def test_rt_dex_venues(tmp_path):
     assert out["known_venues"]["matcha"]["env_key"] == "ZERO_EX_API_KEY"
     assert out["known_venues"]["uniswap"]["env_key"] == "UNISWAP_API_KEY"
     assert 8453 in out["known_venues"]["matcha"]["chain_ids"]
-    assert 4663 not in out["known_venues"]["matcha"]["chain_ids"]
+    assert 4663 in out["known_venues"]["matcha"]["chain_ids"]
+    assert 46630 not in out["known_venues"]["matcha"]["chain_ids"]

@@ -455,9 +455,11 @@ best = dex.compare_quotes([q, firm])["best"]
   Canonical flow is `check_approval` → `quote` → `swap`. Chained
   multi-step routings (`DUTCH_V2` etc.) are refused rather than
   half-built — re-quote or switch venue.
-- **Neither serves Robinhood Chain.** For its Uniswap-v2-style pools
-  (e.g. PLANK/WETH), build the swap calldata directly with
-  `build_v2_swap_calldata` and the pool's router address.
+- **Both serve Robinhood Chain mainnet (4663)** — verified on the
+  frontends 2026-09-23. The 46630 testnet is not served by either.
+  For Uniswap-v2-style pools with no API key (e.g. PLANK/WETH),
+  `build_v2_swap_calldata` builds the swap calldata directly against
+  the pool's router address.
 
 ### Recommended swap venues
 
@@ -487,9 +489,9 @@ names fail the daemon at startup rather than silently doing nothing.
 always show the venue and the `venue_warning` (when present)
 prominently — the human is authorizing the venue with their approval,
 so the choice must be impossible to miss. The venue must also serve
-the chain: asking for a matcha swap on Robinhood Chain is refused
-immediately with "does not serve", since neither aggregator lists it
-(a capability fact, not a policy choice).
+the chain: the 46630 testnet is not served by either venue, so asking
+for a matcha swap on Robinhood Chain testnet is refused immediately
+with "does not serve" (a capability fact, not a policy choice).
 
 ### Direct pool calldata (no API key)
 
