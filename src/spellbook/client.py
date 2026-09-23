@@ -98,6 +98,48 @@ class AgentClient(_BaseClient):
         amount, purpose, muse, queued_at — never just a hash."""
         return self._call("queue_read")["queue"]
 
+    def dex_swap(self, *, chain: str, venue: str, sell_token: str,
+                 buy_token: str, sell_amount_wei: int,
+                 min_buy_amount_wei: int, max_slippage_bps: int,
+                 purpose: str = "", deadline_sec: int | None = None) -> dict:
+        """Request a bounded swap. The queue holds bounds — exact sell
+        amount, minimum buy, max slippage — never calldata. The daemon
+        fetches the firm venue quote at execution time and refuses to
+        sign unless it fits inside the approved bounds.
+
+        Use the 0xeeee...eeee sentinel for a native sell or buy side.
+        Returns the daemon's decision: approved | queued | denied.
+        """
+        params = {"intent": "dex_swap", "chain": chain, "venue": venue,
+                  "sell_token": sell_token, "buy_token": buy_token,
+                  "sell_amount_wei": sell_amount_wei,
+                  "min_buy_amount_wei": min_buy_amount_wei,
+                  "max_slippage_bps": max_slippage_bps, "purpose": purpose,
+                  "deadline_sec": deadline_sec}
+        return self._call("dex_swap", params)
+
+    def dex_lp_add(self, *, chain: str, protocol: str, router: str,
+                   token_a: str, token_b: str, amount_a_wei: int,
+                   amount_b_wei: int, amount_a_min_wei: int = 0,
+                   amount_b_min_wei: int = 0, fee: int | None = None,
+                   tick_lower: int | None = None,
+                   tick_upper: int | None = None,
+                   purpose: str = "", deadline_sec: int | None = None) -> dict:
+        """Request a bounded LP add (v2 addLiquidity or v3 mint).
+
+        ``router`` is the v2 router or v3 NonfungiblePositionManager
+        address — supplied by the agent, shown to the human, never
+        guessed by the daemon. fee/ticks are v3-only (100/500/3000/10000).
+        """
+        params = {"intent": "dex_lp_add", "chain": chain, "protocol": protocol,
+                  "router": router, "token_a": token_a, "token_b": token_b,
+                  "amount_a_wei": amount_a_wei, "amount_b_wei": amount_b_wei,
+                  "amount_a_min_wei": amount_a_min_wei,
+                  "amount_b_min_wei": amount_b_min_wei, "fee": fee,
+                  "tick_lower": tick_lower, "tick_upper": tick_upper,
+                  "purpose": purpose, "deadline_sec": deadline_sec}
+        return self._call("dex_lp_add", params)
+
     def status(self) -> dict:
         return self._call("status")
 

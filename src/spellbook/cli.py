@@ -215,6 +215,50 @@ def _run_self_repair(item, report):
         item["result"] = {"rc": -1, "tail": str(e)}
 
 
+def cmd_dex_quote(a, client=None):
+    """Read-only DEX quotes across venues. No daemon, no signing, no
+    broadcast — safe to run any time. Needs ZERO_EX_API_KEY and/or
+    UNISWAP_API_KEY in the environment (free keys, see docs)."""
+    import os
+    from spellbook import dex as dexmod
+
+    venues = ["0x", "uniswap"] if a.venue == "both" else [a.venue]
+    quotes = []
+    if "0x" in venues:
+        key = os.environ.get("ZERO_EX_API_KEY")
+        if not key:
+            raise SystemExit("spellbook: ZERO_EX_API_KEY not set "
+                             "(free at dashboard.0x.org)")
+        c = dexmod.ZeroExClient(key)
+        if a.firm:
+            if not a.taker:
+                raise SystemExit("spellbook: --taker is required for "
+                                 "firm 0x quotes")
+            quotes.append(c.quote(a.chain, a.sell_token, a.buy_token,
+                                  a.amount, a.taker,
+                                  slippage_bps=a.slippage_bps))
+        else:
+            quotes.append(c.price(a.chain, a.sell_token, a.buy_token,
+                                  a.amount, a.taker))
+    if "uniswap" in venues:
+        key = os.environ.get("UNISWAP_API_KEY")
+        if not key:
+            raise SystemExit("spellbook: UNISWAP_API_KEY not set "
+                             "(free at developers.uniswap.org/dashboard)")
+        c = dexmod.UniswapClient(key)
+        taker = a.taker or "0x0000000000000000000000000000000000000000"
+        q = c.quote(a.chain, a.sell_token, a.buy_token, a.amount, taker,
+                    slippage_pct=a.slippage_bps / 100)
+        if a.firm:
+            if not a.taker:
+                raise SystemExit("spellbook: --taker is required for "
+                                 "firm Uniswap quotes")
+            q = c.swap(q["raw"], a.chain, a.sell_token, a.buy_token,
+                       a.amount, a.taker, slippage_pct=a.slippage_bps / 100)
+        quotes.append(q)
+    _show(dexmod.compare_quotes(quotes))
+
+
 def cmd_request_spend(a, client: AgentClient):
     if (a.amount_wei is None) == (a.amount_mojos is None):
         raise SystemExit("pass exactly one of --amount-wei / --amount-mojos")
@@ -222,6 +266,26 @@ def cmd_request_spend(a, client: AgentClient):
         chain=a.chain, destination=a.to, asset=a.asset,
         amount_wei=a.amount_wei, amount_mojos=a.amount_mojos,
         purpose=a.purpose or ""))
+
+
+def cmd_dex_swap(a, client: AgentClient):
+    _show(client.dex_swap(
+        chain=a.chain, venue=a.venue, sell_token=a.sell_token,
+        buy_token=a.buy_token, sell_amount_wei=a.sell_amount_wei,
+        min_buy_amount_wei=a.min_buy_amount_wei,
+        max_slippage_bps=a.max_slippage_bps,
+        purpose=a.purpose or "", deadline_sec=a.deadline_sec))
+
+
+def cmd_dex_lp_add(a, client: AgentClient):
+    _show(client.dex_lp_add(
+        chain=a.chain, protocol=a.protocol, router=a.router,
+        token_a=a.token_a, token_b=a.token_b,
+        amount_a_wei=a.amount_a_wei, amount_b_wei=a.amount_b_wei,
+        amount_a_min_wei=a.amount_a_min_wei,
+        amount_b_min_wei=a.amount_b_min_wei, fee=a.fee,
+        tick_lower=a.tick_lower, tick_upper=a.tick_upper,
+        purpose=a.purpose or "", deadline_sec=a.deadline_sec))
 
 
 def cmd_approve(a, client: HumanClient):
@@ -470,6 +534,27 @@ def main(argv=None):
                          "upgrade path; state problems (keys/tokens/config) "
                          "fail closed with guidance")
 
+    # DEX quotes (read-only, local-first: no daemon, no signing, no broadcast).
+    dq = sub.add_parser("dex-quote")
+    dq.add_argument("--venue", choices=["0x", "uniswap", "both"], default="both",
+                    help="quote venue(s)")
+    dq.add_argument("--chain", type=int, required=True,
+                    help="EVM chain id (e.g. 8453 Base, 1 Ethereum)")
+    dq.add_argument("--sell-token", required=True,
+                    help="token to sell (contract address)")
+    dq.add_argument("--buy-token", required=True,
+                    help="token to buy (contract address)")
+    dq.add_argument("--amount", type=int, required=True,
+                    help="sell amount in base units (wei etc.)")
+    dq.add_argument("--taker",
+                    help="wallet address receiving the output "
+                         "(required for firm 0x quotes)")
+    dq.add_argument("--slippage-bps", type=int, default=50,
+                    help="max slippage in bps, 1..500 (default 50 = 0.5%%)")
+    dq.add_argument("--firm", action="store_true",
+                    help="fetch FIRM executable quotes (short-lived calldata); "
+                         "default is indicative prices only")
+
     rs = sub.add_parser("request-spend")
     rs.add_argument("--chain", required=True)
     rs.add_argument("--to", required=True)
@@ -477,6 +562,43 @@ def main(argv=None):
     rs.add_argument("--amount-wei", type=int, default=None)
     rs.add_argument("--amount-mojos", type=int, default=None)
     rs.add_argument("--purpose", default="")
+
+    dsw = sub.add_parser("dex-swap",
+                         help="request a bounded swap (0x/uniswap); the "
+                              "daemon fetches the firm quote at execution "
+                              "and only signs inside the approved bounds")
+    dsw.add_argument("--chain", required=True,
+                     help="daemon chain name, e.g. evm-8453")
+    dsw.add_argument("--venue", required=True, choices=["0x", "uniswap"])
+    dsw.add_argument("--sell-token", required=True,
+                     help="ERC-20 address, or 0xeeee...eeee for native")
+    dsw.add_argument("--buy-token", required=True)
+    dsw.add_argument("--sell-amount-wei", type=int, required=True)
+    dsw.add_argument("--min-buy-amount-wei", type=int, required=True,
+                     help="execution refuses below this")
+    dsw.add_argument("--max-slippage-bps", type=int, default=50)
+    dsw.add_argument("--deadline-sec", type=int, default=None)
+    dsw.add_argument("--purpose", default="")
+
+    dlp = sub.add_parser("dex-lp-add",
+                         help="request a bounded LP add (v2/v3); calldata "
+                              "is built daemon-side from the approved bounds")
+    dlp.add_argument("--chain", required=True)
+    dlp.add_argument("--protocol", required=True, choices=["v2", "v3"])
+    dlp.add_argument("--router", required=True,
+                     help="v2 router or v3 NonfungiblePositionManager")
+    dlp.add_argument("--token-a", required=True)
+    dlp.add_argument("--token-b", required=True)
+    dlp.add_argument("--amount-a-wei", type=int, required=True)
+    dlp.add_argument("--amount-b-wei", type=int, required=True)
+    dlp.add_argument("--amount-a-min-wei", type=int, default=0)
+    dlp.add_argument("--amount-b-min-wei", type=int, default=0)
+    dlp.add_argument("--fee", type=int, default=None,
+                     help="v3 fee tier: 100/500/3000/10000")
+    dlp.add_argument("--tick-lower", type=int, default=None)
+    dlp.add_argument("--tick-upper", type=int, default=None)
+    dlp.add_argument("--deadline-sec", type=int, default=None)
+    dlp.add_argument("--purpose", default="")
 
     apv = sub.add_parser("approve")
     apv.add_argument("queue_id")
@@ -657,11 +779,11 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     try:
-        if a.cmd in ("version", "upgrade", "doctor"):
-            # Lifecycle commands are local-first and never take the approve
-            # token; they build their own clients as needed.
+        if a.cmd in ("version", "upgrade", "doctor", "dex-quote"):
+            # Lifecycle + read-only commands are local-first and never take
+            # the approve token; they build their own clients as needed.
             {"version": cmd_version, "upgrade": cmd_upgrade,
-             "doctor": cmd_doctor}[a.cmd](a)
+             "doctor": cmd_doctor, "dex-quote": cmd_dex_quote}[a.cmd](a)
             return
         if a.cmd in ("approve", "reject"):
             client: HumanClient = HumanClient(_socket(a), _token(a, "SPELLBOOK_APPROVE_TOKEN"),
@@ -672,6 +794,7 @@ def main(argv=None):
                                                muse_id=_muse_id(a))
             {"status": cmd_status, "queue": cmd_queue, "ledger": cmd_ledger,
              "addresses": cmd_addresses, "request-spend": cmd_request_spend,
+             "dex-swap": cmd_dex_swap, "dex-lp-add": cmd_dex_lp_add,
              "offer-make": cmd_offer_make, "offer-take": cmd_offer_take,
              "offer-cancel": cmd_offer_cancel, "chia-read": cmd_chia_read,
              "nft-mint": cmd_nft_mint,
