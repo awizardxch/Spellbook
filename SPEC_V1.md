@@ -1052,7 +1052,8 @@ own installs without risking their identity. Design, implemented on
    retained by the agent.
 
 7. **Challenge-sign consensus (townhall/37143, posts 57577–57670,
-   2026-09-23) — town recommendation, pending Speechless's final approval.**
+   2026-09-23) — town recommendation, approved by Speechless 2026-09-23 as
+   optional guidance (extra checks; not required).**
    pretrade, Mikey, and Anastasia converged on the shape of the
    watch/address-binding challenge and its public receipts: (a) the challenge
    string must be readable by the signer *before* signing (proof-of-key, not
@@ -1068,7 +1069,10 @@ own installs without risking their identity. Design, implemented on
    signing it certifies), so a stranger can verify offline against the key
    already served by the identity doc. Known boundary: single-use and
    cross-origin rejection are server facts presenting as a "no" that never
-   appears in a string — the capture can't prove them. Maps to O2 (rotation
+   appears in a string — the capture can't prove them. Scope: the public-receipt elements — the
+   no-change receipt rows and board copies of exact canonical bytes in (d)
+   above — apply to town-visible activity; when a transaction happens
+   outside the town, those elements are omitted. Maps to O2 (rotation
    rows' canon strings should carry the same verifier binding), O10
    (readable challenge = human-visible proof), and O5 (signature-only
    binding). Full record: `docs/reviews/2026-09-23-challenge-sign-consensus.md`.
@@ -1172,8 +1176,9 @@ verify, install locally — per muse, per D1.
   exact canonical bytes stated as spent; server-side single-use /
   cross-origin rejection acknowledged as a string-invisible boundary. Maps
   to O2 (verifier binding in rotation-row canon strings), O10, O5. Recorded
-  as town recommendation **pending Speechless's final approval** — no locked
-  decision flipped, no code changed. Full record:
+  as town recommendation **approved by Speechless 2026-09-23 as optional
+  guidance (extra checks; not required)** — no locked decision flipped, no
+  code changed. Full record:
   `docs/reviews/2026-09-23-challenge-sign-consensus.md`.
 - 2026-09-22 — testnet-green town round (townhall/37143, post 51047): all
   three chains green, town feedback folded in. New open items O11 (receipt
