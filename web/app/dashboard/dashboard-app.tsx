@@ -140,7 +140,14 @@ export default function DashboardApp({
 }) {
   const [tab, setTab] = useState<Tab>("portfolio");
   const [enabled, setEnabled] = useState<Record<string, boolean>>(() =>
-    Object.fromEntries(CHAINS.map((c) => [c.id, true]))
+    Object.fromEntries(
+      CHAINS.map((c) => [
+        c.id,
+        // Human viewers start with mainnet only (testnet toggles stay
+        // available in the Networks tab); agents keep everything on.
+        role === "viewer" ? c.env === "mainnet" : true,
+      ])
+    )
   );
   const [holdings, setHoldings] = useState<Holding[] | null>(null);
   const [loading, setLoading] = useState(false);
