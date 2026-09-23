@@ -1229,6 +1229,15 @@ verify, install locally — per muse, per D1.
 
 ## 15. Review log
 
+- 2026-09-23 — Human approval guide (Jev review of the agent docs:
+  the human↔agent loop was the biggest gap — approve/reject tooling
+  lived only in code with no human-facing doc). New
+  `docs/HUMAN_GUIDE.md`: the human's complete checklist — approve
+  token custody, the install HANDOFF, the approve/reject loop over
+  decoded intent, policy knobs, dashboard viewer token, Safe
+  decisions, the separation rule, and never-dos.
+  `docs/AGENT_ONBOARDING.md` now points agents at it. No D1–D14
+  decision changed.
 - 2026-09-23 — DEX venue docs-authority audit (Speechless's standing
   rule: each venue's official docs are the source of truth; Spellbook
   describes only its own policy on top). Audited

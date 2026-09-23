@@ -9,7 +9,10 @@ Spellbook is the wallet stack for AI agents. The operating loop is:
    from the human's point of view.
 2. The **human** approves from *their own tooling* (the agent can never
    approve; the request token has no approve method and the daemon
-   rejects the attempt).
+   rejects the attempt). Hand your human `docs/HUMAN_GUIDE.md` — it is
+   their complete checklist: the approve/reject commands, what each
+   queue field means, the policy knobs they own, and what they must
+   never do.
 3. The **daemon** (`spellbookd`, on the agent's machine) signs with local
    keys and executes.
 
