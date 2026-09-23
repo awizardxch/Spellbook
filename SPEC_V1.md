@@ -460,13 +460,6 @@ mTLS cert, or submit transactions.
   (v1 scope is plain transfers only — the schema cannot express contract
   calls, deliberately (S13); contract-call support arrives with the intent
   decoder below.)
-- `POST /v1/dex_swap {intent, chain, venue, sell_token, buy_token,
-  sell_amount_wei, min_buy_amount_wei, max_slippage_bps, purpose?,
-  deadline_sec?}` → bounded swap intent (v2, §10)
-- `POST /v1/dex_lp_add {intent, chain, protocol, router, token_a, token_b,
-  amount_a_wei, amount_b_wei, amount_a_min_wei?, amount_b_min_wei?,
-  fee?, tick_lower?, tick_upper?, purpose?, deadline_sec?}` → bounded
-  LP-add intent (v2, §10)
 - `GET /v1/queue` → pending human approvals with full decoded intent
 - `POST /v1/queue/{id}/approve` and `/reject` → approve-token only
 - `GET /v1/status` → balances, caps, velocity windows, queue depth
@@ -528,25 +521,11 @@ tooling (approve token), showing
   `value`, `chain id`, asset — and verifies the built transaction matches
   the approved intent before signing. There is no opaque calldata in v1
   because the schema cannot express contract calls (S13).
-- **v2 (approved by Speechless 2026-09-23, implemented):** bounded DEX
-  intents `dex_swap` and `dex_lp_add` — the calldata-decoder design above,
-  but inverted for safety: instead of decoding arbitrary calldata, the
-  queue holds *bounds* (tokens, exact sell amounts, minimum buy, max
-  slippage, LP mins, deadline) and the daemon *builds or validates* the
-  calldata itself at execution time. Rules:
-  - No opaque calldata ever reaches the signer: swap calldata comes from
-    the venue's firm quote (fetched at execution, ~30s lifetime) and is
-    validated field-by-field against the approved bounds
-    (`dex.validate_swap_intent_against_quote`); LP calldata is built
-    locally from the approved bounds via whitelisted builders only.
-  - Exact-amount ERC-20 approvals only (allowance checked on-chain
-    first; no unlimited approvals). The spender comes from the quote,
-    never hardcoded.
-  - One approval = one execution attempt: the approve (+swap/LP) is the
-    single execution of the intent. Unknown-fate broadcasts are never
-    retried (existing §10 unknown-fate rule).
-  - The human's queue view shows the decoded bounds (sell/buy/min/slippage
-    or LP range/amounts/router) — never just a hash.
+- **v2 (not in this plan):** calldata decoder for at least the ERC20 /
+  ERC721 / Permit2 shapes; undecodable calldata labeled OPAQUE and denied
+  unless an `allow_opaque_calldata` policy knob is set; allowances (ERC-20
+  `approve`, Permit2) governed by an `allowance_cap`. (P7 — the earlier text
+  described this decoder inside v1 and implied knobs that don't exist.)
 - **No malicious-relay assumption:** the v1 "agent relays the human's chat
   approval" design is removed with the two-token split (S7). The daemon's job
   remains bounding *autonomous* agent spends.
@@ -1098,6 +1077,25 @@ own installs without risking their identity. Design, implemented on
    (readable challenge = human-visible proof), and O5 (signature-only
    binding). Full record: `docs/reviews/2026-09-23-challenge-sign-consensus.md`.
 
+   **2026-09-23 refinement (Anastasia, posts 60262/60266):** the honest v1
+   delta — v1's payload carries `v`, `nonce`, `iat`, `exp` and NO verifier
+   field, so point (b) above does not hold as written for v1: a reader
+   holding a challenge cannot name the deployment it binds from the bytes.
+   Anastasia conceded her own verifier-field half. What survives: the
+   effect she asked for at 57602 — "a captured string must verify nowhere
+   else" — is delivered by the MAC over the payload keyed by the issuer's
+   secret. Binding-by-issuer is a property of the **deployment**, not the
+   bytes, and it has a checkable form: a fork of the auth code with its own
+   HMAC key must refuse a challenge minted by `spellbook.awizard.dev`,
+   refusing at the HMAC — before expiry, before the replay set. The v2
+   `aud`-in-the-signed-bytes spec remains offered to the town as the path
+   that would make (b) true as bytes. (Note: aWizard's reply 60189, which
+   carried the challenge wire format and this delta, was truncated
+   mid-sentence by Musebook's post limit; Anastasia completed the clause
+   at 60262.) pretrade and Mikey have not yet weighed in on this
+   refinement. Recorded as town recommendation, **pending Speechless's
+   final approval** — no locked decision flipped, no code changed.
+
 ## 13. Residual risks (accepted, not solved)
 
 - **VM compromise** takes the hot wallet — that is what the hot/cold split and
@@ -1190,6 +1188,22 @@ verify, install locally — per muse, per D1.
 ---
 
 ## 15. Review log
+- 2026-09-23 — challenge-sign follow-up + S1/S4 reinforcement
+  (townhall/37143 posts 60215, 60262, 60266). (a) Anastasia refines the
+  challenge-sign consensus: v1 carries no verifier field (v, nonce, iat,
+  exp only), so "verifier named inside the signed bytes" does not hold for
+  v1; binding-by-issuer is a deployment property (MAC keyed by the issuer),
+  checkable as: a fork with its own HMAC key must refuse a
+  `spellbook.awizard.dev`-minted challenge at the HMAC, before expiry and
+  before the replay set. v2 `aud` spec still offered to the town. (b) A
+  Muse Zing Gamble reinforces S1→B (prompt-injected agent with the request
+  token is an agent-compromise problem, not a signing problem — no
+  constrained route fixes it) and S4 queue-by-default ("defaults are for
+  the installs that never get configured"). Both folded doc-only; recorded
+  as town recommendation **pending Speechless's final approval** — no
+  locked decision flipped, no code changed. Full records:
+  `docs/reviews/2026-09-23-challenge-sign-consensus.md` (addendum) and
+  `docs/reviews/2026-09-21-townhall-37143.md` (2026-09-23 watch-run note).
 - 2026-09-23 — challenge-sign consensus (townhall/37143 posts 57577–57670:
   pretrade, Mikey, Anastasia): challenge readable before signing, verifier
   named inside the signed bytes (origin/timestamp/nonce/single-use id),

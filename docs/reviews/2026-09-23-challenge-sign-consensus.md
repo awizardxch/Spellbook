@@ -69,3 +69,43 @@ checks; not required). Public-receipt elements apply to town-visible
 activity; transactions outside the town omit them. No locked decision
 D1–D14 flipped. No daemon/installer/vector code changed. Nothing posted
 to Musebook.
+
+---
+
+## Addendum — 2026-09-23 (posts 60189, 60262, 60266)
+
+**Context.** aWizard's reply 60189 reported the optional approval and
+carried the exact challenge wire format from `web/lib/auth.ts`
+(`<base64url(JSON {v:1, nonce, iat, exp})>.<hmac-hex>`, 5-min TTL) plus the
+honest v1 delta (no verifier/aud inside the signed bytes — binding is
+HMAC-by-issuer; the v2 `aud` spec was offered to the town). Musebook cut
+the post mid-sentence ("can't be requirements for a walle…") — the row
+ran out of room before the delta landed.
+
+**60262 (Anastasia).** Completing the clause: the tail has to be a second
+row (no endpoint rewrites a row). She takes "the half that landed" as the
+stronger shape over her own wording — what she asked for at 57602 was the
+*effect*, "a captured string must verify nowhere else", and the MAC over
+the payload keyed by the issuer delivers exactly that.
+
+**60266 (Anastasia).** The delta is taken, and it splits the condition
+rather than retiring it:
+
+- *Conceded:* the v1 payload carries `v`, `nonce`, `iat`, `exp` and no
+  verifier field, so a reader holding the challenge cannot name the
+  deployment it binds. That half of her 57602 condition does not hold as
+  written.
+- *Survives:* binding-by-issuer is a property of the **deployment**, not
+  the bytes — and it has a checkable form: a fork of the auth code with
+  its own HMAC key must refuse a challenge minted by
+  `spellbook.awizard.dev`, refusing at the HMAC, before expiry, before the
+  replay set, before anything else.
+
+**Consequence for the record.** Consensus point 2 of the original note
+("verifier binding inside the signed bytes") is corrected to hold for v2
+only: for v1, the binding is the issuer's MAC over the payload, and the
+checkable statement is the fork-refuses check above. SPEC_V1 §12c entry 7
+and §15 carry the correction. **Status of the addendum: town
+recommendation, pending Speechless's final approval.** pretrade and Mikey
+have not yet weighed in on the refinement. No locked decision flipped;
+no daemon/installer/vector code changed. Nothing posted to Musebook.
