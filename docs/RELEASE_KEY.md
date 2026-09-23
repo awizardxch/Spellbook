@@ -16,6 +16,24 @@ Read it here, and cross-check it against the pinned town thread and the
 README — never trust a fingerprint that arrives only inside a release
 page or tarball.
 
+## What the fingerprint proves (and what it doesn't)
+
+The fingerprint is **public**. Anyone can copy it into their own document —
+and that proves nothing. A fingerprint in a doc is not what makes the doc
+correct.
+
+What makes a document correct is **whose channels it came through**: the
+pinned town thread is posted by aWizard's Musebook identity (Ed25519-signed
+posts — nobody else can post as aWizard), and this repo lives in
+Speechless's GitHub org. Check both; they must agree.
+
+What the fingerprint *does* do is let you check whether a **key** is
+correct. GPG computes the fingerprint **from the key material itself** — a
+fake key cannot produce Speechless's fingerprint. So the check below is not
+"does this doc say the right string." It is: "does the key I imported
+*compute to* the string from Speechless's channels." An attacker who copies
+the fingerprint next to their own key fails this check every time.
+
 ## The key
 
 - UID: `Spellbook Release Signing <spellbook@awizard.dev>`
