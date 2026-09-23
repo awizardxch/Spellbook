@@ -43,6 +43,7 @@ from spellbook.ledger import Ledger
 from spellbook.policy import evaluate
 from spellbook.seed import load_seed
 from spellbook import tokens as token_auth
+from spellbook import dex as dex_mod
 
 REQUEST_ROUTES = {
     "request_spend", "queue_read", "status", "addresses", "doctor",
@@ -58,6 +59,7 @@ REQUEST_ROUTES = {
     "coin_combine", "coin_split", "coin_autocombine",
     "bulk_send", "multi_send",
     "message_sign",
+    "dex_swap", "dex_lp_add",
 }
 APPROVE_ROUTES = {
     "queue_approve", "queue_reject", "publish_directory_entry",
@@ -109,6 +111,20 @@ BULK_SEND_FIELDS = {"intent", "chain", "asset", "addresses", "amount_mojos",
 MULTI_SEND_FIELDS = {"intent", "chain", "payments", "fee_mojos", "purpose"}
 MESSAGE_SIGN_FIELDS = {"intent", "chain", "address", "public_key",
                        "message", "purpose"}
+
+# DEX intents (SPEC §10 v2 — approved by Speechless 2026-09-23): bounded
+# swap / LP-add requests. The queue holds BOUNDS (tokens, exact sell
+# amounts, minimum buy, slippage, deadline) — never raw calldata. The
+# daemon fetches the firm venue quote at execution time and refuses to
+# sign unless it fits the approved bounds. Unknown shapes are rejected
+# (S13), never coerced.
+SWAP_FIELDS = {"intent", "chain", "venue", "sell_token", "buy_token",
+               "sell_amount_wei", "min_buy_amount_wei", "max_slippage_bps",
+               "purpose", "deadline_sec"}
+LP_ADD_FIELDS = {"intent", "chain", "protocol", "router", "token_a", "token_b",
+                 "amount_a_wei", "amount_b_wei", "amount_a_min_wei",
+                 "amount_b_min_wei", "fee", "tick_lower", "tick_upper",
+                 "purpose", "deadline_sec"}
 
 # Wallet-local metadata routes: direct (no queue, no chain, no funds).
 # Each has an explicit schema — S13 rejects anything else.
@@ -682,6 +698,14 @@ class Daemon:
         if chain not in evm.CHAINS:
             return {"submitted": False,
                     "note": f"chain submission not configured for {chain}"}
+        # DEX intents (SPEC §10 v2): bounded swap / LP-add. The queue held
+        # bounds; execution fetches the firm quote now and refuses to sign
+        # unless it fits inside the approved bounds.
+        intent = params.get("intent")
+        if intent == "dex_swap":
+            return self._execute_evm_swap(params)
+        if intent == "dex_lp_add":
+            return self._execute_evm_lp_add(params)
         entry = (self.evm_cfg.get("chains") or {}).get(chain) or {}
         if not entry.get("enabled") or not entry.get("rpc_url"):
             return {"submitted": False,
@@ -731,6 +755,193 @@ class Daemon:
             raise evm.EvmError(f"tx {tx_hash} reverted on-chain")
         return {"submitted": True, "tx_hash": tx_hash,
                 "block": int(rcpt.get("blockNumber", "0x0"), 16), "from": sender}
+
+    # ------------------------------------------------------------ DEX execution
+    def _evm_dex_guards(self, params: dict):
+        """Chain-config gates shared by swap and LP execution. Returns
+        (info, rpc, priv, sender). Raises evm.EvmError fail-closed."""
+        chain = params["chain"]
+        entry = (self.evm_cfg.get("chains") or {}).get(chain) or {}
+        if not entry.get("enabled") or not entry.get("rpc_url"):
+            raise evm.EvmError(f"chain submission not configured for {chain}")
+        info = evm.CHAINS[chain]
+        if not info["testnet"] and not self.evm_cfg.get("mainnet_submit_enabled"):
+            raise evm.EvmError(
+                f"mainnet submission refused for {chain} — needs the "
+                "separately-authorized mainnet_submit_enabled flag (§10.14-17)")
+        if self._signing_seed() is None:
+            raise evm.EvmError("no seed configured — cannot sign")
+        rpc = evm.Rpc(entry["rpc_url"])
+        if rpc.chain_id() != info["chain_id"]:
+            raise evm.EvmError(
+                f"RPC reports a different chain id than {chain} — aborting")
+        priv, sender = self._evm_key(chain)
+        return info, rpc, priv, sender
+
+    def _evm_send_call(self, rpc, priv: bytes, chain_id: int, sender: str,
+                       nonce: int, to: str, value_wei: int, data_hex: str,
+                       gas_price_wei: int, what: str) -> tuple:
+        """Estimate, sign, verify, broadcast one contract call; wait for the
+        receipt and require success. Returns (tx_hash, next_nonce).
+
+        The signed tx's fields are re-checked against the plan (explicit
+        checks, not assert — fail-closed under python -O). A revert or a
+        missing receipt raises; a broadcast with no receipt in time raises
+        BroadcastUnknown (never a plain failure — no blind retries).
+        """
+        gas_limit = rpc.estimate_gas_call(sender, to, value_wei, data_hex)
+        signed = evm.sign_legacy_call(priv, chain_id, nonce, to, value_wei,
+                                      data_hex, gas_price_wei, gas_limit)
+        for name, got, want in (
+                ("from", signed["from"].lower(), sender.lower()),
+                ("to", signed["to"].lower(), to.lower()),
+                ("data", signed["data"].lower(), data_hex.lower()),
+                ("value_wei", signed["value_wei"], value_wei),
+                ("chain_id", signed["chain_id"], chain_id)):
+            if got != want:
+                raise evm.EvmError(
+                    f"{what}: signed tx {name} mismatch — approved intent "
+                    "violated, refusing to broadcast")
+        tx_hash = rpc.send_raw_tx(signed["raw_hex"])
+        rcpt = rpc.wait_receipt(tx_hash)
+        if int(rcpt.get("status", "0x0"), 16) != 1:
+            raise evm.EvmError(f"{what} tx {tx_hash} reverted on-chain")
+        return tx_hash, nonce + 1, int(rcpt.get("blockNumber", "0x0"), 16)
+
+    def _evm_ensure_allowance(self, rpc, priv: bytes, chain_id: int,
+                              sender: str, nonce: int, token: str,
+                              spender: str, amount_wei: int,
+                              gas_price_wei: int) -> tuple:
+        """Exact-amount ERC-20 approval if on-chain allowance is short.
+
+        Approves the EXACT amount the trade needs — never unlimited.
+        Returns (approve_tx_hash | None, next_nonce).
+        """
+        raw = rpc.eth_call(token,
+                           dex_mod.build_allowance_calldata(sender, spender),
+                           sender)
+        if dex_mod.decode_allowance(raw) >= amount_wei:
+            return None, nonce
+        data = dex_mod.build_approve_calldata(spender, amount_wei)
+        tx_hash, next_nonce, _block = self._evm_send_call(
+            rpc, priv, chain_id, sender, nonce, token, 0, data,
+            gas_price_wei, "approve")
+        return tx_hash, next_nonce
+
+    def _execute_evm_swap(self, params: dict) -> dict:
+        """Execute an approved dex_swap intent.
+
+        One approval = one execution attempt: the approve (exact amount,
+        only if allowance is short) and the swap are the single execution
+        of this intent. The firm quote is fetched NOW and validated
+        against the approved bounds before anything is signed.
+        """
+        import os
+        info, rpc, priv, sender = self._evm_dex_guards(params)
+        dl = params.get("deadline_sec")
+        if dl is not None and time.time() > dl:
+            raise evm.EvmError("swap intent expired — refusing")
+        venue = params["venue"]
+        env_key = "ZERO_EX_API_KEY" if venue == "0x" else "UNISWAP_API_KEY"
+        api_key = os.environ.get(env_key)
+        if not api_key:
+            raise evm.EvmError(
+                f"{env_key} not in the daemon environment — cannot fetch "
+                "a firm quote, refusing")
+        sell, buy = params["sell_token"], params["buy_token"]
+        amount = params["sell_amount_wei"]
+        # Firm quote, fetched at execution time (quotes live ~30s).
+        if venue == "0x":
+            quote = dex_mod.ZeroExClient(api_key).quote(
+                info["chain_id"], sell, buy, amount, sender,
+                slippage_bps=params["max_slippage_bps"])
+        else:
+            uni = dex_mod.UniswapClient(api_key)
+            zero = "0x0000000000000000000000000000000000000000"
+            sell_q = zero if sell == dex_mod.NATIVE_SENTINEL else sell
+            buy_q = zero if buy == dex_mod.NATIVE_SENTINEL else buy
+            q = uni.quote(info["chain_id"], sell_q, buy_q, amount, sender,
+                          slippage_pct=params["max_slippage_bps"] / 100)
+            quote = uni.swap(q["raw"], info["chain_id"], sell_q, buy_q,
+                             amount, sender,
+                             slippage_pct=params["max_slippage_bps"] / 100)
+            # Normalize back to the intent's token representation for the
+            # bounds check below.
+            quote["sell_token"], quote["buy_token"] = sell, buy
+        plan = dex_mod.validate_swap_intent_against_quote(
+            {"chain_id": info["chain_id"], "sell_token": sell,
+             "buy_token": buy, "sell_amount_wei": amount,
+             "min_buy_amount_wei": params["min_buy_amount_wei"],
+             "max_slippage_bps": params["max_slippage_bps"]},
+            quote)
+        nonce = rpc.nonce(sender)
+        gas_price = rpc.gas_price_wei()
+        approve_tx = None
+        if plan["needs_approval"]:
+            approve_tx, nonce = self._evm_ensure_allowance(
+                rpc, priv, info["chain_id"], sender, nonce, sell,
+                plan["allowance_target"], amount, gas_price)
+        tx_hash, _, block = self._evm_send_call(
+            rpc, priv, info["chain_id"], sender, nonce,
+            plan["to"], plan["value_wei"], plan["data"], gas_price, "swap")
+        out = {"submitted": True, "tx_hash": tx_hash, "block": block,
+               "from": sender, "buy_amount_wei": plan["buy_amount_wei"]}
+        if approve_tx:
+            out["approve_tx_hash"] = approve_tx
+        return out
+
+    def _execute_evm_lp_add(self, params: dict) -> dict:
+        """Execute an approved dex_lp_add intent.
+
+        Calldata is built locally from the approved bounds via the
+        whitelisted dex builders — the daemon never signs opaque
+        caller-supplied calldata. Both tokens get exact-amount approvals
+        (only where allowance is short), then the LP call.
+        """
+        info, rpc, priv, sender = self._evm_dex_guards(params)
+        dl = params.get("deadline_sec")
+        if dl is not None and time.time() > dl:
+            raise evm.EvmError("LP intent expired — refusing")
+        call_deadline = dl or int(time.time()) + 600
+        if call_deadline <= time.time() + 60:
+            raise evm.EvmError(
+                "LP deadline too close — calldata would revert on-chain")
+        protocol = params["protocol"]
+        tok_a, tok_b = params["token_a"], params["token_b"]
+        amt_a, amt_b = params["amount_a_wei"], params["amount_b_wei"]
+        if protocol == "v2":
+            data = dex_mod.build_v2_add_liquidity_calldata(
+                tok_a, tok_b, amt_a, amt_b,
+                params["amount_a_min_wei"], params["amount_b_min_wei"],
+                sender, call_deadline)
+        else:
+            t0, t1 = (tok_a, tok_b) if tok_a.lower() < tok_b.lower() \
+                else (tok_b, tok_a)
+            a0, a1 = (amt_a, amt_b) if tok_a.lower() < tok_b.lower() \
+                else (amt_b, amt_a)
+            m0, m1 = (params["amount_a_min_wei"], params["amount_b_min_wei"]) \
+                if tok_a.lower() < tok_b.lower() \
+                else (params["amount_b_min_wei"], params["amount_a_min_wei"])
+            data = dex_mod.build_v3_mint_calldata(
+                t0, t1, params["fee"], params["tick_lower"],
+                params["tick_upper"], a0, a1, m0, m1, sender, call_deadline)
+        nonce = rpc.nonce(sender)
+        gas_price = rpc.gas_price_wei()
+        approve_txs = []
+        for tok, amt in ((tok_a, amt_a), (tok_b, amt_b)):
+            ah, nonce = self._evm_ensure_allowance(
+                rpc, priv, info["chain_id"], sender, nonce, tok,
+                params["router"], amt, gas_price)
+            if ah:
+                approve_txs.append(ah)
+        tx_hash, _, block = self._evm_send_call(
+            rpc, priv, info["chain_id"], sender, nonce,
+            params["router"], 0, data, gas_price, "lp_add")
+        out = {"submitted": True, "tx_hash": tx_hash, "block": block,
+               "from": sender}
+        if approve_txs:
+            out["approve_tx_hashes"] = approve_txs
+        return out
 
     def _sage_rpc_ready(self) -> bool:
         """True if something answers on the Sage RPC port (TCP only)."""
@@ -2765,6 +2976,123 @@ class Daemon:
         self.ledger.append(muse_id, canon, None, "approved")
         return {"ok": True, "decision": "approved", "note": ex["note"]}
 
+    # ------------------------------------------------------------ DEX intents
+    def _validate_dex_swap(self, p: dict) -> dict:
+        """Schema + bounds validation for a dex_swap intent. Returns the
+        normalized intent or raises evm.EvmError (fail closed)."""
+        fields = set(p)
+        if not fields.issubset(SWAP_FIELDS) or "intent" not in p:
+            raise evm.EvmError(
+                "schema violation: unknown dex_swap fields rejected")
+        if p.get("intent") != "dex_swap":
+            raise evm.EvmError("schema violation: intent != dex_swap")
+        chain = p.get("chain")
+        if chain not in evm.CHAINS:
+            raise evm.EvmError(f"unknown EVM chain: {chain!r}")
+        venue = p.get("venue")
+        if venue not in ("0x", "uniswap"):
+            raise evm.EvmError(
+                f"venue must be '0x' or 'uniswap', got {venue!r}")
+        sell = p.get("sell_token", "")
+        buy = p.get("buy_token", "")
+        for tok, what in ((sell, "sell_token"), (buy, "buy_token")):
+            if tok != dex_mod.NATIVE_SENTINEL and not evm.is_address(tok):
+                raise evm.EvmError(f"bad {what} address: {tok!r}")
+        if sell.lower() == buy.lower():
+            raise evm.EvmError("sell_token == buy_token — refusing")
+        for k in ("sell_amount_wei", "min_buy_amount_wei"):
+            v = p.get(k)
+            if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
+                raise evm.EvmError(f"{k} must be a positive int in base units")
+        sl = p.get("max_slippage_bps")
+        if isinstance(sl, bool) or not isinstance(sl, int) \
+                or not (1 <= sl <= 500):
+            raise evm.EvmError("max_slippage_bps must be an int 1..500")
+        dl = p.get("deadline_sec")
+        if dl is not None and (not isinstance(dl, int) or dl <= 0):
+            raise evm.EvmError("deadline_sec must be a positive unix timestamp")
+        return {"intent": "dex_swap", "chain": chain, "venue": venue,
+                "sell_token": sell, "buy_token": buy,
+                "sell_amount_wei": p["sell_amount_wei"],
+                "min_buy_amount_wei": p["min_buy_amount_wei"],
+                "max_slippage_bps": sl, "purpose": p.get("purpose", ""),
+                "deadline_sec": dl,
+                "chain_id": evm.CHAINS[chain]["chain_id"]}
+
+    def _validate_dex_lp_add(self, p: dict) -> dict:
+        """Schema + bounds validation for a dex_lp_add intent."""
+        fields = set(p)
+        if not fields.issubset(LP_ADD_FIELDS) or "intent" not in p:
+            raise evm.EvmError(
+                "schema violation: unknown dex_lp_add fields rejected")
+        if p.get("intent") != "dex_lp_add":
+            raise evm.EvmError("schema violation: intent != dex_lp_add")
+        chain = p.get("chain")
+        if chain not in evm.CHAINS:
+            raise evm.EvmError(f"unknown EVM chain: {chain!r}")
+        protocol = p.get("protocol")
+        if protocol not in ("v2", "v3"):
+            raise evm.EvmError(
+                f"protocol must be 'v2' or 'v3', got {protocol!r}")
+        router = p.get("router", "")
+        if not evm.is_address(router):
+            raise evm.EvmError(f"bad router address: {router!r}")
+        tok_a, tok_b = p.get("token_a", ""), p.get("token_b", "")
+        for tok, what in ((tok_a, "token_a"), (tok_b, "token_b")):
+            if not evm.is_address(tok):
+                raise evm.EvmError(f"bad {what} address: {tok!r}")
+        if tok_a.lower() == tok_b.lower():
+            raise evm.EvmError("token_a == token_b — refusing")
+        for k in ("amount_a_wei", "amount_b_wei"):
+            v = p.get(k)
+            if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
+                raise evm.EvmError(f"{k} must be a positive int in base units")
+        for k in ("amount_a_min_wei", "amount_b_min_wei"):
+            v = p.get(k)
+            if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                raise evm.EvmError(f"{k} must be a non-negative int")
+        if p["amount_a_min_wei"] > p["amount_a_wei"] or \
+                p["amount_b_min_wei"] > p["amount_b_wei"]:
+            raise evm.EvmError("min amounts exceed desired amounts — refusing")
+        fee, tl, tu = p.get("fee"), p.get("tick_lower"), p.get("tick_upper")
+        if protocol == "v3":
+            if fee not in (100, 500, 3000, 10000):
+                raise evm.EvmError("v3 fee must be one of 100/500/3000/10000")
+            if not isinstance(tl, int) or not isinstance(tu, int) or tl >= tu:
+                raise evm.EvmError("tick_lower must be < tick_upper")
+        elif fee is not None or tl is not None or tu is not None:
+            raise evm.EvmError("fee/ticks are v3-only fields")
+        dl = p.get("deadline_sec")
+        if dl is not None and (not isinstance(dl, int) or dl <= 0):
+            raise evm.EvmError("deadline_sec must be a positive unix timestamp")
+        return {"intent": "dex_lp_add", "chain": chain,
+                "protocol": protocol, "router": router,
+                "token_a": tok_a, "token_b": tok_b,
+                "amount_a_wei": p["amount_a_wei"],
+                "amount_b_wei": p["amount_b_wei"],
+                "amount_a_min_wei": p["amount_a_min_wei"],
+                "amount_b_min_wei": p["amount_b_min_wei"],
+                "fee": fee, "tick_lower": tl, "tick_upper": tu,
+                "purpose": p.get("purpose", ""), "deadline_sec": dl,
+                "chain_id": evm.CHAINS[chain]["chain_id"]}
+
+    def rt_dex_swap(self, p: dict, muse_id: str) -> dict:
+        """Queue/approve/deny/execute path for a bounded swap intent."""
+        intent = self._validate_dex_swap(p)
+        asset = ("native" if intent["sell_token"] == dex_mod.NATIVE_SENTINEL
+                 else intent["sell_token"].lower())
+        entries = [(intent["chain"], asset, intent["sell_amount_wei"])]
+        return self._run_fund_intent(intent, muse_id, entries, "dex_swap")
+
+    def rt_dex_lp_add(self, p: dict, muse_id: str) -> dict:
+        """Queue/approve/deny/execute path for a bounded LP-add intent."""
+        intent = self._validate_dex_lp_add(p)
+        entries = [(intent["chain"], intent["token_a"].lower(),
+                    intent["amount_a_wei"]),
+                   (intent["chain"], intent["token_b"].lower(),
+                    intent["amount_b_wei"])]
+        return self._run_fund_intent(intent, muse_id, entries, "dex_lp_add")
+
     # ------------------------------------------------------------ offer intents
     def _chia_offer_guards(self, params: dict, chain: str) -> None:
         """Fail-fast checks shared by every offer intent.
@@ -2860,6 +3188,13 @@ class Daemon:
                     for it in params["_give"]]
         if intent in ("offer_cancel", "message_sign"):
             return []
+        if intent == "dex_swap":
+            asset = params.get("sell_token", "")
+            a = "native" if asset == dex_mod.NATIVE_SENTINEL else asset.lower()
+            return [(chain, a, params["sell_amount_wei"])]
+        if intent == "dex_lp_add":
+            return [(chain, params["token_a"].lower(), params["amount_a_wei"]),
+                    (chain, params["token_b"].lower(), params["amount_b_wei"])]
         fee = params.get("fee_mojos", 0)
         if intent == "option_mint":
             leg = params.get("underlying") or {}
@@ -2946,9 +3281,18 @@ class Daemon:
         self._record_velocity_entries(params)
         if ex.get("submitted"):
             self.ledger.append(muse_id, canon, ex["tx_hash"], "approved")
-            return {"ok": True, "decision": "approved",
-                    "tx_hash": ex["tx_hash"],
-                    "block": ex.get("block", ex.get("tx_height", ex.get("slot")))}
+            out = {"ok": True, "decision": "approved",
+                   "tx_hash": ex["tx_hash"],
+                   "block": ex.get("block", ex.get("tx_height", ex.get("slot")))}
+            # DEX executions may include exact-amount approval txs as part
+            # of the single approved execution — surface them for audit.
+            if ex.get("approve_tx_hash"):
+                out["approve_tx_hash"] = ex["approve_tx_hash"]
+            if ex.get("approve_tx_hashes"):
+                out["approve_tx_hashes"] = ex["approve_tx_hashes"]
+            if ex.get("buy_amount_wei") is not None:
+                out["buy_amount_wei"] = ex["buy_amount_wei"]
+            return out
         self.ledger.append(muse_id, canon, ex.get("offer_id"), "approved")
         out = {"ok": True, "decision": "approved", "note": ex.get("note", "")}
         if ex.get("offer_id"):
@@ -3862,6 +4206,38 @@ class Daemon:
                     "get": p.get("_get"),
                     "fee_mojos": p.get("fee_mojos", 0),
                     "destination": None, "asset": "offer", "amount": None,
+                })
+            elif intent == "dex_swap":
+                # The human approves BOUNDS, not calldata: exact sell,
+                # minimum buy, max slippage. The firm quote is fetched at
+                # execution and must fit inside these bounds.
+                entry.update({
+                    "kind": "dex_swap",
+                    "venue": p.get("venue"),
+                    "sell_token": p.get("sell_token"),
+                    "buy_token": p.get("buy_token"),
+                    "sell_amount_wei": p.get("sell_amount_wei"),
+                    "min_buy_amount_wei": p.get("min_buy_amount_wei"),
+                    "max_slippage_bps": p.get("max_slippage_bps"),
+                    "deadline_sec": p.get("deadline_sec"),
+                    "destination": None, "asset": "dex_swap", "amount": None,
+                })
+            elif intent == "dex_lp_add":
+                entry.update({
+                    "kind": "dex_lp_add",
+                    "protocol": p.get("protocol"),
+                    "router": p.get("router"),
+                    "token_a": p.get("token_a"),
+                    "token_b": p.get("token_b"),
+                    "amount_a_wei": p.get("amount_a_wei"),
+                    "amount_b_wei": p.get("amount_b_wei"),
+                    "amount_a_min_wei": p.get("amount_a_min_wei"),
+                    "amount_b_min_wei": p.get("amount_b_min_wei"),
+                    "fee": p.get("fee"),
+                    "tick_lower": p.get("tick_lower"),
+                    "tick_upper": p.get("tick_upper"),
+                    "deadline_sec": p.get("deadline_sec"),
+                    "destination": None, "asset": "dex_lp_add", "amount": None,
                 })
             elif intent == "offer_cancel":
                 entry.update({

@@ -145,6 +145,29 @@ class Rpc:
         tx = {"from": from_addr, "to": to, "value": hex(value_wei)}
         return int(self.call("eth_estimateGas", [tx]), 16)
 
+    def estimate_gas_call(self, from_addr: str, to: str, value_wei: int,
+                          data_hex: str) -> int:
+        """eth_estimateGas for a contract call (swap, approve, LP, ...).
+
+        Same fail-closed discipline as estimate_gas: no guess is ever
+        broadcast. data_hex must be 0x-prefixed calldata.
+        """
+        if not (isinstance(data_hex, str) and data_hex.startswith("0x")):
+            raise EvmError("calldata must be 0x-prefixed hex")
+        tx = {"from": from_addr, "to": to, "value": hex(value_wei),
+              "data": data_hex}
+        return int(self.call("eth_estimateGas", [tx]), 16)
+
+    def eth_call(self, to: str, data_hex: str, from_addr: str | None = None,
+                 block: str = "latest"):
+        """Read-only contract call (allowance checks, etc.). Never signs."""
+        if not (isinstance(data_hex, str) and data_hex.startswith("0x")):
+            raise EvmError("calldata must be 0x-prefixed hex")
+        tx = {"to": to, "data": data_hex}
+        if from_addr:
+            tx["from"] = from_addr
+        return self.call("eth_call", [tx, block])
+
     def send_raw_tx(self, raw_hex: str) -> str:
         return self.call("eth_sendRawTransaction", [raw_hex])
 
@@ -170,23 +193,18 @@ class Rpc:
 
 
 # --- signing ------------------------------------------------------------------
-def sign_legacy_transfer(privkey_bytes: bytes, chain_id: int, nonce: int,
-                         to: str, value_wei: int, gas_price_wei: int,
-                         gas_limit: int = TRANSFER_GAS_LIMIT) -> dict:
-    """Sign an EIP-155 legacy native transfer. Returns raw tx + tx hash.
-
-    Verifies by ecrecover before returning: the recovered sender must equal
-    address_from_privkey(privkey_bytes), else this raises and nothing is
-    broadcast.
-    """
+def _sign_legacy(privkey_bytes: bytes, chain_id: int, nonce: int, to: str,
+                 value_wei: int, data: bytes, gas_price_wei: int,
+                 gas_limit: int) -> dict:
+    """Core EIP-155 legacy signer. ``data`` empty = native transfer."""
     if not is_address(to):
         raise EvmError(f"bad destination address: {to!r}")
-    if value_wei <= 0:
-        raise EvmError("value must be positive")
+    if value_wei < 0:
+        raise EvmError("value must be non-negative")
     to_bytes = bytes.fromhex(to[2:])
     unsigned = _rlp_list([_rlp_int(nonce), _rlp_int(gas_price_wei),
                           _rlp_int(gas_limit), _rlp_bytes(to_bytes),
-                          _rlp_int(value_wei), _rlp_bytes(b""),
+                          _rlp_int(value_wei), _rlp_bytes(data),
                           _rlp_int(chain_id), _rlp_bytes(b""),
                           _rlp_bytes(b"")])
     digest = keccak256(unsigned)
@@ -195,7 +213,7 @@ def sign_legacy_transfer(privkey_bytes: bytes, chain_id: int, nonce: int,
     v = chain_id * 2 + 35 + rec_id
     signed = _rlp_list([_rlp_int(nonce), _rlp_int(gas_price_wei),
                         _rlp_int(gas_limit), _rlp_bytes(to_bytes),
-                        _rlp_int(value_wei), _rlp_bytes(b""),
+                        _rlp_int(value_wei), _rlp_bytes(data),
                         _rlp_int(v), _rlp_int(r), _rlp_int(s)])
     # Pre-broadcast verification: recover the sender, compare to the key.
     recovered = PublicKey.from_signature_and_message(sig, digest, hasher=None)
@@ -206,4 +224,42 @@ def sign_legacy_transfer(privkey_bytes: bytes, chain_id: int, nonce: int,
     return {"raw_hex": "0x" + signed.hex(),
             "tx_hash": "0x" + keccak256(signed).hex(),
             "from": expected, "to": to, "value_wei": value_wei,
+            "data": "0x" + data.hex(),
             "nonce": nonce, "chain_id": chain_id}
+
+
+def sign_legacy_transfer(privkey_bytes: bytes, chain_id: int, nonce: int,
+                         to: str, value_wei: int, gas_price_wei: int,
+                         gas_limit: int = TRANSFER_GAS_LIMIT) -> dict:
+    """Sign an EIP-155 legacy native transfer. Returns raw tx + tx hash.
+
+    Verifies by ecrecover before returning: the recovered sender must equal
+    address_from_privkey(privkey_bytes), else this raises and nothing is
+    broadcast.
+    """
+    if value_wei <= 0:
+        raise EvmError("value must be positive")
+    return _sign_legacy(privkey_bytes, chain_id, nonce, to, value_wei, b"",
+                        gas_price_wei, gas_limit)
+
+
+def sign_legacy_call(privkey_bytes: bytes, chain_id: int, nonce: int,
+                     to: str, value_wei: int, data_hex: str,
+                     gas_price_wei: int, gas_limit: int) -> dict:
+    """Sign an EIP-155 legacy contract call (swap, approve, LP, ...).
+
+    Same ecrecover self-check as transfers. ``data_hex`` must be 0x-prefixed
+    calldata built by a whitelisted builder (spellbook.dex) — the daemon
+    never signs caller-supplied raw calldata (only decoded, bounded
+    intents reach this function).
+    """
+    if not (isinstance(data_hex, str) and data_hex.startswith("0x")):
+        raise EvmError("calldata must be 0x-prefixed hex")
+    try:
+        data = bytes.fromhex(data_hex[2:])
+    except ValueError:
+        raise EvmError("calldata is not valid hex")
+    if not data:
+        raise EvmError("empty calldata — use sign_legacy_transfer")
+    return _sign_legacy(privkey_bytes, chain_id, nonce, to, value_wei, data,
+                        gas_price_wei, gas_limit)

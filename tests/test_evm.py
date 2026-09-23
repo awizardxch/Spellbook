@@ -140,3 +140,41 @@ def test_estimate_gas_failure_raises_fail_closed():
 
     with pytest.raises(evm.EvmError):
         _FailRpc().estimate_gas("0x" + "aa" * 20, "0x" + "bb" * 20, 1)
+
+
+def test_sign_legacy_call_carries_calldata():
+    """sign_legacy_call signs a contract call: data lands in the tx, the
+    ecrecover self-check passes, and empty calldata is refused."""
+    eth_keys = pytest.importorskip("eth_keys")
+    to = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    data = "0x095ea7b3000000000000000000000000" \
+           "1111111111111111111111111111111111111111" \
+           "0000000000000000000000000000000000000000000000000de0b6b3a7640000"
+    s = evm.sign_legacy_call(PRIV, 46630, nonce=3, to=to, value_wei=0,
+                             data_hex=data, gas_price_wei=10 ** 10,
+                             gas_limit=100_000)
+    assert s["from"].lower() == PRIV_ADDR.lower()
+    assert s["to"].lower() == to.lower()
+    assert s["data"].lower() == data.lower()
+    assert s["value_wei"] == 0
+    raw = bytes.fromhex(s["raw_hex"][2:])
+    fields = _rlp_decode(raw)
+    # field 5 is the data field of the signed tx — must be our calldata.
+    assert fields[5].hex() == data[2:].lower()
+    with pytest.raises(evm.EvmError):
+        evm.sign_legacy_call(PRIV, 46630, 0, to, 0, "0x",
+                             10 ** 10, 100_000)
+    with pytest.raises(evm.EvmError):
+        evm.sign_legacy_call(PRIV, 46630, 0, to, 0, "not-hex",
+                             10 ** 10, 100_000)
+
+
+def test_sign_legacy_transfer_still_empty_data():
+    """The transfer wrapper must keep signing data-less txs (v1 path)."""
+    eth_keys = pytest.importorskip("eth_keys")
+    to = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    s = evm.sign_legacy_transfer(PRIV, 46630, nonce=7, to=to,
+                                 value_wei=10 ** 15, gas_price_wei=10 ** 10)
+    assert s["data"] == "0x"
+    with pytest.raises(evm.EvmError):
+        evm.sign_legacy_transfer(PRIV, 46630, 0, to, 0, 10 ** 10)
