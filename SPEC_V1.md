@@ -554,9 +554,10 @@ tooling (approve token), showing
     approves their own venues. Unknown venue names fail the daemon at
     startup (typo guard). The venue must also serve the intent's chain
     (both matcha and uniswap serve Robinhood Chain mainnet, 4663 —
-    user-verified 2026-09-23; the 46630 testnet is not served); an
-    unserved chain is refused at request time with a clear reason —
-    that is a capability fact, not a policy choice.
+    per their official supported-chains docs, 2026-09-23; the 46630
+    testnet is not served); an unserved chain is refused at request
+    time with a clear reason — that is a capability fact, not a policy
+    choice.
   - Exact-amount ERC-20 approvals only (allowance checked on-chain
     first; no unlimited approvals). The spender comes from the quote,
     never hardcoded.
@@ -1227,6 +1228,36 @@ verify, install locally — per muse, per D1.
 ---
 
 ## 15. Review log
+
+- 2026-09-23 — DEX venue docs-authority audit (Speechless's standing
+  rule: each venue's official docs are the source of truth; Spellbook
+  describes only its own policy on top). Audited
+  `src/spellbook/dex.py` against the live 0x docs, the Uniswap
+  integration guide, API reference, and the Trading API OpenAPI spec;
+  corrected: (1) `ZEROX_CHAINS` now mirrors
+  https://docs.0x.org/docs/introduction/supported-chains (adds
+  Abstract 2741, Arc 5042, Berachain 80094, Monad 143, Plasma 9745,
+  Tempo 4217; drops Blast 81457 and Mode 34443, which the docs do not
+  list); (2) `UNISWAP_CHAINS` now mirrors
+  https://developers.uniswap.org/docs/trading/swapping-api/supported-chains
+  (24 chains incl. Robinhood Chain mainnet 4663 and the three
+  API-accessible testnets); (3) `X-Agent-Info` is now the JSON object
+  Uniswap's agent-attribution docs specify
+  (`decision_origin: "human_mediated"` — plain strings are dropped as
+  malformed); (4) `/check_approval` sends `walletAddress` (the
+  documented ApprovalRequest field, not `wallet`) and no longer claims
+  the API approves the exact amount (the docs' `permitAmount` may be
+  FULL — the returned tx must be reviewed); (5) `/swap` passes the
+  /quote response object itself as the guide prescribes (stopped
+  inventing top-level token/amount fields the schema does not define),
+  requires the human's EIP-712 `permit_signature` when the quote
+  returns `permitData` instead of silently dropping it, and the routing
+  refusal names the guide's real dispatch (DUTCH_*/PRIORITY/LIMIT_ORDER
+  → /order, CHAINED → /plan); (6) native currency is recognized in both
+  venues' representations (0x's 0xEeee… and Uniswap's zero address).
+  Chain lists have snapshot tests so docs drift is caught. No D1–D14
+  decision changed; no code beyond the DEX client; human approval
+  remains the per-transaction gate.
 - 2026-09-23 — Safe multisig direction (Speechless): per-agent Safe,
   created only on explicit human request; threshold and signing
   wallets human-decided; post-creation changes require on-chain

@@ -447,16 +447,29 @@ best = dex.compare_quotes([q, firm])["best"]
 
 ### When to use which venue
 
+Official docs are the authority for how each venue works — Spellbook
+only adds policy and workflow on top. Cite the docs, never paraphrase
+their semantics from memory:
+
 - **matcha** — widest aggregation (the 0x Swap API is what matcha.xyz
-  routes through); serves Ethereum, Base, Arbitrum, Optimism, Polygon,
-  BNB, Avalanche and more. Two modes: `allowance-holder` (classic
-  approve-then-swap) and `permit2` (signature-based approvals).
-- **Uniswap** — Uniswap routing + UniswapX; serves the major chains.
-  Canonical flow is `check_approval` → `quote` → `swap`. Chained
-  multi-step routings (`DUTCH_V2` etc.) are refused rather than
-  half-built — re-quote or switch venue.
-- **Both serve Robinhood Chain mainnet (4663)** — verified on the
-  frontends 2026-09-23. The 46630 testnet is not served by either.
+  routes through); the docs list ~22 chains incl. Robinhood Chain
+  mainnet (4663): https://docs.0x.org/docs/introduction/supported-chains.
+  Two modes: `allowance-holder` (classic approve-then-swap) and
+  `permit2` (signature-based approvals).
+- **Uniswap** — Uniswap routing + UniswapX; chain list in the docs
+  (Robinhood Chain mainnet (4663) included):
+  https://developers.uniswap.org/docs/trading/swapping-api/supported-chains.
+  Canonical flow is `check_approval` → `quote` → `swap`
+  (https://developers.uniswap.org/docs/trading/swapping-api/integration-guide).
+  Non-classic routings are refused rather than half-built — DUTCH_V2/
+  DUTCH_V3/PRIORITY/LIMIT_ORDER quotes need the /order flow, CHAINED
+  needs /plan (per the guide's endpoint table) — re-quote or switch
+  venue. If a quote returns `permitData`, the human's EIP-712
+  signature over it is required before /swap. Spellbook sends the
+  `X-Agent-Info` header as the agent-attribution docs specify
+  (JSON with `decision_origin: "human_mediated"`).
+- **Both serve Robinhood Chain mainnet (4663)** — per their official
+  supported-chains docs. The 46630 testnet is not served by either.
   For Uniswap-v2-style pools with no API key (e.g. PLANK/WETH),
   `build_v2_swap_calldata` builds the swap calldata directly against
   the pool's router address.
