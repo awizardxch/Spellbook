@@ -291,6 +291,67 @@
   color: var(--faint);
 }
 
+/* ---------- labeled wallets ---------- */
+/* One header row per wallet in the portfolio table; the badge also marks
+ * each row group in the Networks and Activity tabs. Bankr gets a gold
+ * treatment so it never reads as a Spellbook wallet. */
+.dash-walletrow td {
+  background: rgba(34, 211, 238, 0.05);
+  padding: 12px 8px 8px;
+  border-bottom: 1px solid rgba(34, 211, 238, 0.16);
+}
+
+.dash-wallet {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: #22d3ee;
+  border: 1px solid rgba(34, 211, 238, 0.5);
+  background: rgba(34, 211, 238, 0.08);
+  border-radius: 999px;
+  padding: 3px 12px;
+  margin-right: 10px;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.dash-wallet-bankr {
+  color: #fbbf24;
+  border-color: rgba(251, 191, 36, 0.55);
+  background: rgba(251, 191, 36, 0.08);
+  text-shadow: 0 0 10px rgba(251, 191, 36, 0.4);
+}
+
+.dash-walletnote {
+  font-size: 0.76rem;
+  color: var(--faint);
+  vertical-align: middle;
+}
+
+/* per-wallet balance lines in the Networks tab */
+.dash-netbal {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+}
+
+.dash-netwal {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.dash-netbalv {
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  color: var(--text);
+  white-space: nowrap;
+}
+
 .dash-dot {
   display: inline-block;
   width: 9px;
@@ -708,18 +769,169 @@
   margin: 4px 0 8px;
 }
 
-/* ---------- responsive ---------- */
+/* ---------- responsive: phones ---------- */
 @media (max-width: 760px) {
   .dash-grid2 {
     grid-template-columns: 1fr;
   }
 
   .dash-panel {
-    padding: 20px 16px;
+    padding: 20px 14px;
+    border-radius: 14px;
+  }
+
+  .dash-panel-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+
+  .dash-actions {
+    gap: 8px;
+  }
+
+  .dash-chip {
+    font-size: 0.72rem;
+    padding: 6px 10px;
+  }
+
+  /* nav: brand + session pill stack above the scrolling links */
+  .dash-nav {
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 16px 0 14px;
+  }
+
+  .dash-nav .nav-links {
+    width: 100%;
+    gap: 12px;
+  }
+
+  .dash-session {
+    font-size: 0.76rem;
+    padding: 4px 10px;
+  }
+
+  /* tabs: keep the scroll-row behavior from .bar-scroll, roomier targets */
+  .dash-tab {
+    padding: 12px 14px;
+    font-size: 0.88rem;
+  }
+
+  /* portfolio table: scroll sideways instead of crushing; the expanded
+   * asset rows stack name over qty/usd */
+  .dash-table {
+    min-width: 620px;
+    font-size: 0.84rem;
+  }
+
+  .dash-table th,
+  .dash-table td {
+    padding: 10px 6px;
+  }
+
+  .dash-asset {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+
+  .dash-asset-name {
+    flex: 1 1 100%;
+  }
+
+  .dash-asset-qty {
+    text-align: left;
+  }
+
+  .dash-asset-usd {
+    min-width: 0;
+    margin-left: auto;
+  }
+
+  .dash-depth-btn {
+    padding: 6px 12px;
+    font-size: 1rem;
+  }
+
+  .dash-copy {
+    padding: 6px 10px;
+    font-size: 0.85rem;
+  }
+
+  /* networks tab: cards stack, env rows wrap, balances stay visible */
+  .dash-netrow {
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 14px;
+  }
+
+  .dash-netinfo {
+    flex: 1 1 100%;
+  }
+
+  .dash-netenvs {
+    flex: 1 1 100%;
+  }
+
+  .dash-netenv {
+    flex-wrap: wrap;
+    row-gap: 6px;
   }
 
   .dash-netbal {
-    display: none;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .dash-netbalv {
+    font-size: 0.88rem;
+  }
+
+  /* activity: rows wrap, counterparty drops to its own line */
+  .dash-agroup {
+    padding: 14px;
+  }
+
+  .dash-agroup-head {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  .dash-arow {
+    flex-wrap: wrap;
+    row-gap: 6px;
+    gap: 8px;
+  }
+
+  .dash-acp {
+    flex: 1 1 100%;
+    order: 5;
+  }
+
+  /* login gate hero */
+  .dash-hero {
+    padding: 44px 8px 28px;
+  }
+
+  .dash-walletnote {
+    display: block;
+    margin-top: 4px;
+  }
+}
+
+@media (max-width: 400px) {
+  .dash-panel {
+    padding: 16px 10px;
+  }
+
+  .dash-netcount,
+  .dash-refresh {
+    padding: 10px 12px;
+    font-size: 0.82rem;
+  }
+
+  .dash-envtag {
+    min-width: 0;
   }
 }
 

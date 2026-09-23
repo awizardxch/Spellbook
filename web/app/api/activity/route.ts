@@ -22,6 +22,7 @@ import { CHAINS, type ChainConfig } from "@/lib/chains";
 import {
   SESSION_COOKIE,
   readSession,
+  sessionWallets,
   type AgentAddresses,
   type Session,
 } from "@/lib/auth";
@@ -154,18 +155,22 @@ function addressesForChain(
   return list && list.length > 0 ? list : null;
 }
 
-function chainsForSession(session: Session): { cfg: ChainConfig; addresses: string[] }[] {
-  if (session.role === "viewer" && !session.addresses) {
+function chainsForSession(session: Session): { wallet: string; cfg: ChainConfig; addresses: string[] }[] {
+  const wallets = sessionWallets(session);
+  if (wallets.length === 0) {
+    // Shared operator drill view (no wallets bound).
     return CHAINS.filter((cfg) => cfg.address).map((cfg) => ({
+      wallet: "Operator",
       cfg,
       addresses: [cfg.address],
     }));
   }
-  const addrs: AgentAddresses = session.addresses ?? {};
-  const out: { cfg: ChainConfig; addresses: string[] }[] = [];
-  for (const cfg of CHAINS) {
-    const addresses = addressesForChain(cfg, addrs);
-    if (addresses) out.push({ cfg, addresses });
+  const out: { wallet: string; cfg: ChainConfig; addresses: string[] }[] = [];
+  for (const w of wallets) {
+    for (const cfg of CHAINS) {
+      const addresses = addressesForChain(cfg, w.addresses);
+      if (addresses) out.push({ wallet: w.label, cfg, addresses });
+    }
   }
   return out;
 }
@@ -197,6 +202,8 @@ export interface AddressActivity {
 
 export interface ChainActivity {
   id: string;
+  /** labeled wallet this group belongs to, e.g. "Spellbook" or "Bankr" */
+  wallet: string;
   label: string;
   detail: string;
   env: string;
@@ -557,7 +564,7 @@ export async function GET(req: Request): Promise<NextResponse> {
 
   const groups = chainsForSession(session);
   const chains: ChainActivity[] = await Promise.all(
-    groups.map(async ({ cfg, addresses }): Promise<ChainActivity> => {
+    groups.map(async ({ wallet, cfg, addresses }): Promise<ChainActivity> => {
       const slice = addresses
         .slice(0, Math.min(depth, addresses.length))
         .map((address, i) => ({ index: i + 1, address }));
@@ -580,6 +587,7 @@ export async function GET(req: Request): Promise<NextResponse> {
       }
       return {
         id: cfg.id,
+        wallet,
         label: cfg.networkLabel,
         detail: cfg.detail,
         env: cfg.env,

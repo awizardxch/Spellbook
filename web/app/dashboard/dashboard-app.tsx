@@ -33,6 +33,8 @@ interface NftHolding {
 
 interface Holding {
   id: string;
+  /** labeled wallet this row belongs to, e.g. "Spellbook" or "Bankr" */
+  wallet: string;
   label: string;
   detail: string;
   /** "mainnet" | "testnet" */
@@ -96,6 +98,8 @@ interface AddressActivity {
 
 interface ChainActivity {
   id: string;
+  /** labeled wallet this group belongs to, e.g. "Spellbook" or "Bankr" */
+  wallet: string;
   label: string;
   detail: string;
   env: string;
@@ -127,6 +131,24 @@ function timeAgo(iso: string | null): string {
 function truncate(addr: string): string {
   if (addr.length <= 18) return addr;
   return `${addr.slice(0, 10)}…${addr.slice(-6)}`;
+}
+
+/** Stable key for one wallet × chain row. */
+function wkey(wallet: string, id: string): string {
+  return `${wallet}::${id}`;
+}
+
+/** Wallet badge — Bankr gets its own accent so it never blends in. */
+function WalletBadge({ wallet }: { wallet: string }) {
+  const bankr = wallet.toLowerCase() === "bankr";
+  return (
+    <span
+      className={`dash-wallet${bankr ? " dash-wallet-bankr" : ""}`}
+      title={bankr ? "Bankr wallet (separate from Spellbook)" : `Wallet: ${wallet}`}
+    >
+      {wallet}
+    </span>
+  );
 }
 
 export default function DashboardApp({
@@ -250,7 +272,8 @@ export default function DashboardApp({
   const testnetOn = CHAINS.filter(
     (c) => c.env === "testnet" && enabled[c.id]
   ).length;
-  const holdingById = (id: string) => holdings?.find((h) => h.id === id);
+  const holdingsFor = (id: string) =>
+    (holdings ?? []).filter((h) => h.id === id);
 
   /* ---------------- dashboard ---------------- */
 
@@ -401,28 +424,45 @@ export default function DashboardApp({
                   </tr>
                 </thead>
                 <tbody>
-                  {visible.map((h) => {
+                  {visible.map((h, i) => {
                     const cfg = CHAINS.find((c) => c.id === h.id);
-                    const open = expandedChain === h.id;
+                    const key = wkey(h.wallet, h.id);
+                    const open = expandedChain === key;
                     const firstError = h.addresses.find(
                       (a) => a.error
                     )?.error;
                     const assetCount =
                       h.tokens.length + (h.total !== null ? 1 : 0);
+                    // One labeled header row each time the wallet changes —
+                    // the API returns wallets grouped, in binding order.
+                    const walletHead =
+                      i === 0 || visible[i - 1].wallet !== h.wallet;
                     return (
-                      <Fragment key={h.id}>
+                      <Fragment key={key}>
+                        {walletHead && (
+                          <tr className="dash-walletrow">
+                            <td colSpan={4}>
+                              <WalletBadge wallet={h.wallet} />
+                              <span className="dash-sub dash-walletnote">
+                                {h.wallet.toLowerCase() === "bankr"
+                                  ? "separate Bankr wallet — not a Spellbook wallet"
+                                  : "agent\u2019s Spellbook wallets"}
+                              </span>
+                            </td>
+                          </tr>
+                        )}
                         <tr
                           className={`dash-chainrow${open ? " open" : ""}`}
                           onClick={() =>
                             setExpandedChain((cur) =>
-                              cur === h.id ? null : h.id
+                              cur === key ? null : key
                             )
                           }
                           onKeyDown={(e) => {
                             if (e.key === "Enter" || e.key === " ") {
                               e.preventDefault();
                               setExpandedChain((cur) =>
-                                cur === h.id ? null : h.id
+                                cur === key ? null : key
                               );
                             }
                           }}
@@ -626,7 +666,7 @@ export default function DashboardApp({
                         )}
                         {open &&
                           h.addresses.map((a, i) => (
-                            <tr key={`${h.id}-${i}`} className="dash-subrow">
+                            <tr key={`${key}-${i}`} className="dash-subrow">
                               <td>
                                 <span className="dash-idx">#{a.index}</span>
                                 <span className="dash-sub">
@@ -651,11 +691,11 @@ export default function DashboardApp({
                                   className="dash-copy"
                                   type="button"
                                   onClick={() =>
-                                    copy(a.address, `addr-${h.id}-${i}`)
+                                    copy(a.address, `addr-${key}-${i}`)
                                   }
-                                  aria-label={`Copy ${h.label} address #${a.index}`}
+                                  aria-label={`Copy ${h.wallet} ${h.label} address #${a.index}`}
                                 >
-                                  {copied === `addr-${h.id}-${i}` ? "✓" : "⧉"}
+                                  {copied === `addr-${key}-${i}` ? "✓" : "⧉"}
                                 </button>
                               </td>
                               <td>
@@ -736,11 +776,11 @@ export default function DashboardApp({
                     </div>
                     <div className="dash-netenvs">
                       {pair.map((cfg) => {
-                        const h = holdingById(cfg.id);
+                        const hs = holdingsFor(cfg.id);
                         const on = enabled[cfg.id];
-                        const firstError = h?.addresses.find(
-                          (a) => a.error
-                        )?.error;
+                        const firstError = hs
+                          .flatMap((h) => h.addresses)
+                          .find((a) => a.error)?.error;
                         return (
                           <div
                             key={cfg.id}
@@ -755,11 +795,27 @@ export default function DashboardApp({
                               className="dash-netbal"
                               title={firstError ?? undefined}
                             >
-                              {h?.total != null ? (
-                                <>
-                                  {h.total}{" "}
-                                  <span className="dash-unit">{h.unit}</span>
-                                </>
+                              {hs.length > 0 ? (
+                                hs.map((h) => (
+                                  <span
+                                    key={wkey(h.wallet, h.id)}
+                                    className="dash-netwal"
+                                  >
+                                    <WalletBadge wallet={h.wallet} />
+                                    {h.total != null ? (
+                                      <span className="dash-netbalv">
+                                        {h.total}{" "}
+                                        <span className="dash-unit">
+                                          {h.unit}
+                                        </span>
+                                      </span>
+                                    ) : (
+                                      <span className="dash-muted">
+                                        {holdings ? "unavailable" : "…"}
+                                      </span>
+                                    )}
+                                  </span>
+                                ))
                               ) : (
                                 <span className="dash-muted">
                                   {holdings ? "unavailable" : "…"}
@@ -838,10 +894,14 @@ export default function DashboardApp({
 
             {activity &&
               activity.map((c) => (
-                <div key={c.id} className="dash-card dash-agroup">
+                <div
+                  key={wkey(c.wallet, c.id)}
+                  className="dash-card dash-agroup"
+                >
                   <div className="dash-agroup-head">
                     <span className="dash-anet">{c.label}</span>
                     <span className={`dash-envtag e-${c.env}`}>{c.env}</span>
+                    <WalletBadge wallet={c.wallet} />
                     <span className="dash-coverage">{c.coverage}</span>
                   </div>
                   {c.addresses.map((a) => (
@@ -850,10 +910,17 @@ export default function DashboardApp({
                         className="dash-addrline"
                         type="button"
                         title="Copy address"
-                        onClick={() => copy(a.address, `act-${c.id}-${a.index}`)}
+                        onClick={() =>
+                          copy(
+                            a.address,
+                            `act-${wkey(c.wallet, c.id)}-${a.index}`
+                          )
+                        }
                       >
                         #{a.index} {truncate(a.address)}{" "}
-                        {copied === `act-${c.id}-${a.index}` ? "\u2713" : ""}
+                        {copied === `act-${wkey(c.wallet, c.id)}-${a.index}`
+                          ? "\u2713"
+                          : ""}
                       </button>
                       {a.error && <p className="dash-aerror">{a.error}</p>}
                       {a.items.length === 0 && !a.error && (

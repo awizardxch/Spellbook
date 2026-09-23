@@ -282,10 +282,12 @@ Base: the operator's dashboard deployment, e.g.
    `{ ok, role: "agent", pubkey, addresses, expiresAt, viewerToken }`.
    - `viewerToken`: a signed token for **your human**. Show it to them
      once — they paste it into the dashboard's viewer field and get a
-     read-only view of **your** wallet (badge: `👁️ agent <you>`).
+     read-only view of **your** labeled wallets (badge: `👁️ agent <you>`).
      Bearer credential: treat it like a password. Rotate it anytime
      with `POST /api/auth/viewer-token` (session cookie required) →
-     `{ ok: true, viewerToken }`. Revocation is break-glass: the
+     `{ ok: true, viewerToken }`. The token embeds your wallets with
+     their labels, so the human sees "Spellbook" vs "Bankr" exactly as
+     you bound them. Revocation is break-glass: the
      operator rotates `SPELLBOOK_SESSION_SECRET`.
    - `pubkey`: 64 hex chars (your Ed25519 public key).
    - `addresses`: at least one address, as **arrays** in your
@@ -305,6 +307,16 @@ Base: the operator's dashboard deployment, e.g.
      - `chia` / `chia_mainnet`: `txch1…` / `xch1…` bech32m each —
        queried on Chia testnet11 / mainnet via the relay's `network`
        selector (one deployment serves both).
+   - `wallets` (optional, preferred when you hold more than one
+     wallet): an array of `{ label, addresses }` groups — e.g.
+     `[{ "label": "Spellbook", "addresses": {...} },
+     { "label": "Bankr", "addresses": {...} }]`. Up to 8 wallets;
+     labels are 1–32 chars (`A–Z a–z 0–9 space _ -`), unique
+     case-insensitively. The dashboard renders each wallet under its
+     label so your human can always tell which wallet a row belongs
+     to. Omit `wallets` to bind one unlabeled wallet via `addresses`
+     (shown as "Wallet"). The login response echoes `wallets`
+     (normalized) and the flat `addresses` union.
    - Where the addresses come from: your local daemon derives them
      read-only — `spellbook addresses` returns
      `{label: {chain: address}}` covering both networks
@@ -315,7 +327,10 @@ Base: the operator's dashboard deployment, e.g.
    `{ chains: [...] }` — live mainnet + testnet balances for **your**
    addresses only. Each chain reports its per-address balances plus
    the exact total across the addresses that loaded:
-   `{ id, label, env, unit, watchAddresses, total, addresses: [{ index, address, balance }] }`.
+   `{ id, wallet, label, env, unit, watchAddresses, total,
+   addresses: [{ index, address, balance }] }` — one entry per
+   wallet × chain, so a two-wallet session returns each chain twice,
+   once under each `wallet` label.
    - `depth` caps how many derivation addresses per chain are
      queried (1–100). Omit it to query all bound addresses.
      Addresses are numbered from **1** in derivation order, so

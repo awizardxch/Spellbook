@@ -63,6 +63,22 @@ export interface AgentAddresses {
   chia_mainnet?: string[];
 }
 
+/** Maximum labeled wallets one session / viewer token may carry. */
+export const MAX_WALLETS = 8;
+
+/**
+ * One labeled wallet inside a session or viewer token: a display label
+ * plus that wallet's watch addresses. An agent with several wallets
+ * (e.g. their Spellbook wallets plus a Bankr wallet) binds one group per
+ * wallet; the dashboard renders each group under its label so the human
+ * can always tell which wallet a row belongs to.
+ */
+export interface WalletGroup {
+  /** Display label, e.g. "Spellbook" or "Bankr". Agent-asserted. */
+  label: string;
+  addresses: AgentAddresses;
+}
+
 const EVM_RE = /^0x[0-9a-fA-F]{40}$/;
 const SOLANA_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const CHIA_RE = /^(txch1|xch1)[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+$/;
@@ -140,6 +156,67 @@ export function parseAgentAddresses(input: unknown): AgentAddresses | null {
   return out;
 }
 
+const WALLET_LABEL_RE = /^[A-Za-z0-9][A-Za-z0-9 _-]{0,31}$/;
+
+/**
+ * Validate agent-supplied labeled wallets: an array of
+ * `{ label, addresses }`. Returns the normalized groups, or null when
+ * missing/invalid. Labels are display-only (agent-asserted, like the
+ * addresses themselves); the charset keeps them safe to render.
+ */
+export function parseWalletGroups(input: unknown): WalletGroup[] | null {
+  if (!Array.isArray(input) || input.length === 0 || input.length > MAX_WALLETS)
+    return null;
+  const out: WalletGroup[] = [];
+  const seen = new Set<string>();
+  for (const item of input) {
+    if (typeof item !== "object" || item === null) return null;
+    const rec = item as Record<string, unknown>;
+    if (typeof rec.label !== "string") return null;
+    const label = rec.label.trim();
+    if (!WALLET_LABEL_RE.test(label)) return null;
+    const key = label.toLowerCase();
+    if (seen.has(key)) return null;
+    seen.add(key);
+    const addresses = parseAgentAddresses(rec.addresses);
+    if (!addresses) return null;
+    out.push({ label, addresses });
+  }
+  return out;
+}
+
+/**
+ * Flatten labeled wallets back to one AgentAddresses (union of every
+ * group's addresses per chain, deduped, group order kept). Used for
+ * backward-compatible echoes of the old flat shape.
+ */
+export function flattenWalletGroups(wallets: WalletGroup[]): AgentAddresses {
+  const out: AgentAddresses = {};
+  const fields = [
+    "evm",
+    "solana",
+    "chia",
+    "evm_mainnet",
+    "solana_mainnet",
+    "chia_mainnet",
+  ] as const;
+  for (const w of wallets) {
+    for (const f of fields) {
+      const list = w.addresses[f];
+      if (!list) continue;
+      const foldCase = f === "evm" || f === "evm_mainnet";
+      const cur = out[f] ?? [];
+      for (const a of list) {
+        const k = foldCase ? a.toLowerCase() : a;
+        if (!cur.some((c) => (foldCase ? c.toLowerCase() : c) === k))
+          cur.push(a);
+      }
+      out[f] = cur;
+    }
+  }
+  return out;
+}
+
 export interface Session {
   role: Role;
   exp: number;
@@ -148,9 +225,16 @@ export interface Session {
   /**
    * Watch addresses: the agent's own (role === "agent"), or the viewed
    * agent's (role === "viewer" via a per-agent viewer token). Absent for
-   * the shared operator drill view.
+   * the shared operator drill view. Legacy flat shape — new code should
+   * prefer `wallets`.
    */
   addresses?: AgentAddresses;
+  /**
+   * Labeled wallets bound to this session, in the order the agent gave
+   * them. Always normalized (legacy flat logins become one group labeled
+   * "Wallet"); absent only for the shared operator drill view.
+   */
+  wallets?: WalletGroup[];
   /**
    * role === "viewer" via a per-agent viewer token: the pubkey of the
    * agent whose wallet is being viewed (for the badge).
@@ -301,18 +385,32 @@ interface SessionPayload {
   exp: number;
   pubkey?: string;
   addresses?: AgentAddresses;
+  wallets?: WalletGroup[];
   viewingPubkey?: string;
 }
 
 export interface AgentIdentity {
   pubkey: string;
   addresses: AgentAddresses;
+  /** Labeled wallets; when absent the flat `addresses` are one wallet. */
+  wallets?: WalletGroup[];
+}
+
+/**
+ * The labeled wallets a session may see, in order. Legacy flat sessions
+ * normalize to a single group labeled "Wallet". Empty for the shared
+ * operator drill view (callers fall back to the drill addresses).
+ */
+export function sessionWallets(session: Session): WalletGroup[] {
+  if (session.wallets && session.wallets.length > 0) return session.wallets;
+  if (session.addresses) return [{ label: "Wallet", addresses: session.addresses }];
+  return [];
 }
 
 /**
  * Mint a signed session cookie value.
  * - role "agent": identity is the agent's own self-asserted identity
- *   (pubkey + own watch addresses).
+ *   (pubkey + own watch addresses, optionally as labeled wallets).
  * - role "viewer" with identity: read-only session on THAT AGENT's wallet,
  *   from a per-agent viewer token; the badge shows the viewed pubkey.
  * - role "viewer" without identity: the shared operator drill view.
@@ -331,6 +429,7 @@ export function mintSession(role: Role, identity?: AgentIdentity): string | null
   };
   if (identity) {
     payload.addresses = identity.addresses;
+    if (identity.wallets) payload.wallets = identity.wallets;
     if (role === "agent") payload.pubkey = identity.pubkey.toLowerCase();
     else payload.viewingPubkey = identity.pubkey.toLowerCase();
   }
@@ -338,6 +437,19 @@ export function mintSession(role: Role, identity?: AgentIdentity): string | null
     "base64url"
   );
   return `${body}.${hmacHex(secret, body)}`;
+}
+
+/** Normalize a session payload's wallets (v1 payloads carry an optional
+ * `wallets` array; older ones carry only the flat `addresses`). */
+function payloadWallets(payload: SessionPayload): WalletGroup[] | null {
+  if (payload.wallets !== undefined) {
+    const w = parseWalletGroups(payload.wallets);
+    if (!w) return null;
+    return w;
+  }
+  const a = parseAgentAddresses(payload.addresses);
+  if (!a) return null;
+  return [{ label: "Wallet", addresses: a }];
 }
 
 /** Read and validate a session cookie value. Null = no/invalid session. */
@@ -365,10 +477,11 @@ export function readSession(cookieValue: string | undefined): Session | null {
         !/^[0-9a-f]{64}$/.test(payload.pubkey)
       )
         return null;
-      const addresses = parseAgentAddresses(payload.addresses);
-      if (!addresses) return null;
+      const wallets = payloadWallets(payload);
+      if (!wallets) return null;
       session.pubkey = payload.pubkey;
-      session.addresses = addresses;
+      session.addresses = flattenWalletGroups(wallets);
+      session.wallets = wallets;
     }
     if (payload.role === "viewer" && payload.viewingPubkey !== undefined) {
       // Per-agent viewer token session: bound to the viewed agent's wallet.
@@ -377,10 +490,11 @@ export function readSession(cookieValue: string | undefined): Session | null {
         !/^[0-9a-f]{64}$/.test(payload.viewingPubkey)
       )
         return null;
-      const addresses = parseAgentAddresses(payload.addresses);
-      if (!addresses) return null;
+      const wallets = payloadWallets(payload);
+      if (!wallets) return null;
       session.viewingPubkey = payload.viewingPubkey;
-      session.addresses = addresses;
+      session.addresses = flattenWalletGroups(wallets);
+      session.wallets = wallets;
     }
     return session;
   } catch {
@@ -417,35 +531,38 @@ export function authConfigured(): { agent: boolean; viewer: boolean } {
 /**
  * A per-agent viewer token is a signed bearer credential an agent hands to
  * their human: pasting it into the dashboard's viewer field opens a
- * read-only session on THAT AGENT's wallet (not the operator drill view).
+ * read-only session on THAT AGENT's wallets (not the operator drill view).
  * Verified by HMAC with the session secret — no database, no expiry.
  * Revocation is break-glass: rotate SPELLBOOK_SESSION_SECRET, which
  * invalidates every session and viewer token on the deployment.
+ *
+ * v3 carries the agent's labeled wallets; v2 carried one flat address set
+ * (read back as a single group labeled "Wallet").
  */
 interface AgentViewerTokenPayload {
   v: number;
   kind: "agent-viewer";
   pubkey: string;
-  addresses: AgentAddresses;
+  wallets: WalletGroup[];
   iat: number;
 }
 
 /** Mint a viewer token for the given agent identity. */
 export function mintAgentViewerToken(
   pubkey: string,
-  addresses: AgentAddresses
+  wallets: WalletGroup[]
 ): string | null {
   const secret = sessionSecret();
   if (!secret) return null;
   const clean = pubkey.trim().toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(clean)) return null;
-  const parsed = parseAgentAddresses(addresses);
+  const parsed = parseWalletGroups(wallets);
   if (!parsed) return null;
   const payload: AgentViewerTokenPayload = {
-    v: 2,
+    v: 3,
     kind: "agent-viewer",
     pubkey: clean,
-    addresses: parsed,
+    wallets: parsed,
     iat: Date.now(),
   };
   const body = Buffer.from(JSON.stringify(payload), "utf8").toString(
@@ -466,18 +583,35 @@ export function readAgentViewerToken(
   const sig = parts[2];
   if (!safeEqualHex(sig.toLowerCase(), hmacHex(secret, body))) return null;
   try {
-    const payload = JSON.parse(
+    const raw = JSON.parse(
       Buffer.from(body, "base64url").toString("utf8")
-    ) as AgentViewerTokenPayload;
-    if (payload.v !== 2 || payload.kind !== "agent-viewer") return null;
+    ) as {
+      v: number;
+      kind: string;
+      pubkey: string;
+      wallets?: unknown;
+      addresses?: unknown;
+    };
+    if (raw.kind !== "agent-viewer") return null;
     if (
-      typeof payload.pubkey !== "string" ||
-      !/^[0-9a-f]{64}$/.test(payload.pubkey)
+      typeof raw.pubkey !== "string" ||
+      !/^[0-9a-f]{64}$/.test(raw.pubkey)
     )
       return null;
-    const addresses = parseAgentAddresses(payload.addresses);
-    if (!addresses) return null;
-    return { pubkey: payload.pubkey, addresses };
+    let wallets: WalletGroup[] | null = null;
+    if (raw.v === 3) {
+      wallets = parseWalletGroups(raw.wallets);
+    } else if (raw.v === 2) {
+      // Legacy flat token: one unlabeled wallet.
+      const addresses = parseAgentAddresses(raw.addresses);
+      if (addresses) wallets = [{ label: "Wallet", addresses }];
+    }
+    if (!wallets) return null;
+    return {
+      pubkey: raw.pubkey,
+      addresses: flattenWalletGroups(wallets),
+      wallets,
+    };
   } catch {
     return null;
   }

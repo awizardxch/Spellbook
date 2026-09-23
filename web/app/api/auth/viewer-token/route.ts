@@ -4,6 +4,7 @@ import {
   SESSION_COOKIE,
   mintAgentViewerToken,
   readSession,
+  sessionWallets,
 } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
@@ -15,22 +16,24 @@ export const dynamic = "force-dynamic";
  *
  * The agent shows the token to their human once; the human pastes it into
  * the dashboard's viewer field for a read-only view of this agent's
- * wallet. Bearer credential — treat it like a password.
+ * labeled wallets. Bearer credential — treat it like a password.
  */
 export async function POST(): Promise<NextResponse> {
   const session = readSession(cookies().get(SESSION_COOKIE)?.value);
-  if (
-    !session ||
-    session.role !== "agent" ||
-    !session.pubkey ||
-    !session.addresses
-  ) {
+  if (!session || session.role !== "agent" || !session.pubkey) {
     return NextResponse.json(
       { error: "agent login required" },
       { status: 401 }
     );
   }
-  const viewerToken = mintAgentViewerToken(session.pubkey, session.addresses);
+  const wallets = sessionWallets(session);
+  if (wallets.length === 0) {
+    return NextResponse.json(
+      { error: "agent login required" },
+      { status: 401 }
+    );
+  }
+  const viewerToken = mintAgentViewerToken(session.pubkey, wallets);
   if (!viewerToken) {
     return NextResponse.json(
       { error: "sessions are not configured on this deployment" },
