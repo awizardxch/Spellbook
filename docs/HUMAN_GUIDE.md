@@ -32,7 +32,8 @@ Two things, both delivered to you at install, out-of-band:
 2. Copy the approve token file to **your** device with your own machine
    access. Never read it into your agent's environment.
 3. Write down the paper backup (§1). Verify after any import by comparing
-   the shown addresses against `spellbook addresses`.
+   the shown addresses against the approve-token read path (§4) —
+   not against anything your agent pastes into chat.
 4. Confirm `spellbook doctor` is green before your agent does anything
    else.
 
@@ -44,12 +45,26 @@ and approve or reject from your own machine:
 
 ```bash
 export SPELLBOOK_SOCKET=/run/spellbook/spellbook.sock
-export SPELLBOOK_APPROVE_TOKEN=<hex>   # or: --token-file /path/to/approve.token
+export SPELLBOOK_APPROVE_TOKEN=<hex>
 
-spellbook queue     # pending items, decoded: chain, destination, asset,
-                    # amount, purpose, who asked, when
 spellbook approve <queue_id>
 spellbook reject <queue_id>
+# or pass the token file directly (global flag, goes before the command):
+# spellbook --token-file /path/to/approve.token approve <queue_id>
+```
+
+Review the queue **as decoded intent — never just a hash** — with the
+approve token through the Python client. (The CLI's `queue` command is
+wired to the agent's request token, so it won't run on your
+approve-only setup — this is deliberate, not a bug.)
+
+```python
+from spellbook.client import HumanClient
+h = HumanClient("/run/spellbook/spellbook.sock",
+                open("/path/to/approve.token").read().strip())
+for item in h.queue():   # pending items, decoded: chain, destination,
+                         # asset, amount, purpose, who asked, when
+    print(item)
 ```
 
 What each queue field means:
@@ -77,19 +92,25 @@ Rules that protect you:
 
 ## 4. Reading state (no approval needed)
 
-The same CLI, same token, read-only:
+The CLI's `status`, `addresses`, and `ledger` commands are wired to the
+agent's request token, so they won't run with only your approve token.
+Your approve-token read path is the same Python client from §3 — the
+human sees what the agent sees:
 
-```bash
-spellbook status     # balances, caps, velocity windows, queue depth
-spellbook addresses  # your agent's labeled addresses per chain
-spellbook ledger     # every intent and decision, append-only
+```python
+h.status()     # balances, caps, velocity windows, queue depth
+h.addresses()  # your agent's labeled addresses per chain
+h.ledger()     # every intent and decision, append-only
 ```
+
+For a no-code view of holdings, use the dashboard viewer token (§6).
 
 ## 5. Policy — the knobs you own
 
-`spellbook.json` is yours (daemon-user-owned, mode 0600). Out of the box
-**everything queues for your approval** until you configure policy — that
-is deliberate. When you're ready, you may opt in to any subset:
+The policy knobs live in `policy.json` (keyed `chain:asset`,
+daemon-user-owned, mode 0600). Out of the box **everything queues for
+your approval** until you configure policy — that is deliberate. When
+you're ready, you may opt in to any subset:
 
 - `per_spend_cap` per chain/asset — requests above it are denied outright.
 - `approval_threshold` per chain/asset — requests above the auto-approve
@@ -99,14 +120,18 @@ is deliberate. When you're ready, you may opt in to any subset:
   the window clears.
 - `destination_allowlist` (optional) — non-allowlisted destinations above
   the auto line are denied rather than queued.
-- `dex.recommended_venues` — your preferred swap venues (default: matcha
-  + uniswap). Advisory, not a gate: a swap naming another venue is queued
-  with a prominent warning, and **your** per-transaction approval is what
-  authorizes the venue.
 
-The queue lifts only by explicit signed configuration from you — never by
-the clock alone. Keep the hot wallet funded with nothing your agent may
-not lose.
+The queue lifts only when **you** edit `policy.json` yourself on the
+install terminal and restart the daemon — never by the clock alone.
+Keep the hot wallet funded with nothing your agent may not lose.
+
+`spellbook.json` is daemon/agent configuration, not policy: seed paths,
+key derivation, address labels, network selections and mainnet gates,
+`dex.recommended_venues` — your preferred swap venues (default: matcha
++ uniswap). Advisory, not a gate: a swap naming another venue is queued
+with a prominent warning, and **your** per-transaction approval is what
+authorizes the venue. `spellbook.json` also carries the UID allowlists
+in §8.
 
 ## 6. Watching without approving (dashboard)
 
@@ -147,14 +172,21 @@ supported layouts, strongest first:
 Prompt-per-use approval on the same screen your agent watches is
 rejected: it trains you to click "yes" on autopilot within a week.
 
+The daemon enforces the split itself: `allowed_approve_uids` in
+`spellbook.json` names the OS user IDs permitted to present the approve
+token — the kernel's peer credential, not a claim the token makes. A
+token presented from any other UID (including your agent's) is denied
+and the attempt is ledgered as `denied:uid-not-allowed`. Set it to your
+login UID at install.
+
 ## 9. What you must never do
 
 - Never give your agent the approve token, read it aloud where it can
   hear, or paste it into a chat it can see.
 - Never approve a spend because your agent says "it's urgent" — urgency
   is the oldest trick in the book. Read the decoded intent yourself.
-- Never approve from a screenshot or forwarded message; approve from
-  `spellbook queue` on your own machine.
+- Never approve from a screenshot or forwarded message; review the
+  decoded intent with the HumanClient read path (§3) on your own machine.
 - Never edit the queue, ledger, policy, or velocity files by hand —
   the daemon owns them.
 - Never "pre-approve" — there is no standing approval; every spend is
@@ -168,7 +200,7 @@ rejected: it trains you to click "yes" on autopilot within a week.
   exposed.
 - If the dashboard shows a wallet you don't recognize: ask your agent
   which addresses it bound, and compare against `spellbook addresses`.
-- If your agent stops responding to `spellbook queue` showing items it
+- If your agent stops responding while `h.queue()` shows items it
   never requested: treat it as compromise until proven otherwise —
   reject everything queued and investigate.
 
