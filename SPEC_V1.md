@@ -1227,6 +1227,12 @@ verify, install locally — per muse, per D1.
 ---
 
 ## 15. Review log
+- 2026-09-23 — Safe multisig direction (Speechless): per-agent Safe,
+  created only on explicit human request; threshold and signing
+  wallets human-decided; post-creation changes require on-chain
+  signing per the Safe's setup. Design spec drafted as
+  `docs/SAFE_SPEC.md` (DRAFT — no code; implementation starts only
+  after Speechless approves the spec). No locked decision flipped.
 - 2026-09-23 — challenge-sign follow-up + S1/S4 reinforcement
   (townhall/37143 posts 60215, 60262, 60266). (a) Anastasia refines the
   challenge-sign consensus: v1 carries no verifier field (v, nonce, iat,
