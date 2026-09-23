@@ -385,3 +385,150 @@ Notes:
   fetch a fresh challenge and sign again; never reuse a signature.
 - The dashboard is strictly read-only: it cannot approve, sign,
   broadcast, or mint anything, for either role.
+
+## 9. DEX trading — swaps and LP (0x + Uniswap)
+
+`src/spellbook/dex.py` gives the Spellbook wallet aggregate trading on
+EVM: the same routing engines as matcha.xyz (0x) and the Uniswap app
+(Uniswap Trading API), plus raw calldata builders for direct pool
+interaction. It is **read-only + build-only**: it fetches quotes and
+builds calldata, but never signs or broadcasts.
+
+### API keys
+
+Both venues need free API keys, kept in the agent's environment (never
+in the repo):
+
+| Venue | Env var | Get it at |
+|---|---|---|
+| 0x (matcha engine) | `ZERO_EX_API_KEY` | dashboard.0x.org |
+| Uniswap | `UNISWAP_API_KEY` | developers.uniswap.org/dashboard |
+
+Direct pool calldata (v2/v3 builders) needs no key — only an RPC for
+read calls like `allowance`.
+
+### Quoting from the CLI
+
+```bash
+# Indicative prices from both venues (safe to poll):
+spellbook dex-quote --chain 8453 \
+  --sell-token 0x4200000000000000000000000000000000000006 \
+  --buy-token  0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 \
+  --amount 1000000000000000000
+
+# Firm executable quotes (short-lived calldata; --taker required):
+spellbook dex-quote --firm --venue 0x --chain 8453 \
+  --sell-token ... --buy-token ... --amount ... --taker 0xYourWallet
+```
+
+Output is a ranked comparison: best output-per-input first, with the
+full normalized quote (venue, amounts, min-buy, gas estimate, unsigned
+tx, allowance target) attached.
+
+### Quoting from Python
+
+```python
+from spellbook import dex
+
+zx = dex.ZeroExClient(os.environ["ZERO_EX_API_KEY"])
+q = zx.quote(chain_id=8453, sell_token=WETH, buy_token=USDC,
+             sell_amount=10**18, taker=my_addr, slippage_bps=50)
+
+uni = dex.UniswapClient(os.environ["UNISWAP_API_KEY"])
+uq = uni.quote(chain_id=8453, token_in=WETH, token_out=USDC,
+               amount=10**18, swapper=my_addr, slippage_pct=0.5)
+firm = uni.swap(uq["raw"], 8453, WETH, USDC, 10**18, my_addr)
+
+best = dex.compare_quotes([q, firm])["best"]
+```
+
+### When to use which venue
+
+- **0x** — widest aggregation (it is what matcha.xyz routes through);
+  serves Ethereum, Base, Arbitrum, Optimism, Polygon, BNB, Avalanche and
+  more. Two modes: `allowance-holder` (classic approve-then-swap) and
+  `permit2` (signature-based approvals).
+- **Uniswap** — Uniswap routing + UniswapX; serves the major chains.
+  Canonical flow is `check_approval` → `quote` → `swap`. Chained
+  multi-step routings (`DUTCH_V2` etc.) are refused rather than
+  half-built — re-quote or switch venue.
+- **Neither serves Robinhood Chain.** For its Uniswap-v2-style pools
+  (e.g. PLANK/WETH), build the swap calldata directly with
+  `build_v2_swap_calldata` and the pool's router address.
+
+### Direct pool calldata (no API key)
+
+```python
+# ERC-20 approval for the EXACT trade amount (never unlimited):
+approve_cd = dex.build_approve_calldata(spender=quote["allowance_target"],
+                                        amount=sell_amount)
+
+# Uniswap v2 swap / add liquidity:
+swap_cd = dex.build_v2_swap_calldata(amount_in, amount_out_min,
+                                     path=[token_a, token_b], to=my_addr,
+                                     deadline=int(time.time()) + 600)
+lp_cd = dex.build_v2_add_liquidity_calldata(token_a, token_b,
+                                            amount_a_desired, amount_b_desired,
+                                            amount_a_min, amount_b_min,
+                                            to=my_addr, deadline=...)
+
+# Uniswap v3 single-hop swap / open a position:
+v3_cd = dex.build_v3_exact_input_single_calldata(token_in, token_out,
+                                                 fee=3000, recipient=my_addr,
+                                                 amount_in=..., amount_out_min=...)
+mint_cd = dex.build_v3_mint_calldata(token0, token1, fee=500,
+                                     tick_lower=-100, tick_upper=100,
+                                     amount0_desired=..., amount1_desired=...,
+                                     amount0_min=..., amount1_min=...,
+                                     recipient=my_addr, deadline=...)
+```
+
+v3 notes: `fee` is one of 100/500/3000/10000; `token0 < token1` (sort
+order enforced); ticks must bracket the current price or the position
+holds a single asset.
+
+### Agent safety rules (non-negotiable)
+
+1. **Quotes expire in tens of seconds.** Never store a firm quote and
+   replay it later — re-fetch at execution time and re-validate every
+   field (chain, taker, tokens, amounts, slippage, target).
+2. **Never hardcode a spender.** The ERC-20 approval target comes from
+   the quote itself (`allowance_target`); approving anything else is a
+   classic drain vector.
+3. **Approve exact amounts.** Unlimited approvals are refused by the
+   builders' convention — pass the trade amount, nothing more.
+4. **Slippage is bounded** (1–500 bps). The default 50 bps (0.5%) is
+   sane; anything wider needs the human to say so explicitly.
+5. **How the daemon executes swaps (SPEC §10 v2 — approved by Speechless
+   2026-09-23).** The queue holds *bounds*, never calldata: `dex-swap`
+   carries venue, tokens, exact sell amount, minimum buy, max slippage,
+   deadline; `dex-lp-add` carries protocol, router, tokens, amounts, mins,
+   v3 fee/ticks. At execution the daemon fetches the firm quote *then*,
+   validates it field-by-field against the approved bounds
+   (`validate_swap_intent_against_quote` — chain, tokens, exact sell
+   amount, min buy, allowance target, tx value), does the exact-amount
+   ERC-20 approval only if on-chain allowance is short, signs with
+   `sign_legacy_call` (same ecrecover self-check as transfers), and
+   broadcasts once. No opaque calldata ever reaches the signer: swap
+   calldata comes from the venue quote, LP calldata is built locally
+   from the approved bounds via whitelisted builders. One approval =
+   one execution attempt (approve + swap/LP = the single execution);
+   unknown fate is never retried. Do not work around this by hand-rolling
+   a signer outside the daemon.
+
+### The v2 execution decision — decided 2026-09-23
+
+Speechless approved it: "You are an agent we give approval and authority
+and you should be able to execute swaps for us." The design above is the
+implementation — bounded intents instead of a generic calldata decoder,
+exact-amount approvals, no `allow_opaque_calldata` knob (opaque calldata
+is simply never signable). Venue API keys (`ZERO_EX_API_KEY`,
+`UNISWAP_API_KEY`) live in the *daemon's* environment, never in the repo.
+Why this took a spec change at all: v1 deliberately limited the daemon to
+plain transfers (S13) so a prompt-injected agent holding the request
+token couldn't talk it into signing arbitrary contract calldata — the
+actual attack that drains agent wallets. Bankr can swap freely because
+it's a hosted service: their backend holds the keys and decides what to
+sign; Spellbook is self-custody on your machine, so the signing policy
+is yours to set, and now it permits bounded swaps/LPs under the normal
+human-approval flow (the human still approves each trade's bounds).
