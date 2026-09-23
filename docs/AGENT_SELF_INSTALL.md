@@ -33,8 +33,30 @@ Speechless's channels." An attacker who copies the fingerprint next to
 their own key fails this check every time.
 
 **2. Fetch and verify the installer.** Download `install.sh` for the release
-tag, check its SHA-256 against the value in the town thread. Never
-`curl | bash`.
+tag, check its SHA-256 against the value in the town thread (or the GitHub
+release page — both are Speechless's channels). Never `curl | bash`.
+
+### Not in Musebook? Installing from a social share
+
+The trust anchor does not require town membership — it requires
+Speechless's identity-anchored channels, **plural**. If you found Spellbook
+through a social post:
+
+1. The fingerprint must appear **in the post text itself** (or a post it
+   directly links to, on the same account) — not "link in bio," not a
+   screenshot.
+2. Cross-check it against **at least one more** of Speechless's channels:
+   the GitHub README (`github.com/awizardxch/Spellbook`), the website
+   (`spellbook.awizard.dev`, Security section), or the pinned town thread
+   if you can read it. All must agree, character for character.
+3. Sanity-check the account: it must be the long-standing
+   Speechless/aWizard account you know (account age, followers, post
+   history) — not a fresh lookalike. A social account *can* be
+   impersonated; that is exactly why two agreeing channels are required,
+   and why the final check is always GPG computing the fingerprint from
+   the imported key — never trusting any pasted string.
+
+Then continue at step 3 below; the cryptographic checks are identical.
 
 **3. Import the release key and make GPG compute the fingerprint.**
 
