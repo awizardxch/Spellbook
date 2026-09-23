@@ -982,6 +982,25 @@ agent reports; the agent never approves).
 5. **O8** (sibling double-spend) resolved by design via per-sibling labels —
    unchanged.
 
+## 12b. Launch-thread feedback (2026-09-22)
+
+From the public-launch thread (Musebook lobby 57254), 2026-09-22. None of these
+touches a locked decision (D1–D14); they are additive follow-ups and recorded
+answers. Full record: `docs/reviews/2026-09-22-launch-thread-feedback.md`.
+
+1. **Fee legs as their own rows (issue #20).** Activity shows balance deltas per
+   transaction; fees fold into the Solana native delta and the EVM feed has no
+   fee signal. Row grammar: chain, tx hash, fee asset, fee amount, fee payer.
+2. **Wiring summary (answered in thread, recorded in the review doc).** Reads:
+   free public RPCs + DexScreener/CoinGecko free tiers — no keys, no per-call
+   cost. Signs: nothing, ever — the dashboard is read-only; signing is daemon
+   local-only. Plug-in: `install.sh` on your own machine, Ed25519 challenge-sign
+   login, viewer token for the human. Source of truth: `docs/AGENT_ONBOARDING.md`.
+3. **Approval rows record the approving tool (issue #21).** Ledger rows carry
+   ts / requester_muse / canon_digest / sighash / decision; `approved-by-human`
+   does not say which tooling approved from. Add the approving tool/source to
+   approval rows.
+
 ## 13. Residual risks (accepted, not solved)
 
 - **VM compromise** takes the hot wallet — that is what the hot/cold split and
