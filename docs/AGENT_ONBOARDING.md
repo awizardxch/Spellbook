@@ -51,6 +51,32 @@ r["decision"]       # "approved" | "queued" | "denied"
 `amount_wei` for EVM chains, `amount_mojos` for Chia chains — exactly one.
 v1 is plain transfers only.
 
+## 1b. Keeping your install healthy (lifecycle)
+
+Your install upgrades itself and repairs its own code problems — it never
+touches your keys, tokens, config, or ledger to do it. Full reference:
+`docs/AGENT_LIFECYCLE.md`. The commands:
+
+```bash
+spellbook version          # local vs installed vs daemon version
+spellbook upgrade --check  # latest signed release vs yours
+spellbook upgrade 0.2.0    # self-upgrade (signed release, forward-only)
+spellbook doctor           # read-only health report
+spellbook doctor --repair  # self-repair CODE problems via signed reinstall
+```
+
+The rules that keep this safe:
+
+- `upgrade` only ever installs maintainer-signed releases (SHA-256 + GPG
+  release-key signature, verified before anything is replaced), and only
+  moves forward — downgrades are the human's call.
+- `doctor --repair` fixes **code** (package, VERSION, Sage, daemon). It
+  never regenerates keys, never mints tokens, never hand-edits config, never
+  reconstructs the ledger — state problems fail closed with guidance for
+  the human.
+- Upgrades print no key material, ever. The paper backup prints once, on
+  fresh install only.
+
 ## 2. The Chia relay API
 
 The relay is a network relay, not a custodian: it holds persistent WSS

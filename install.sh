@@ -52,7 +52,9 @@ SOCK_PATH="${SOCK_DIR}/spellbook.sock"
 RELEASE_KEY_FPR="${SPELLBOOK_RELEASE_KEY_FPR:-}"
 
 NO_SAGE=0
+NO_SAGE_SET=0
 FROM_DIR=""
+UPGRADE=0
 AGENT_USER=""
 HUMAN_USER="${SUDO_USER:-}"
 SAGE_PIN_VERIFIED="${SAGE_PIN_VERIFIED:-}"
@@ -63,19 +65,30 @@ fail() { printf '[spellbook-install] FATAL: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || fail "missing required tool: $1"; }
 
 usage() {
-  echo "usage: bash install.sh <tag> [--no-sage] [--agent-user NAME] [--human-user NAME]"
-  echo "       bash install.sh --from-dir DIR [--no-sage] [--agent-user NAME] [--human-user NAME]"
+  echo "usage: bash install.sh <tag> [--upgrade] [--no-sage] [--agent-user NAME] [--human-user NAME]"
+  echo "       bash install.sh --from-dir DIR [--upgrade] [--no-sage] [--agent-user NAME] [--human-user NAME]"
   echo ""
+  echo "  --upgrade        key-preserving upgrade of an existing install: replaces"
+  echo "                   code/venv/systemd assets only. Never touches seed.key /"
+  echo "                   std_seed.key / tokens / config / ledger / Sage data."
+  echo "                   With a signed <tag> this is the agent self-serve path"
+  echo "                   (via the spellbook-upgrade wrapper); --from-dir with"
+  echo "                   --upgrade is human-driven (no signature to verify)."
+  echo "                   Downgrades are the human's call — the agent wrapper"
+  echo "                   refuses them, install.sh obeys."
   echo "  --no-sage        install EVM-only (Chia/Sage skipped; SPEC primary deliverable)"
-  echo "  --agent-user     OS user the conversational agent runs as (required)"
-  echo "  --human-user     OS user whose tooling holds the approve token (default: \$SUDO_USER)"
+  echo "  --agent-user     OS user the conversational agent runs as (required; in"
+  echo "                   --upgrade mode defaults to the value in install.env)"
+  echo "  --human-user     OS user whose tooling holds the approve token (default: \$SUDO_USER;"
+  echo "                   in --upgrade mode defaults to the value in install.env)"
   exit 2
 }
 
 TAG=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --no-sage) NO_SAGE=1; shift ;;
+    --no-sage) NO_SAGE=1; NO_SAGE_SET=1; shift ;;
+    --upgrade) UPGRADE=1; shift ;;
     --from-dir) FROM_DIR="${2:-}"; shift 2 ;;
     --agent-user) AGENT_USER="${2:-}"; shift 2 ;;
     --human-user) HUMAN_USER="${2:-}"; shift 2 ;;
@@ -84,6 +97,22 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$TAG" ] || [ -n "$FROM_DIR" ] || usage
+
+# --upgrade: fill user flags from the install record (flags still win), and
+# require an existing healthy install. Everything below treats --upgrade as
+# "replace code, never identity".
+if [ "$UPGRADE" = "1" ]; then
+  [ -f "${PREFIX}/VERSION" ] \
+    || fail "no install at ${PREFIX} — run a fresh install first (no --upgrade)"
+  [ -f "${PREFIX}/install.env" ] \
+    || fail "${PREFIX}/install.env missing — install record lost; human-driven reinstall needed"
+  env_val() { grep -E "^${1}=" "${PREFIX}/install.env" | cut -d= -f2- | tr -d '"'; }
+  [ -n "$AGENT_USER" ] || AGENT_USER="$(env_val SPELLBOOK_AGENT_USER)"
+  [ -n "$HUMAN_USER" ] || HUMAN_USER="$(env_val SPELLBOOK_HUMAN_USER)"
+  [ "$NO_SAGE_SET" = "1" ] || NO_SAGE="$(env_val SPELLBOOK_NO_SAGE)"
+  ENV_SAGE_COMMIT="$(env_val SPELLBOOK_SAGE_COMMIT)"
+  log "upgrade mode: installed version $(cat "${PREFIX}/VERSION"), identity will be preserved"
+fi
 [ -n "$AGENT_USER" ] || fail "--agent-user is required (the OS user your agent runs as)"
 [ "$(id -u)" = "0" ] || fail "run as root (it creates the ${SPELLBOOK_USER} user)"
 id "$AGENT_USER" >/dev/null 2>&1 || fail "agent user '$AGENT_USER' does not exist"
@@ -142,9 +171,25 @@ log "source: $SRC"
 # the pin before compiling. The artifact is produced from pinned source, so
 # there is no release-artifact checksum to chase — and a version string is
 # never trusted on its own.
+#
+# Upgrade fast path: if the pin in this release equals the pin the machine
+# was installed with AND the installed binary is executable, the Sage build
+# (minutes of compile) is skipped and the existing binary is kept. Sage data
+# is never touched by upgrades either way.
 CHIA_ENABLED=true
 SAGE_BIN_STAGED=""   # path under $WORK; copied into ${PREFIX}/bin in §3
-if [ "$NO_SAGE" -eq 1 ]; then
+SKIP_SAGE_BUILD=0
+if [ "$UPGRADE" = "1" ] && [ "$NO_SAGE" -eq 0 ] \
+    && [ -n "${ENV_SAGE_COMMIT:-}" ] \
+    && [ "$SAGE_COMMIT" = "$ENV_SAGE_COMMIT" ] \
+    && [ -x "${PREFIX}/bin/sage" ]; then
+  log "Sage pin unchanged (${SAGE_COMMIT}) — keeping installed binary"
+  SAGE_BIN_STAGED="KEEP"
+  SKIP_SAGE_BUILD=1
+fi
+if [ "$SKIP_SAGE_BUILD" = "1" ]; then
+  : # fast path taken above
+elif [ "$NO_SAGE" -eq 1 ]; then
   log "--no-sage: EVM-only install (Chia support can be added later)"
   CHIA_ENABLED=false
 elif [ -n "${SAGE_BIN:-}" ] && [ "$SAGE_PIN_VERIFIED" = "1" ]; then
@@ -207,8 +252,14 @@ chmod 0700 "${PREFIX}"
 SAGE_BIN_FINAL=""
 if [ "$CHIA_ENABLED" = true ]; then
   mkdir -p "${PREFIX}/bin"
-  cp "$SAGE_BIN_STAGED" "${PREFIX}/bin/sage"
-  chown "${SPELLBOOK_USER}:${SPELLBOOK_USER}" "${PREFIX}/bin/sage"
+  if [ "$SAGE_BIN_STAGED" = "KEEP" ]; then
+    log "keeping installed sage binary (pin unchanged)"
+    SAGE_BIN_FINAL="${PREFIX}/bin/sage"
+  else
+    cp "$SAGE_BIN_STAGED" "${PREFIX}/bin/sage"
+    chown "${SPELLBOOK_USER}:${SPELLBOOK_USER}" "${PREFIX}/bin/sage"
+    SAGE_BIN_FINAL="${PREFIX}/bin/sage"
+  fi
   chmod 0755 "${PREFIX}/bin/sage"
   SAGE_BIN_FINAL="${PREFIX}/bin/sage"
   log "installed verified sage binary at ${SAGE_BIN_FINAL}"
@@ -240,7 +291,13 @@ fi
 chown -R "${SPELLBOOK_USER}:${SPELLBOOK_USER}" "$STAGE"
 
 log "installing the spellbook package ..."
-runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/pip" install --quiet "$STAGE" \
+# Upgrade mode: force-reinstall over the existing package so changed files
+# are actually replaced (a plain `pip install` would see "already satisfied"
+# and leave stale code in place).
+PIP_REINSTALL=""
+[ "$UPGRADE" = "1" ] && PIP_REINSTALL="--force-reinstall"
+# shellcheck disable=SC2086
+runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/pip" install --quiet $PIP_REINSTALL "$STAGE" \
   || fail "pip install failed"
 
 AGENT_UID="$(id -u "$AGENT_USER")"
@@ -248,8 +305,16 @@ HUMAN_UID="$(id -u "$HUMAN_USER")"
 
 # The wallet seed: generated ONCE, as the spellbook user, 0600. The paper
 # backup mnemonic prints ONCE below — write it down now (§6).
-# Never auto-update an existing install: a seed.key already on disk means
-# this machine is provisioned — refuse rather than silently re-key it.
+# Upgrade mode never touches key material: it must already be there, 0600.
+# A missing key is a broken identity, not a repairable install — refuse and
+# send the human to recovery instead of generating a new key (that would
+# silently strand funds at the old addresses).
+if [ "$UPGRADE" = "1" ]; then
+  for k in seed.key std_seed.key; do
+    [ -f "${PREFIX}/$k" ] || fail "${PREFIX}/$k missing — broken wallet identity; refusing to re-key (recovery is the human's call)"
+  done
+  log "key material present (untouched by upgrade)"
+else
 [ ! -e "${PREFIX}/seed.key" ] || fail "${PREFIX}/seed.key already exists — this machine looks installed. Refusing to overwrite; uninstall first."
 log "generating the wallet seed (once) ..."
 SEED_HEX="$(runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" -c \
@@ -268,7 +333,17 @@ chmod 0600 "${PREFIX}/seed.key"
 log "generating the standard-recovery wallet (once) ..."
 STD_BACKUP="$(runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" \
   "${SRC}/scripts/make_standard_wallet.py" "${PREFIX}")"
+fi
 
+# Upgrade mode never rewrites config: the human's policy knobs stay exactly
+# as they set them. The existing config must at least parse, or the upgrade
+# stops rather than booting new code over a broken config.
+if [ "$UPGRADE" = "1" ]; then
+  log "keeping existing config (upgrade never rewrites it)"
+  runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" -c \
+    "import json; json.load(open('${PREFIX}/spellbook.json'))" \
+    || fail "existing spellbook.json does not parse — refusing to upgrade over a broken config"
+else
 log "writing config ..."
 runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" - "$PREFIX" "$AGENT_UID" "$HUMAN_UID" "$CHIA_ENABLED" "$SAGE_BIN_FINAL" <<'EOF'
 import json, sys
@@ -330,10 +405,19 @@ open(f"{prefix}/ledger.jsonl", "a").close()
 EOF
 chown "${SPELLBOOK_USER}:${SPELLBOOK_USER}" "${PREFIX}/spellbook.json" "${PREFIX}/policy.json" "${PREFIX}/ledger.jsonl"
 chmod 0600 "${PREFIX}/spellbook.json" "${PREFIX}/policy.json" "${PREFIX}/ledger.jsonl"
+fi
 
 # S7: two tokens from day one. The request token is shown ONCE for the
 # agent's environment; the approve token is NEVER shown — move it to the
 # human's separate device out-of-band (O5).
+# Upgrade mode never mints tokens: a missing token is a broken install the
+# human re-provisions, never something the installer silently replaces.
+if [ "$UPGRADE" = "1" ]; then
+  for t in request.token approve.token; do
+    [ -f "${PREFIX}/$t" ] || fail "${PREFIX}/$t missing — broken token state; refusing to mint replacements (re-provision with the human)"
+  done
+  log "tokens present (untouched by upgrade)"
+else
 log "generating tokens ..."
 REQ_TOKEN="$(runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" -c "import secrets; print(secrets.token_hex(32))")"
 APP_TOKEN="$(runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" -c "import secrets; print(secrets.token_hex(32))")"
@@ -341,6 +425,47 @@ printf '%s' "$REQ_TOKEN" > "${PREFIX}/request.token"
 printf '%s' "$APP_TOKEN" > "${PREFIX}/approve.token"
 chown "${SPELLBOOK_USER}:${SPELLBOOK_USER}" "${PREFIX}/request.token" "${PREFIX}/approve.token"
 chmod 0600 "${PREFIX}/request.token" "${PREFIX}/approve.token"
+fi
+
+# --- install record + agent self-serve upgrade path (fresh and upgrade) ---
+# VERSION is the machine's canonical version. install.env is root-owned and
+# records who installed and with what options, so --upgrade can run without
+# re-asking (and so the upgrade wrapper can exec install.sh as root).
+# ${PREFIX}/lib/install.sh is the pinned installer copy the privileged
+# wrapper runs; /usr/local/bin/spellbook-upgrade is the agent's only root
+# action (sudoers, NOPASSWD, exact path). All of these are refreshed on every
+# install so upgrades keep the self-serve path working.
+log "writing install record ..."
+[ -f "${STAGE}/VERSION" ] || fail "release tree has no VERSION file — refusing to install an unversioned build"
+NEW_VERSION="$(cat "${STAGE}/VERSION")"
+printf '%s\n' "$NEW_VERSION" > "${PREFIX}/VERSION"
+chmod 0644 "${PREFIX}/VERSION"
+[ -f "${STAGE}/scripts/spellbook-upgrade" ] \
+  || fail "release tree has no scripts/spellbook-upgrade — refusing to install a build without the self-serve path"
+mkdir -p "${PREFIX}/lib"
+INSTALLER_SRC="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+cp "$INSTALLER_SRC" "${PREFIX}/lib/install.sh"
+chown root:root "${PREFIX}/lib/install.sh"; chmod 0755 "${PREFIX}/lib/install.sh"
+cat > "${PREFIX}/install.env" <<EOF
+# written by install.sh — root-owned; the spellbook-upgrade wrapper sources this
+SPELLBOOK_AGENT_USER="${AGENT_USER}"
+SPELLBOOK_HUMAN_USER="${HUMAN_USER}"
+SPELLBOOK_NO_SAGE="${NO_SAGE}"
+SPELLBOOK_SAGE_COMMIT="${SAGE_COMMIT}"
+SPELLBOOK_INSTALLED_TAG="${TAG:-from-dir}"
+SPELLBOOK_RELEASE_KEY_FPR="${RELEASE_KEY_FPR:-}"
+EOF
+chown root:root "${PREFIX}/install.env"; chmod 0600 "${PREFIX}/install.env"
+cp "${STAGE}/scripts/spellbook-upgrade" /usr/local/bin/spellbook-upgrade
+chown root:root /usr/local/bin/spellbook-upgrade; chmod 0755 /usr/local/bin/spellbook-upgrade
+printf '# Spellbook: the agent user may run the signed-release upgrade wrapper only.\n%s ALL=(root) NOPASSWD: /usr/local/bin/spellbook-upgrade\n' \
+  "$AGENT_USER" > /etc/sudoers.d/spellbook-agent-upgrade
+chmod 0440 /etc/sudoers.d/spellbook-agent-upgrade
+if command -v visudo >/dev/null 2>&1; then
+  visudo -c -f /etc/sudoers.d/spellbook-agent-upgrade >/dev/null \
+    || fail "sudoers entry failed validation — refusing to leave a broken sudoers.d file"
+fi
+log "install record written (version ${NEW_VERSION}; self-serve upgrade ready)"
 
 log "installing the systemd unit ..."
 cat > /etc/systemd/system/spellbookd.service <<EOF
@@ -377,6 +502,24 @@ chown "${SPELLBOOK_USER}:${SPELLBOOK_USER}" "${PREFIX}/drill-status.json"
 chmod 0600 "${PREFIX}/drill-status.json"
 
 # ---------------------------------------------------------------- 6. paper backup + next steps
+# Upgrade mode prints NO key material, ever — the backup block below is for
+# fresh installs only. An upgrade summary takes its place.
+if [ "$UPGRADE" = "1" ]; then
+cat <<EOF
+
+UPGRADE COMPLETE.
+  version:  $(cat "${PREFIX}/VERSION")
+  replaced: spellbook package, systemd unit, install record, upgrade wrapper
+  kept:     seed.key, std_seed.key, request/approve tokens, spellbook.json,
+            policy.json, ledger.jsonl, queue/velocity state, Sage data,
+            submission gates (mainnet_submit_enabled untouched)
+  verify:   spellbook doctor          (re-run after every upgrade)
+            spellbook version         (local vs daemon)
+
+If doctor reports a problem the upgrade did not fix, the human re-runs
+install.sh --upgrade (or, for downgrades, runs install.sh directly as root).
+EOF
+else
 MNEMONIC="$(runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" -c \
   "from spellbook.seed import load_seed, mnemonic_from_entropy; print(mnemonic_from_entropy(load_seed('${PREFIX}/seed.key')))")"
 # Raw KDF keys: each imports directly into the matching stock wallet and
@@ -464,3 +607,4 @@ NEXT STEPS (all opt-in):
 
 note: the default config is a signer, not a policy engine (S4).
 EOF
+fi

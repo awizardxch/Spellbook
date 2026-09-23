@@ -35,7 +35,9 @@ import urllib.parse
 
 from spellbook import chia, chia_relay, evm, kdf, sign as spellsign
 from spellbook import chia_sign
+from spellbook import doctor as doctor_mod
 from spellbook import solana as solana_mod
+from spellbook import version as version_mod
 from spellbook.config import load_config, load_policy
 from spellbook.ledger import Ledger
 from spellbook.policy import evaluate
@@ -43,7 +45,7 @@ from spellbook.seed import load_seed
 from spellbook import tokens as token_auth
 
 REQUEST_ROUTES = {
-    "request_spend", "queue_read", "status", "addresses",
+    "request_spend", "queue_read", "status", "addresses", "doctor",
     "ledger_read", "sign_musebook_request", "chia_read",
     "offer_make", "offer_take", "offer_cancel",
     "offer_import", "offer_delete", "offer_combine",
@@ -3992,6 +3994,7 @@ class Daemon:
 
     def rt_status(self, p: dict, muse_id: str) -> dict:
         out = {"ok": True, "queue_depth": len(self.queue),
+               "spellbook_version": version_mod.local_version(self.config_dir),
                "seed_loaded": self.seed is not None,
                "std_seed_loaded": self.std_seed is not None,
                "key_derivation": self.key_derivation,
@@ -4055,6 +4058,18 @@ class Daemon:
                     balances[active] = {"error": str(e)}
         out["balances"] = balances
         return out
+
+    def rt_doctor(self, p: dict, muse_id: str) -> dict:
+        """Read-only install health (SPEC §12b item 4).
+
+        Presence/permissions/shape only — never key contents. The agent
+        calls this instead of stat-ing the prefix itself (it cannot traverse
+        /opt/spellbook). Failures map to repair actions via
+        spellbook.doctor.repair_plan; only CODE problems are self-repairable,
+        state problems (keys/tokens/config/ledger) fail closed.
+        """
+        checks = doctor_mod.run_checks(prefix=self.config_dir)
+        return {"ok": True, **doctor_mod.summary(checks)}
 
     def rt_addresses(self, p: dict, muse_id: str) -> dict:
         signing_seed = (self.std_seed if self.key_derivation == "standard"
