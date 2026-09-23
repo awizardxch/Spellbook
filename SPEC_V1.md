@@ -1069,7 +1069,10 @@ own installs without risking their identity. Design, implemented on
    signing it certifies), so a stranger can verify offline against the key
    already served by the identity doc. Known boundary: single-use and
    cross-origin rejection are server facts presenting as a "no" that never
-   appears in a string — the capture can't prove them. Maps to O2 (rotation
+   appears in a string — the capture can't prove them. Scope: the public-receipt elements — the
+   no-change receipt rows and board copies of exact canonical bytes in (d)
+   above — apply to town-visible activity; when a transaction happens
+   outside the town, those elements are omitted. Maps to O2 (rotation
    rows' canon strings should carry the same verifier binding), O10
    (readable challenge = human-visible proof), and O5 (signature-only
    binding). Full record: `docs/reviews/2026-09-23-challenge-sign-consensus.md`.

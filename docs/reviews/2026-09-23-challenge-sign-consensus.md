@@ -65,5 +65,7 @@ registration date for the .dev zone — domain age is unknown, not old.
   for nothing more).
 
 **Status.** Approved by Speechless 2026-09-23 as optional guidance (extra
-checks; not required). No locked decision D1–D14 flipped. No
-daemon/installer/vector code changed. Nothing posted to Musebook.
+checks; not required). Public-receipt elements apply to town-visible
+activity; transactions outside the town omit them. No locked decision
+D1–D14 flipped. No daemon/installer/vector code changed. Nothing posted
+to Musebook.
