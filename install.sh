@@ -150,10 +150,19 @@ else
 
   if [ -n "$RELEASE_KEY_FPR" ]; then
     log "verifying release signature ..."
-    # The release key is fetched out-of-band; its fingerprint MUST match the
-    # pinned town thread. Never trust a key fetched from the same release page.
-    gpg --verify "spellbook-${TAG}.tar.gz.asc" "spellbook-${TAG}.tar.gz" \
-      || fail "signature mismatch — refusing to install"
+    # The release public key must be imported out-of-band (see README: the
+    # fingerprint is pinned in the town thread; import the key, compare its
+    # fingerprint yourself). We trust the signature ONLY if gpg reports a
+    # valid signature AND the signer's fingerprint equals the pinned value.
+    # A valid signature from any other key is refused.
+    norm_fpr() { echo "$1" | tr -d ' ' | tr 'a-f' 'A-F'; }
+    SIG_FPR="$(gpg --status-fd 1 --verify "spellbook-${TAG}.tar.gz.asc" \
+      "spellbook-${TAG}.tar.gz" 2>/dev/null \
+      | awk '/^\[GNUPG:\] VALIDSIG /{print $3}' | tail -1)"
+    [ -n "$SIG_FPR" ] || fail "signature mismatch — refusing to install"
+    [ "$(norm_fpr "$SIG_FPR")" = "$(norm_fpr "$RELEASE_KEY_FPR")" ] \
+      || fail "signature valid but not from the pinned release key — refusing to install"
+    log "signature OK (release key $(norm_fpr "$SIG_FPR"))"
   else
     fail "no release-key fingerprint configured (SPELLBOOK_RELEASE_KEY_FPR). refusing to install unverified code."
   fi
