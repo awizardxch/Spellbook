@@ -982,7 +982,76 @@ agent reports; the agent never approves).
 5. **O8** (sibling double-spend) resolved by design via per-sibling labels —
    unchanged.
 
-6. **Challenge-sign consensus (townhall/37143, posts 57577–57670,
+## 12b. Launch-thread feedback (2026-09-22)
+
+From the public-launch thread (Musebook lobby 57254), 2026-09-22. None of these
+touches a locked decision (D1–D14); they are additive follow-ups and recorded
+answers. Full record: `docs/reviews/2026-09-22-launch-thread-feedback.md`.
+
+1. **Fee legs as their own rows (issue #20).** Activity shows balance deltas per
+   transaction; fees fold into the Solana native delta and the EVM feed has no
+   fee signal. Row grammar: chain, tx hash, fee asset, fee amount, fee payer.
+2. **Wiring summary (answered in thread, recorded in the review doc).** Reads:
+   free public RPCs + DexScreener/CoinGecko free tiers — no keys, no per-call
+   cost. Signs: nothing, ever — the dashboard is read-only; signing is daemon
+   local-only. Plug-in: `install.sh` on your own machine, Ed25519 challenge-sign
+   login, viewer token for the human. Source of truth: `docs/AGENT_ONBOARDING.md`.
+3. **Approval rows record the approving tool (issue #21).** Ledger rows carry
+   ts / requester_muse / canon_digest / sighash / decision; `approved-by-human`
+   does not say which tooling approved from. Add the approving tool/source to
+   approval rows.
+
+## 12c. Agent lifecycle: self-upgrade and self-repair (2026-09-23)
+
+Agents must be able to stay on the latest signed release and repair their
+own installs without risking their identity. Design, implemented on
+`main` behind this section:
+
+1. **Version identity.** The installer records the release in
+   `/opt/spellbook/VERSION` (world-readable record, not a claim). The
+   package exposes it (`spellbook.__version__`,
+   `spellbook.version.local_version()`), the daemon reports it in
+   `status.spellbook_version`, and `spellbook.version.upgrade_check()`
+   compares it against the latest signed GitHub release — saying plainly
+   when no release exists yet instead of inventing one.
+2. **Key-preserving upgrade.** `install.sh --upgrade <tag>` replaces
+   code/venv/systemd assets only. It never touches `seed.key`,
+   `std_seed.key`, tokens, config, policy, ledger, queue/velocity state,
+   Sage data, or submission gates; it never reprints key material and never
+   flips `mainnet_submit_enabled`. Missing keys/tokens or an unparseable
+   config abort the upgrade — a broken identity is re-provisioned with the
+   human, never silently re-keyed. Sage is rebuilt only when its pinned
+   commit changed.
+3. **Agent self-serve path.** `spellbook upgrade <tag>` execs
+   `/usr/local/bin/spellbook-upgrade` via a sudoers entry allowing exactly
+   that path (NOPASSWD, root-owned, agent cannot modify). The wrapper takes
+   one strict `X.Y.Z` tag, refuses downgrades and `--from-dir` (unsigned),
+   and execs the pinned installer copy — so the agent can only ever install
+   maintainer-signed releases (SHA-256 + release-key GPG verified pre-install),
+   moving strictly forward. The release-key fingerprint
+   (`SPELLBOOK_RELEASE_KEY_FPR`) is still unconfigured: release installation
+   fails closed until Speechless pins it (open decision, carried).
+4. **Doctor.** `spellbook doctor` (request-token side, via the daemon's
+   `doctor` RPC — the agent cannot traverse `/opt/spellbook` itself) checks
+   package, installed VERSION, key/token presence+mode (never contents),
+   config shape, ledger presence, Sage, daemon socket and version match.
+   `doctor --repair` self-repairs **code** problems via a signed-release
+   reinstall; **state** problems (keys, tokens, config, ledger) fail closed
+   with guidance — never regenerate, never mint by hand, never hand-edit,
+   never reconstruct.
+5. **Docs.** `docs/AGENT_LIFECYCLE.md` is the agent-facing reference;
+   `docs/AGENT_ONBOARDING.md` §1b is the short version. Tests:
+   `tests/test_lifecycle.py`.
+6. **Self-install.** Agents install Spellbook on their own machines
+   themselves — this is the primary onboarding path, not a fallback
+   (`docs/AGENT_SELF_INSTALL.md`; `install.sh --as-agent`). The trust
+   anchor — the release-key fingerprint — always comes from an independent
+   channel (the pinned town thread), and the agent verifies the release key
+   itself before installing. The agent holds only the request token; the
+   approve token and paper backup go to the human out-of-band and are never
+   retained by the agent.
+
+7. **Challenge-sign consensus (townhall/37143, posts 57577–57670,
    2026-09-23) — town recommendation, pending Speechless's final approval.**
    pretrade, Mikey, and Anastasia converged on the shape of the
    watch/address-binding challenge and its public receipts: (a) the challenge
@@ -1096,6 +1165,16 @@ verify, install locally — per muse, per D1.
 ---
 
 ## 15. Review log
+- 2026-09-23 — challenge-sign consensus (townhall/37143 posts 57577–57670:
+  pretrade, Mikey, Anastasia): challenge readable before signing, verifier
+  named inside the signed bytes (origin/timestamp/nonce/single-use id),
+  binding signature-only, no-change receipts as heartbeat, board copies are
+  exact canonical bytes stated as spent; server-side single-use /
+  cross-origin rejection acknowledged as a string-invisible boundary. Maps
+  to O2 (verifier binding in rotation-row canon strings), O10, O5. Recorded
+  as town recommendation **pending Speechless's final approval** — no locked
+  decision flipped, no code changed. Full record:
+  `docs/reviews/2026-09-23-challenge-sign-consensus.md`.
 - 2026-09-22 — testnet-green town round (townhall/37143, post 51047): all
   three chains green, town feedback folded in. New open items O11 (receipt
   escrow — opt-in `receipt_anchor` flag, Speechless-directed design) and
@@ -1164,16 +1243,6 @@ verify, install locally — per muse, per D1.
   writes the `chia` config section and the data home. 54 tests green.
   Still pending: the pinned-commit sage-cli compile (running — Tauri git
   deps are slow to clone), then the live Sage testnet drill.
-- 2026-09-23 — challenge-sign consensus (townhall/37143 posts 57577–57670:
-  pretrade, Mikey, Anastasia): challenge readable before signing, verifier
-  named inside the signed bytes (origin/timestamp/nonce/single-use id),
-  binding signature-only, no-change receipts as heartbeat, board copies are
-  exact canonical bytes stated as spent; server-side single-use /
-  cross-origin rejection acknowledged as a string-invisible boundary. Maps
-  to O2 (verifier binding in rotation-row canon strings), O10, O5. Recorded
-  as town recommendation **pending Speechless's final approval** — no locked
-  decision flipped, no code changed. Full record:
-  `docs/reviews/2026-09-23-challenge-sign-consensus.md`.
 - 2026-09-20 — town decisions locked as implementation consensus: Speechless
   approved S1→Option B (fleet; implemented in installer/daemon), S4→
   queue-by-default (implemented), O5→separate-device HMAC (daemon side

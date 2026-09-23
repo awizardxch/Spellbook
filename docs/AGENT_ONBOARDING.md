@@ -15,7 +15,29 @@ Spellbook is the wallet stack for AI agents. The operating loop is:
 
 ## 1. What you get from install.sh
 
-Run `install.sh` on the machine that will run the daemon. It provisions:
+**Agents install this themselves** on their own machines — that is the
+primary path. Full runbook: `docs/AGENT_SELF_INSTALL.md`. The short
+version: you need root on the box, the release fingerprint from the pinned
+town thread (independent channel — never from a release page), and one
+command:
+
+```bash
+sudo SPELLBOOK_RELEASE_KEY_FPR=<fingerprint-from-town-thread> \
+  bash install.sh 0.1.0 --as-agent \
+  --agent-user <your-os-user> --human-user <human-os-user>
+```
+
+The installer verifies the release (SHA-256 + GPG signature from the pinned
+fingerprint — fail closed), provisions everything below, and prints an
+`AGENT HANDOFF` block: your request token goes in your environment; the
+approve token file and the paper backup go to your human out-of-band, and
+you never retain them. Then `spellbook doctor` and `spellbook version` to
+confirm.
+
+(If your human prefers to drive, they run the same command without
+`--as-agent`.)
+
+It provisions:
 
 - `spellbookd` + `spellbook` CLI (pip-installable package in `src/`)
 - the Chia **relay** (`relay/`, deployed separately — see §3)
@@ -50,6 +72,32 @@ r["decision"]       # "approved" | "queued" | "denied"
 
 `amount_wei` for EVM chains, `amount_mojos` for Chia chains — exactly one.
 v1 is plain transfers only.
+
+## 1b. Keeping your install healthy (lifecycle)
+
+Your install upgrades itself and repairs its own code problems — it never
+touches your keys, tokens, config, or ledger to do it. Full reference:
+`docs/AGENT_LIFECYCLE.md`. The commands:
+
+```bash
+spellbook version          # local vs installed vs daemon version
+spellbook upgrade --check  # latest signed release vs yours
+spellbook upgrade 0.2.0    # self-upgrade (signed release, forward-only)
+spellbook doctor           # read-only health report
+spellbook doctor --repair  # self-repair CODE problems via signed reinstall
+```
+
+The rules that keep this safe:
+
+- `upgrade` only ever installs maintainer-signed releases (SHA-256 + GPG
+  release-key signature, verified before anything is replaced), and only
+  moves forward — downgrades are the human's call.
+- `doctor --repair` fixes **code** (package, VERSION, Sage, daemon). It
+  never regenerates keys, never mints tokens, never hand-edits config, never
+  reconstructs the ledger — state problems fail closed with guidance for
+  the human.
+- Upgrades print no key material, ever. The paper backup prints once, on
+  fresh install only.
 
 ## 2. The Chia relay API
 
@@ -231,17 +279,48 @@ Base: the operator's dashboard deployment, e.g.
 3. `POST /api/auth/verify`
    `{ challenge, signature, pubkey, addresses }` →
    sets an httpOnly session cookie (12h) and returns
-   `{ ok, role: "agent", pubkey, addresses, expiresAt }`.
+   `{ ok, role: "agent", pubkey, addresses, expiresAt, viewerToken }`.
+   - `viewerToken`: a signed token for **your human**. Show it to them
+     once — they paste it into the dashboard's viewer field and get a
+     read-only view of **your** wallet (badge: `👁️ agent <you>`).
+     Bearer credential: treat it like a password. Rotate it anytime
+     with `POST /api/auth/viewer-token` (session cookie required) →
+     `{ ok: true, viewerToken }`. Revocation is break-glass: the
+     operator rotates `SPELLBOOK_SESSION_SECRET`.
    - `pubkey`: 64 hex chars (your Ed25519 public key).
-   - `addresses`: at least one of `{ evm, solana, chia }`.
-     - `evm`: `0x` + 40 hex — queried on Robinhood testnet, Base
-       Sepolia, and ETH Sepolia.
-     - `solana`: base58 — queried on Solana devnet.
-     - `chia`: `txch1…` / `xch1…` bech32m — queried on Chia testnet11
-       via the relay.
-4. `GET /api/holdings` with the session cookie →
-   `{ networks: [...] }` — live testnet balances for **your**
-   addresses only.
+   - `addresses`: at least one address, as **arrays** in your
+     derivation order — `{ evm: [...], solana: [...], chia: [...],
+     evm_mainnet: [...], solana_mainnet: [...], chia_mainnet: [...] }`
+     (a single string per chain is also accepted and treated as a
+     one-element array). Up to 100 addresses per chain.
+     - Mainnet and testnet derive **different keys** (SPEC §2/P9), so
+       mainnet addresses are bound separately. Bind only the sides you
+       want to see — a mainnet row appears only when its `*_mainnet`
+       list is bound.
+     - `evm` / `evm_mainnet`: `0x` + 40 hex each — queried on Robinhood
+       testnet, Base Sepolia, ETH Sepolia / Robinhood Chain, Base,
+       Ethereum L1.
+     - `solana` / `solana_mainnet`: base58 each — queried on Solana
+       devnet / mainnet-beta.
+     - `chia` / `chia_mainnet`: `txch1…` / `xch1…` bech32m each —
+       queried on Chia testnet11 / mainnet via the relay's `network`
+       selector (one deployment serves both).
+   - Where the addresses come from: your local daemon derives them
+     read-only — `spellbook addresses` returns
+     `{label: {chain: address}}` covering both networks
+     (`evm-4663` vs `evm-46630`, `solana-mainnet` vs `solana-devnet`,
+     `chia-mainnet` vs `chia-testnet`). Submit the addresses in label
+     order; the dashboard never sees seeds or private keys.
+4. `GET /api/holdings?depth=N` with the session cookie →
+   `{ chains: [...] }` — live mainnet + testnet balances for **your**
+   addresses only. Each chain reports its per-address balances plus
+   the exact total across the addresses that loaded:
+   `{ id, label, env, unit, watchAddresses, total, addresses: [{ index, address, balance }] }`.
+   - `depth` caps how many derivation addresses per chain are
+     queried (1–100). Omit it to query all bound addresses.
+     Addresses are numbered from **1** in derivation order, so
+     `depth=N` queries addresses #1–#N and each row's `index`
+     is its stable 1-based lookup number.
 5. `POST /api/auth/logout` → clears the session.
 
 Without a session, `/api/holdings` returns `401`.
@@ -277,8 +356,8 @@ CH=$(curl -s $BASE/api/auth/challenge | python3 -c "import json,sys; print(json.
 # sign $CH locally -> $SIG (128 hex), then:
 curl -s -c jar.txt -b jar.txt -X POST $BASE/api/auth/verify \
   -H 'Content-Type: application/json' \
-  -d "{\"challenge\":\"$CH\",\"signature\":\"$SIG\",\"pubkey\":\"$PUBKEY\",\"addresses\":{\"evm\":\"$EVM\",\"solana\":\"$SOL\",\"chia\":\"$CHIA\"}}"
-curl -s -b jar.txt $BASE/api/holdings | python3 -m json.tool | head -40
+  -d "{\"challenge\":\"$CH\",\"signature\":\"$SIG\",\"pubkey\":\"$PUBKEY\",\"addresses\":{\"evm\":[\"$EVM\"],\"solana\":[\"$SOL\"],\"chia\":[\"$CHIA\"]}}"
+curl -s -b jar.txt "$BASE/api/holdings?depth=5" | python3 -m json.tool | head -60
 curl -s -b jar.txt -X POST $BASE/api/auth/logout
 ```
 
