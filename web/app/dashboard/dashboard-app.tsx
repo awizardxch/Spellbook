@@ -14,6 +14,23 @@ interface AddressHolding {
   error?: string;
 }
 
+interface TokenHolding {
+  contract: string;
+  name: string;
+  symbol: string;
+  decimals: number;
+  /** human-readable qty summed across the addresses that loaded */
+  qty: string;
+  /** USD value at 2dp — null when unpriced */
+  usd: string | null;
+}
+
+interface NftHolding {
+  contract: string;
+  tokenId: string;
+  name: string | null;
+}
+
 interface Holding {
   id: string;
   label: string;
@@ -25,7 +42,34 @@ interface Holding {
   watchAddresses: number;
   /** exact total across the addresses that loaded */
   total: string | null;
+  /** USD value of the native total — null when unpriced */
+  nativeUsd: string | null;
+  /** USD value of native + all tokens — the minimized row total */
+  totalUsd: string | null;
+  /** fungible tokens, USD-desc (native is `total`/`unit`, always first) */
+  tokens: TokenHolding[];
+  nfts: NftHolding[];
   addresses: AddressHolding[];
+}
+
+/** Friendly names for native coins, by unit. */
+const NATIVE_NAMES: Record<string, string> = {
+  ETH: "Ethereum",
+  SOL: "Solana",
+  XCH: "Chia",
+};
+
+/** "1234.5" → "$1,234.50" */
+function fmtUsd(v: string): string {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "—";
+  return (
+    "$" +
+    n.toLocaleString("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })
+  );
 }
 
 interface ActivityEntry {
@@ -106,6 +150,7 @@ export default function DashboardApp({
   const [activityError, setActivityError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [expandedChain, setExpandedChain] = useState<string | null>(null);
+  const [assetsTab, setAssetsTab] = useState<"assets" | "nfts">("assets");
   // How many derivation addresses per chain to query (1–100), persisted
   // per browser. The API defaults to all bound addresses when omitted.
   const [depth, setDepth] = useState<number>(() => {
@@ -355,9 +400,31 @@ export default function DashboardApp({
                     const firstError = h.addresses.find(
                       (a) => a.error
                     )?.error;
+                    const assetCount =
+                      h.tokens.length + (h.total !== null ? 1 : 0);
                     return (
                       <Fragment key={h.id}>
-                        <tr>
+                        <tr
+                          className={`dash-chainrow${open ? " open" : ""}`}
+                          onClick={() =>
+                            setExpandedChain((cur) =>
+                              cur === h.id ? null : h.id
+                            )
+                          }
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              setExpandedChain((cur) =>
+                                cur === h.id ? null : h.id
+                              );
+                            }
+                          }}
+                          tabIndex={0}
+                          aria-expanded={open}
+                          title={
+                            open ? "Collapse holdings" : "Expand holdings"
+                          }
+                        >
                           <td>
                             <span
                               className="dash-dot"
@@ -367,7 +434,19 @@ export default function DashboardApp({
                             <span className="dash-sub">{h.detail}</span>
                           </td>
                           <td className="dash-num">
-                            {h.total !== null ? (
+                            {h.totalUsd != null ? (
+                              <>
+                                <span className="dash-usd">
+                                  {fmtUsd(h.totalUsd)}
+                                </span>
+                                <span className="dash-sub">
+                                  {h.total}{" "}
+                                  <span className="dash-unit">{h.unit}</span>
+                                  {assetCount > 1 &&
+                                    ` · ${assetCount} assets`}
+                                </span>
+                              </>
+                            ) : h.total !== null ? (
                               <>
                                 {h.total}{" "}
                                 <span className="dash-unit">{h.unit}</span>
@@ -377,27 +456,13 @@ export default function DashboardApp({
                             )}
                           </td>
                           <td>
-                            <button
-                              className="dash-addr-toggle"
-                              type="button"
-                              aria-expanded={open}
-                              onClick={() =>
-                                setExpandedChain((cur) =>
-                                  cur === h.id ? null : h.id
-                                )
-                              }
-                              title={
-                                open
-                                  ? "Hide individual addresses"
-                                  : "Show individual addresses"
-                              }
-                            >
+                            <span className="dash-addr-toggle">
                               <span className="dash-chev">
                                 {open ? "▾" : "▸"}
                               </span>
                               {h.addresses.length} of {h.watchAddresses}{" "}
                               {h.watchAddresses === 1 ? "address" : "addresses"}
-                            </button>
+                            </span>
                           </td>
                           <td>
                             {h.total !== null ? (
@@ -412,6 +477,146 @@ export default function DashboardApp({
                             )}
                           </td>
                         </tr>
+                        {open && (
+                          <tr className="dash-subrow dash-assetsrow">
+                            <td colSpan={4}>
+                              <div className="dash-assets">
+                                <div
+                                  className="dash-seg"
+                                  role="tablist"
+                                  aria-label={`${h.label} holdings view`}
+                                >
+                                  <button
+                                    type="button"
+                                    role="tab"
+                                    aria-selected={assetsTab === "assets"}
+                                    className={`dash-segbtn${assetsTab === "assets" ? " on" : ""}`}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setAssetsTab("assets");
+                                    }}
+                                  >
+                                    Assets
+                                    {assetCount > 0 ? ` (${assetCount})` : ""}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    role="tab"
+                                    aria-selected={assetsTab === "nfts"}
+                                    className={`dash-segbtn${assetsTab === "nfts" ? " on" : ""}`}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setAssetsTab("nfts");
+                                    }}
+                                  >
+                                    NFTs
+                                    {h.nfts.length > 0
+                                      ? ` (${h.nfts.length})`
+                                      : ""}
+                                  </button>
+                                </div>
+                                {assetsTab === "assets" ? (
+                                  <ul className="dash-assetlist">
+                                    {h.total !== null && (
+                                      <li className="dash-asset dash-asset-native">
+                                        <span
+                                          className="dash-dot"
+                                          style={{
+                                            background:
+                                              cfg?.color ?? "#8b5cf6",
+                                          }}
+                                        />
+                                        <span className="dash-asset-name">
+                                          {NATIVE_NAMES[h.unit] ?? h.unit}
+                                          <span className="dash-sub">
+                                            {h.unit} · native
+                                          </span>
+                                        </span>
+                                        <span className="dash-asset-qty">
+                                          {h.total}{" "}
+                                          <span className="dash-unit">
+                                            {h.unit}
+                                          </span>
+                                        </span>
+                                        <span className="dash-asset-usd">
+                                          {h.nativeUsd != null ? (
+                                            fmtUsd(h.nativeUsd)
+                                          ) : (
+                                            <span className="dash-muted">—</span>
+                                          )}
+                                        </span>
+                                      </li>
+                                    )}
+                                    {h.tokens.map((t) => (
+                                      <li
+                                        key={t.contract}
+                                        className="dash-asset"
+                                      >
+                                        <span className="dash-dot dash-dot-token" />
+                                        <span className="dash-asset-name">
+                                          {t.name}
+                                          <span className="dash-sub">
+                                            {t.symbol}
+                                          </span>
+                                        </span>
+                                        <span className="dash-asset-qty">
+                                          {t.qty}{" "}
+                                          <span className="dash-unit">
+                                            {t.symbol}
+                                          </span>
+                                        </span>
+                                        <span className="dash-asset-usd">
+                                          {t.usd != null ? (
+                                            fmtUsd(t.usd)
+                                          ) : (
+                                            <span
+                                              className="dash-muted"
+                                              title="no price feed for this token"
+                                            >
+                                              unpriced
+                                            </span>
+                                          )}
+                                        </span>
+                                      </li>
+                                    ))}
+                                    {h.total === null &&
+                                      h.tokens.length === 0 && (
+                                        <li className="dash-asset-empty">
+                                          No balances loaded for this chain.
+                                        </li>
+                                      )}
+                                  </ul>
+                                ) : h.nfts.length > 0 ? (
+                                  <ul className="dash-nftlist">
+                                    {h.nfts.map((n) => (
+                                      <li
+                                        key={`${n.contract}:${n.tokenId}`}
+                                        className="dash-nft"
+                                      >
+                                        <span className="dash-nft-name">
+                                          {n.name ?? "Unknown collection"}
+                                        </span>
+                                        <span className="dash-sub">
+                                          #{n.tokenId}
+                                        </span>
+                                        <code title={n.contract}>
+                                          {truncate(n.contract)}
+                                        </code>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                ) : (
+                                  <p className="dash-note">
+                                    No NFTs found in the recent activity
+                                    window. Discovery scans recent inbound
+                                    transfers — older holdings may not
+                                    appear.
+                                  </p>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        )}
                         {open &&
                           h.addresses.map((a, i) => (
                             <tr key={`${h.id}-${i}`} className="dash-subrow">
