@@ -24,6 +24,7 @@ import {
 import {
   SESSION_COOKIE,
   readSession,
+  sessionWallets,
   type AgentAddresses,
   type Session,
 } from "@/lib/auth";
@@ -49,6 +50,8 @@ export interface AddressHolding {
 
 export interface ChainHolding {
   id: string;
+  /** labeled wallet this row belongs to, e.g. "Spellbook" or "Bankr" */
+  wallet: string;
   label: string;
   detail: string;
   /** "mainnet" | "testnet" — mirrors the chain config's env */
@@ -915,16 +918,18 @@ async function discoverEvmNfts(
 }
 
 interface ChainAddresses {
+  wallet: string;
   cfg: ChainConfig;
   addresses: string[];
 }
 
 /**
- * Resolve which chains (and whose addresses) this session may see.
+ * Resolve which chains (and whose addresses) this session may see, one
+ * entry per labeled wallet × chain.
  * - Viewers on the shared operator token see the operator's configured
  *   drill addresses (testnet only — mainnet drill addresses are not
- *   configured, so those chains are skipped).
- * - Viewers on a per-agent viewer token see THAT AGENT's wallet.
+ *   configured, so those chains are skipped), under the "Operator" label.
+ * - Viewers on a per-agent viewer token see THAT AGENT's labeled wallets.
  * - Agents see ONLY the watch addresses they asserted at login — never
  *   the operator's.
  * Mainnet and testnet derive different keys (SPEC §2/P9): mainnet chains
@@ -951,17 +956,21 @@ function addressesForChain(
 }
 
 function chainsForSession(session: Session): ChainAddresses[] {
-  if (session.role === "viewer" && !session.addresses) {
+  const wallets = sessionWallets(session);
+  if (wallets.length === 0) {
+    // Shared operator drill view (no wallets bound).
     return CHAINS.filter((cfg) => cfg.address).map((cfg) => ({
+      wallet: "Operator",
       cfg,
       addresses: [cfg.address],
     }));
   }
-  const addrs: AgentAddresses = session.addresses ?? {};
   const out: ChainAddresses[] = [];
-  for (const cfg of CHAINS) {
-    const addresses = addressesForChain(cfg, addrs);
-    if (addresses) out.push({ cfg, addresses });
+  for (const w of wallets) {
+    for (const cfg of CHAINS) {
+      const addresses = addressesForChain(cfg, w.addresses);
+      if (addresses) out.push({ wallet: w.label, cfg, addresses });
+    }
   }
   return out;
 }
@@ -987,7 +996,7 @@ export async function GET(req: Request): Promise<NextResponse> {
   // One native-price fetch shared by all chains (60s cached upstream).
   const nativePrices = await nativeUsdPrices();
   const holdings: ChainHolding[] = await Promise.all(
-    groups.map(async ({ cfg, addresses }): Promise<ChainHolding> => {
+    groups.map(async ({ wallet, cfg, addresses }): Promise<ChainHolding> => {
       const slice = addresses.slice(0, parseDepth(rawDepth, addresses.length));
       let per: AddressHolding[];
       switch (cfg.kind) {
@@ -1094,6 +1103,7 @@ export async function GET(req: Request): Promise<NextResponse> {
       // the whole response.
       return {
         id: cfg.id,
+        wallet,
         label: cfg.networkLabel,
         detail: cfg.detail,
         env: cfg.env,

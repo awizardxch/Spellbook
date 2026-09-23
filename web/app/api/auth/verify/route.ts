@@ -2,9 +2,11 @@ import { NextResponse } from "next/server";
 import {
   SESSION_COOKIE,
   SESSION_MAX_AGE,
+  flattenWalletGroups,
   mintAgentViewerToken,
   mintSession,
   parseAgentAddresses,
+  parseWalletGroups,
   verifyChallengeSignature,
 } from "@/lib/auth";
 
@@ -20,11 +22,16 @@ function sessionCookie(value: string): string {
 }
 
 /**
- * POST /api/auth/verify {challenge, signature, pubkey, addresses} —
+ * POST /api/auth/verify {challenge, signature, pubkey, addresses?, wallets?} —
  * verify the agent's Ed25519 signature over a server-issued challenge
  * against the pubkey the agent presented, and establish a read-only
  * session bound to the agent's OWN watch addresses. Any agent that
  * installed the Spellbook can log in; each agent sees their own wallet.
+ *
+ * The agent binds either the legacy flat `addresses` (one unlabeled
+ * wallet) or `wallets`: an array of `{ label, addresses }` groups, so a
+ * human viewer can tell the agent's wallets apart (e.g. "Spellbook" vs
+ * "Bankr").
  */
 export async function POST(req: Request): Promise<NextResponse> {
   let body: {
@@ -32,6 +39,7 @@ export async function POST(req: Request): Promise<NextResponse> {
     signature?: unknown;
     pubkey?: unknown;
     addresses?: unknown;
+    wallets?: unknown;
   };
   try {
     body = (await req.json()) as {
@@ -39,11 +47,12 @@ export async function POST(req: Request): Promise<NextResponse> {
       signature?: unknown;
       pubkey?: unknown;
       addresses?: unknown;
+      wallets?: unknown;
     };
   } catch {
     return NextResponse.json({ error: "bad request" }, { status: 400 });
   }
-  const { challenge, signature, pubkey, addresses } = body;
+  const { challenge, signature, pubkey, addresses, wallets } = body;
   if (
     typeof challenge !== "string" ||
     typeof signature !== "string" ||
@@ -51,10 +60,16 @@ export async function POST(req: Request): Promise<NextResponse> {
   ) {
     return NextResponse.json({ error: "bad request" }, { status: 400 });
   }
-  const parsed = parseAgentAddresses(addresses);
-  if (!parsed) {
+  const groups =
+    wallets !== undefined
+      ? parseWalletGroups(wallets)
+      : (() => {
+          const flat = parseAgentAddresses(addresses);
+          return flat ? [{ label: "Wallet", addresses: flat }] : null;
+        })();
+  if (!groups) {
     return NextResponse.json(
-      { error: "at least one valid watch address is required" },
+      { error: "at least one valid wallet (label + watch addresses) is required" },
       { status: 400 }
     );
   }
@@ -64,9 +79,11 @@ export async function POST(req: Request): Promise<NextResponse> {
       { status: 401 }
     );
   }
+  const flat = flattenWalletGroups(groups);
   const session = mintSession("agent", {
     pubkey: pubkey.trim().toLowerCase(),
-    addresses: parsed,
+    addresses: flat,
+    wallets: groups,
   });
   if (!session) {
     return NextResponse.json(
@@ -77,16 +94,17 @@ export async function POST(req: Request): Promise<NextResponse> {
   const now = Date.now();
   const viewerToken = mintAgentViewerToken(
     pubkey.trim().toLowerCase(),
-    parsed
+    groups
   );
   const res = NextResponse.json({
     ok: true,
     role: "agent",
     pubkey: pubkey.trim().toLowerCase(),
-    addresses: parsed,
+    addresses: flat,
+    wallets: groups,
     expiresAt: now + SESSION_MAX_AGE * 1000,
     // Hand this to your human once: pasting it into the dashboard's
-    // viewer field opens a read-only view of THIS agent's wallet.
+    // viewer field opens a read-only view of THIS agent's labeled wallets.
     ...(viewerToken ? { viewerToken } : {}),
   });
   res.headers.set("Set-Cookie", sessionCookie(session));
