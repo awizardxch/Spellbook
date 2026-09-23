@@ -3,6 +3,10 @@
 
 Request-token commands (the agent's side):
   spellbook status | queue | ledger | addresses
+  spellbook doctor [--repair]            # read-only install health, self-repair
+  spellbook version                      # local vs daemon version
+  spellbook upgrade --check              # latest release vs local
+  spellbook upgrade 0.2.0                # agent self-upgrade (signed release)
   spellbook request-spend --chain evm-4663 --to 0x... --amount-wei N [--purpose ..]
   spellbook offer-make --chain chia-testnet --offered native:1000 --requested <cat>:500
   spellbook offer-take --chain chia-testnet --offer <offer-string>
@@ -73,6 +77,142 @@ def cmd_ledger(a, client):
 
 def cmd_addresses(a, client):
     _show(client.addresses())
+
+
+# ---------------------------------------------------------------- lifecycle:
+# version / upgrade / doctor (SPEC §12b item 4). These are local-first: they
+# never need the approve token, and version/upgrade --check work with no
+# token at all. The agent runs these itself — no human in the loop.
+
+def _optional_token(a, env_name: str):
+    if a.token_file:
+        with open(a.token_file) as f:
+            return f.read().strip()
+    return os.environ.get(env_name, "").strip() or None
+
+
+def cmd_version(a, client=None):
+    from spellbook import version as ver
+    local = ver.local_version()
+    try:
+        import spellbook
+        pkg = getattr(spellbook, "__version__", "unknown")
+    except Exception:
+        pkg = "unknown"
+    daemon_v = None
+    tok = _optional_token(a, "SPELLBOOK_REQUEST_TOKEN")
+    if tok:
+        try:
+            daemon_v = AgentClient(_socket(a), tok,
+                                   muse_id=_muse_id(a)).status().get("spellbook_version")
+        except Exception:
+            daemon_v = None
+    _show({"local": local, "package": pkg, "daemon": daemon_v,
+           "daemon_matches_local": bool(daemon_v) and daemon_v == local})
+
+
+def _valid_tag(tag: str) -> bool:
+    import re
+    return bool(re.fullmatch(r"\d+\.\d+\.\d+", tag or ""))
+
+
+def cmd_upgrade(a, client=None):
+    from spellbook import version as ver
+    from spellbook.doctor import UPGRADE_WRAPPER
+    if a.check or not a.tag:
+        _show(ver.upgrade_check())
+        return
+    tag = a.tag
+    if not _valid_tag(tag):
+        raise SystemExit(f"spellbook: bad tag {tag!r} — want X.Y.Z")
+    if a.from_dir:
+        # Human-driven dev path: no signature to verify, so the privileged
+        # wrapper refuses it. Needs a root shell.
+        installer = os.path.join(ver.prefix(), "lib", "install.sh")
+        if os.geteuid() != 0:
+            raise SystemExit(
+                "spellbook: --from-dir upgrades need a root shell (no release "
+                "signature to verify, so the agent self-serve path refuses it).\n"
+                f"Run as root: bash {installer} --upgrade --from-dir {a.from_dir} "
+                "--agent-user <agent> --human-user <human>")
+        os.execvp("bash", ["bash", installer, "--upgrade", "--from-dir",
+                           a.from_dir, "--agent-user", a.agent_user or "",
+                           "--human-user", a.human_user or ""])
+    if not os.path.isfile(UPGRADE_WRAPPER):
+        raise SystemExit(
+            "spellbook: no privileged upgrade wrapper installed "
+            f"({UPGRADE_WRAPPER} missing) — this install predates self-serve "
+            "upgrades. Ask your human to re-run install.sh once, then retry.")
+    os.execvp("sudo", ["sudo", "-n", UPGRADE_WRAPPER, tag])
+
+
+def cmd_doctor(a, client=None):
+    from spellbook import version as ver
+    from spellbook import doctor as doctor_mod
+    try:
+        import spellbook
+        pkg_v = getattr(spellbook, "__version__", "unknown")
+    except Exception as e:
+        pkg_v = "unknown"
+        pkg_err = str(e)
+    else:
+        pkg_err = ""
+    report = {"local_package": pkg_v, "daemon": None, "repair": None}
+
+    tok = _optional_token(a, "SPELLBOOK_REQUEST_TOKEN")
+    if tok:
+        try:
+            client = AgentClient(_socket(a), tok, muse_id=_muse_id(a))
+            d = client.doctor()
+            report["daemon"] = d
+            dv = None
+            try:
+                dv = client.status().get("spellbook_version")
+            except Exception:
+                pass
+            report["daemon_version"] = dv
+            report["daemon_matches_local"] = bool(dv) and dv == pkg_v
+        except Exception as e:
+            report["daemon"] = {"ok": False, "error": f"doctor RPC failed: {e}"}
+    else:
+        report["daemon"] = {"ok": False,
+                            "error": "no request token — daemon-side checks skipped; "
+                                     "set SPELLBOOK_REQUEST_TOKEN or pass --token-file"}
+
+    if pkg_err:
+        report["local_package_error"] = pkg_err
+
+    if a.repair:
+        plan = doctor_mod.repair_plan(
+            (report["daemon"] or {}).get("checks", []))
+        report["repair"] = plan
+        for item in plan["self_repairable"]:
+            _run_self_repair(item, report)
+        # Re-check after repair so the report says what is true now.
+        if tok and plan["self_repairable"]:
+            try:
+                d2 = AgentClient(_socket(a), tok,
+                                 muse_id=_muse_id(a)).doctor()
+                report["daemon_after_repair"] = d2
+            except Exception as e:
+                report["daemon_after_repair"] = {"error": str(e)}
+    _show(report)
+    ok = (report["daemon"] or {}).get("ok", False) and not pkg_err
+    if a.repair:
+        ok = (report.get("daemon_after_repair") or {}).get("ok", ok)
+    raise SystemExit(0 if ok else 1)
+
+
+def _run_self_repair(item, report):
+    import subprocess
+    cmd = item["command"].split()
+    print(f"[spellbook-doctor] self-repair: {' '.join(cmd)} ({item['why']})")
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+        item["result"] = {"rc": r.returncode,
+                          "tail": (r.stdout + r.stderr)[-2000:]}
+    except Exception as e:
+        item["result"] = {"rc": -1, "tail": str(e)}
 
 
 def cmd_request_spend(a, client: AgentClient):
@@ -312,6 +452,24 @@ def main(argv=None):
     sub.add_parser("ledger")
     sub.add_parser("addresses")
 
+    # Lifecycle (SPEC §12b item 4): local-first, no approve token ever.
+    sub.add_parser("version")
+    up = sub.add_parser("upgrade")
+    up.add_argument("tag", nargs="?",
+                    help="release tag X.Y.Z to upgrade to (default: --check)")
+    up.add_argument("--check", action="store_true",
+                    help="compare local version against the latest release")
+    up.add_argument("--from-dir", metavar="DIR",
+                    help="human-driven dev upgrade from a source checkout "
+                         "(no signature; the agent self-serve path refuses it)")
+    up.add_argument("--agent-user", help="with --from-dir: agent OS user")
+    up.add_argument("--human-user", help="with --from-dir: human OS user")
+    dc = sub.add_parser("doctor")
+    dc.add_argument("--repair", action="store_true",
+                    help="self-repair code problems via the signed-release "
+                         "upgrade path; state problems (keys/tokens/config) "
+                         "fail closed with guidance")
+
     rs = sub.add_parser("request-spend")
     rs.add_argument("--chain", required=True)
     rs.add_argument("--to", required=True)
@@ -499,6 +657,12 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     try:
+        if a.cmd in ("version", "upgrade", "doctor"):
+            # Lifecycle commands are local-first and never take the approve
+            # token; they build their own clients as needed.
+            {"version": cmd_version, "upgrade": cmd_upgrade,
+             "doctor": cmd_doctor}[a.cmd](a)
+            return
         if a.cmd in ("approve", "reject"):
             client: HumanClient = HumanClient(_socket(a), _token(a, "SPELLBOOK_APPROVE_TOKEN"),
                                               muse_id=_muse_id(a))

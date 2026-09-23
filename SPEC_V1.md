@@ -1001,6 +1001,48 @@ answers. Full record: `docs/reviews/2026-09-22-launch-thread-feedback.md`.
    does not say which tooling approved from. Add the approving tool/source to
    approval rows.
 
+## 12c. Agent lifecycle: self-upgrade and self-repair (2026-09-23)
+
+Agents must be able to stay on the latest signed release and repair their
+own installs without risking their identity. Design, implemented on
+`main` behind this section:
+
+1. **Version identity.** The installer records the release in
+   `/opt/spellbook/VERSION` (world-readable record, not a claim). The
+   package exposes it (`spellbook.__version__`,
+   `spellbook.version.local_version()`), the daemon reports it in
+   `status.spellbook_version`, and `spellbook.version.upgrade_check()`
+   compares it against the latest signed GitHub release — saying plainly
+   when no release exists yet instead of inventing one.
+2. **Key-preserving upgrade.** `install.sh --upgrade <tag>` replaces
+   code/venv/systemd assets only. It never touches `seed.key`,
+   `std_seed.key`, tokens, config, policy, ledger, queue/velocity state,
+   Sage data, or submission gates; it never reprints key material and never
+   flips `mainnet_submit_enabled`. Missing keys/tokens or an unparseable
+   config abort the upgrade — a broken identity is re-provisioned with the
+   human, never silently re-keyed. Sage is rebuilt only when its pinned
+   commit changed.
+3. **Agent self-serve path.** `spellbook upgrade <tag>` execs
+   `/usr/local/bin/spellbook-upgrade` via a sudoers entry allowing exactly
+   that path (NOPASSWD, root-owned, agent cannot modify). The wrapper takes
+   one strict `X.Y.Z` tag, refuses downgrades and `--from-dir` (unsigned),
+   and execs the pinned installer copy — so the agent can only ever install
+   maintainer-signed releases (SHA-256 + release-key GPG verified pre-install),
+   moving strictly forward. The release-key fingerprint
+   (`SPELLBOOK_RELEASE_KEY_FPR`) is still unconfigured: release installation
+   fails closed until Speechless pins it (open decision, carried).
+4. **Doctor.** `spellbook doctor` (request-token side, via the daemon's
+   `doctor` RPC — the agent cannot traverse `/opt/spellbook` itself) checks
+   package, installed VERSION, key/token presence+mode (never contents),
+   config shape, ledger presence, Sage, daemon socket and version match.
+   `doctor --repair` self-repairs **code** problems via a signed-release
+   reinstall; **state** problems (keys, tokens, config, ledger) fail closed
+   with guidance — never regenerate, never mint by hand, never hand-edit,
+   never reconstruct.
+5. **Docs.** `docs/AGENT_LIFECYCLE.md` is the agent-facing reference;
+   `docs/AGENT_ONBOARDING.md` §1b is the short version. Tests:
+   `tests/test_lifecycle.py`.
+
 ## 13. Residual risks (accepted, not solved)
 
 - **VM compromise** takes the hot wallet — that is what the hot/cold split and

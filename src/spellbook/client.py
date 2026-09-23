@@ -101,6 +101,14 @@ class AgentClient(_BaseClient):
     def status(self) -> dict:
         return self._call("status")
 
+    def doctor(self) -> dict:
+        """Read-only install health, computed daemon-side (SPEC §12b item 4).
+
+        Presence/permissions/shape only — never key contents. The agent
+        calls this instead of stat-ing the prefix itself.
+        """
+        return self._call("doctor")
+
     def addresses(self) -> dict:
         """{label: {chain: address}} — read-only, derived by the daemon."""
         return self._call("addresses")["addresses"]
