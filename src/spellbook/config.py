@@ -39,6 +39,14 @@ spellbook.json (all fields optional unless noted):
                           (txch1 vs xch1), so the paper backup covers both.
   socket_group          : Unix group allowed to connect to the socket (optional —
                           without it the socket is 0700, daemon user only)
+  dex                   : {"allowed_venues": ["matcha", "uniswap"]} (optional —
+                          default both). The user's chosen swap-venue
+                          allowlist (SPEC §10 v2): a dex_swap intent naming
+                          any other venue is refused at validation and again
+                          at execution. "0x" is accepted as an alias for
+                          "matcha" (the 0x Swap API, matcha.xyz's engine).
+                          Unknown names fail the daemon at startup. Takes
+                          effect on daemon restart.
   solana                : {"network": "devnet" | "mainnet-beta" (default
                           "devnet" — the active network),
                           "rpc_url": str (optional — defaults to the

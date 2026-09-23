@@ -222,9 +222,10 @@ def cmd_dex_quote(a, client=None):
     import os
     from spellbook import dex as dexmod
 
-    venues = ["0x", "uniswap"] if a.venue == "both" else [a.venue]
+    venues = (["matcha", "uniswap"] if a.venue == "both"
+              else [dexmod.normalize_venue(a.venue)])
     quotes = []
-    if "0x" in venues:
+    if "matcha" in venues:
         key = os.environ.get("ZERO_EX_API_KEY")
         if not key:
             raise SystemExit("spellbook: ZERO_EX_API_KEY not set "
@@ -266,6 +267,12 @@ def cmd_request_spend(a, client: AgentClient):
         chain=a.chain, destination=a.to, asset=a.asset,
         amount_wei=a.amount_wei, amount_mojos=a.amount_mojos,
         purpose=a.purpose or ""))
+
+
+def cmd_dex_venues(a, client: AgentClient):
+    """Show the user's swap-venue allowlist (read-only). To change it,
+    edit dex.allowed_venues in spellbook.json and restart the daemon."""
+    _show(client.dex_venues())
 
 
 def cmd_dex_swap(a, client: AgentClient):
@@ -536,8 +543,9 @@ def main(argv=None):
 
     # DEX quotes (read-only, local-first: no daemon, no signing, no broadcast).
     dq = sub.add_parser("dex-quote")
-    dq.add_argument("--venue", choices=["0x", "uniswap", "both"], default="both",
-                    help="quote venue(s)")
+    dq.add_argument("--venue", choices=["matcha", "0x", "uniswap", "both"],
+                    default="both",
+                    help="quote venue(s); \"0x\" is an alias for matcha")
     dq.add_argument("--chain", type=int, required=True,
                     help="EVM chain id (e.g. 8453 Base, 1 Ethereum)")
     dq.add_argument("--sell-token", required=True,
@@ -555,6 +563,14 @@ def main(argv=None):
                     help="fetch FIRM executable quotes (short-lived calldata); "
                          "default is indicative prices only")
 
+    dv = sub.add_parser("dex-venues",
+                        help="show your swap-venue allowlist (read-only)")
+    dv.description = (
+        "Show which DEX venues may execute swaps. The allowlist lives in "
+        "spellbook.json as dex.allowed_venues (default: matcha + uniswap). "
+        "To change it, edit that file (daemon-user-owned, 0600) and restart "
+        "the daemon.")
+
     rs = sub.add_parser("request-spend")
     rs.add_argument("--chain", required=True)
     rs.add_argument("--to", required=True)
@@ -564,12 +580,15 @@ def main(argv=None):
     rs.add_argument("--purpose", default="")
 
     dsw = sub.add_parser("dex-swap",
-                         help="request a bounded swap (0x/uniswap); the "
+                         help="request a bounded swap (matcha/uniswap); the "
                               "daemon fetches the firm quote at execution "
                               "and only signs inside the approved bounds")
     dsw.add_argument("--chain", required=True,
                      help="daemon chain name, e.g. evm-8453")
-    dsw.add_argument("--venue", required=True, choices=["0x", "uniswap"])
+    dsw.add_argument("--venue", required=True,
+                     choices=["matcha", "0x", "uniswap"],
+                     help="swap venue; must be on your dex.allowed_venues "
+                          "list (\"0x\" is an alias for matcha)")
     dsw.add_argument("--sell-token", required=True,
                      help="ERC-20 address, or 0xeeee...eeee for native")
     dsw.add_argument("--buy-token", required=True)
@@ -795,6 +814,7 @@ def main(argv=None):
             {"status": cmd_status, "queue": cmd_queue, "ledger": cmd_ledger,
              "addresses": cmd_addresses, "request-spend": cmd_request_spend,
              "dex-swap": cmd_dex_swap, "dex-lp-add": cmd_dex_lp_add,
+             "dex-venues": cmd_dex_venues,
              "offer-make": cmd_offer_make, "offer-take": cmd_offer_take,
              "offer-cancel": cmd_offer_cancel, "chia-read": cmd_chia_read,
              "nft-mint": cmd_nft_mint,

@@ -462,7 +462,11 @@ mTLS cert, or submit transactions.
   decoder below.)
 - `POST /v1/dex_swap {intent, chain, venue, sell_token, buy_token,
   sell_amount_wei, min_buy_amount_wei, max_slippage_bps, purpose?,
-  deadline_sec?}` → bounded swap intent (v2, §10)
+  deadline_sec?}` → bounded swap intent (v2, §10). `venue` is "matcha"
+  (the 0x Swap API; "0x" also accepted) or "uniswap", and must be on the
+  user's `dex.allowed_venues` list — anything else is refused.
+- `GET /v1/dex_venues` → the user's swap-venue allowlist plus every known
+  venue (API-key env var, served chain ids). Read-only.
 - `POST /v1/dex_lp_add {intent, chain, protocol, router, token_a, token_b,
   amount_a_wei, amount_b_wei, amount_a_min_wei?, amount_b_min_wei?,
   fee?, tick_lower?, tick_upper?, purpose?, deadline_sec?}` → bounded
@@ -539,6 +543,15 @@ tooling (approve token), showing
     validated field-by-field against the approved bounds
     (`dex.validate_swap_intent_against_quote`); LP calldata is built
     locally from the approved bounds via whitelisted builders only.
+  - **Venue allowlist (user-chosen):** swaps execute only on venues the
+    user allows. `dex.allowed_venues` in spellbook.json (default: matcha
+    + uniswap; "0x" is accepted as an alias for matcha) is enforced at
+    intent validation *and* re-checked at execution — a venue removed
+    from the config can never execute, even for an intent queued before
+    the change. Unknown venue names fail the daemon at startup. The
+    venue must also serve the intent's chain (neither venue serves
+    Robinhood Chain today); an unserved chain is refused at request time
+    with a clear reason, not as a confusing execution failure.
   - Exact-amount ERC-20 approvals only (allowance checked on-chain
     first; no unlimited approvals). The spender comes from the quote,
     never hardcoded.

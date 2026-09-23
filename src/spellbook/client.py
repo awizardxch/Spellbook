@@ -107,6 +107,11 @@ class AgentClient(_BaseClient):
         fetches the firm venue quote at execution time and refuses to
         sign unless it fits inside the approved bounds.
 
+        ``venue`` is "matcha" (0x API; "0x" also accepted) or "uniswap",
+        and must be on the user's dex.allowed_venues list (default:
+        both) — anything else is refused at intent time. The venue must
+        also serve the chain (neither serves Robinhood Chain).
+
         Use the 0xeeee...eeee sentinel for a native sell or buy side.
         Returns the daemon's decision: approved | queued | denied.
         """
@@ -117,6 +122,13 @@ class AgentClient(_BaseClient):
                   "max_slippage_bps": max_slippage_bps, "purpose": purpose,
                   "deadline_sec": deadline_sec}
         return self._call("dex_swap", params)
+
+    def dex_venues(self) -> dict:
+        """Read-only: the user's swap-venue allowlist and every known
+        venue (API-key env var + served chain ids). The allowlist is set
+        via dex.allowed_venues in spellbook.json and takes effect on
+        daemon restart."""
+        return self._call("dex_venues")
 
     def dex_lp_add(self, *, chain: str, protocol: str, router: str,
                    token_a: str, token_b: str, amount_a_wei: int,

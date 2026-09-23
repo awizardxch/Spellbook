@@ -5,6 +5,9 @@ monkeypatched _http_json; nothing here touches a live API, signs, or
 broadcasts.
 """
 
+import json
+import secrets
+
 import pytest
 
 from spellbook import dex
@@ -20,6 +23,8 @@ from spellbook.dex import (
     build_v3_exact_input_single_calldata,
     build_v3_mint_calldata,
     compare_quotes,
+    normalize_venue,
+    venue_serves_chain,
 )
 
 A = "0x1111111111111111111111111111111111111111"
@@ -198,7 +203,7 @@ def test_zerox_quote_parses(monkeypatch):
     monkeypatch.setattr(dex, "_http_json", fake_http)
     c = ZeroExClient("key123")
     q = c.quote(8453, A, B, 10**18, C, slippage_bps=50)
-    assert q["venue"] == "0x"
+    assert q["venue"] == "matcha"  # canonical venue name ("0x" is an alias)
     assert q["buy_amount"] == "950000"
     assert q["min_buy_amount"] == "940000"
     assert q["allowance_target"] == C
@@ -365,3 +370,156 @@ def test_validate_swap_native_value_mismatch():
                    "data": "0x1234567890abcdef", "value": str(10**18 - 1)})
     with pytest.raises(DexError, match="tx value"):
         validate_swap_intent_against_quote(intent, q)
+
+
+# --------------------------------------------------------------------------
+# Venue registry + user allowlist
+# --------------------------------------------------------------------------
+
+def test_normalize_venue_canonical_and_alias():
+    assert normalize_venue("matcha") == "matcha"
+    assert normalize_venue("0x") == "matcha"      # the API brand is an alias
+    assert normalize_venue("uniswap") == "uniswap"
+    assert normalize_venue(" Matcha ") == "matcha"  # tolerant input
+    assert normalize_venue("UNISWAP") == "uniswap"
+
+
+def test_normalize_venue_rejects_unknown():
+    for bad in ("sushiswap", "", "   ", None, 123, "0xx"):
+        with pytest.raises(DexError, match="unknown DEX venue"):
+            normalize_venue(bad)
+
+
+def test_venue_serves_chain():
+    assert venue_serves_chain("matcha", 8453)
+    assert venue_serves_chain("matcha", 1)
+    assert venue_serves_chain("uniswap", 1)
+    assert venue_serves_chain("uniswap", 8453)
+    # Neither aggregator serves Robinhood Chain — refused, never guessed.
+    assert not venue_serves_chain("matcha", 4663)
+    assert not venue_serves_chain("matcha", 46630)
+    assert not venue_serves_chain("uniswap", 4663)
+    assert not venue_serves_chain("uniswap", 46630)
+    # Unknown venue -> False (fail closed).
+    assert not venue_serves_chain("sushiswap", 1)
+
+
+# --------------------------------------------------------------------------
+# Daemon allowlist enforcement (in-process Daemon, tmp config dir — no
+# socket, no network, no signing)
+# --------------------------------------------------------------------------
+
+_MISSING = object()  # sentinel: "dex" key absent from spellbook.json
+
+
+def _daemon(tmp_path, dex_cfg=_MISSING):
+    """Minimal config dir: spellbook.json + policy.json + both tokens.
+
+    dex_cfg is the value of the "dex" key; omitted -> key absent (default
+    allowlist)."""
+    from spellbook.daemon import Daemon
+    cfg = {"labels": ["default"]}
+    if dex_cfg is not _MISSING:
+        cfg["dex"] = dex_cfg
+    for name, data in (
+            ("spellbook.json", json.dumps(cfg)),
+            ("policy.json", json.dumps({})),
+            ("request.token", secrets.token_hex(32)),
+            ("approve.token", secrets.token_hex(32))):
+        p = tmp_path / name
+        p.write_text(data)
+        p.chmod(0o600)
+    return Daemon(str(tmp_path))
+
+
+def _base_chain(monkeypatch):
+    """evm.CHAINS on this branch is Robinhood-only; add Base so the
+    venue/chain checks have a served chain to exercise (test-only)."""
+    from spellbook import evm
+    monkeypatch.setitem(evm.CHAINS, "evm-8453",
+                        {"chain_id": 8453, "testnet": False, "name": "Base"})
+
+
+def _swap_params(**over):
+    p = {"intent": "dex_swap", "chain": "evm-8453", "venue": "matcha",
+         "sell_token": A, "buy_token": B,
+         "sell_amount_wei": 10**18, "min_buy_amount_wei": 9 * 10**17,
+         "max_slippage_bps": 50, "purpose": "test"}
+    p.update(over)
+    return p
+
+
+def test_daemon_default_allowlist(tmp_path):
+    d = _daemon(tmp_path)
+    assert d.dex_allowed_venues == ["matcha", "uniswap"]
+
+
+def test_daemon_custom_allowlist(tmp_path):
+    d = _daemon(tmp_path, {"allowed_venues": ["uniswap"]})
+    assert d.dex_allowed_venues == ["uniswap"]
+
+
+def test_daemon_normalizes_0x_alias_in_config(tmp_path):
+    d = _daemon(tmp_path, {"allowed_venues": ["0x"]})
+    assert d.dex_allowed_venues == ["matcha"]
+
+
+def test_daemon_rejects_unknown_venue_in_config(tmp_path):
+    with pytest.raises(ValueError, match="bad dex.allowed_venues"):
+        _daemon(tmp_path, {"allowed_venues": ["sushiswap"]})
+
+
+def test_daemon_rejects_empty_allowlist(tmp_path):
+    with pytest.raises(ValueError, match="non-empty list"):
+        _daemon(tmp_path, {"allowed_venues": []})
+
+
+def test_validate_swap_accepts_allowed_venue(tmp_path, monkeypatch):
+    _base_chain(monkeypatch)
+    d = _daemon(tmp_path)
+    intent = d._validate_dex_swap(_swap_params())
+    assert intent["venue"] == "matcha"
+    assert intent["chain_id"] == 8453
+
+
+def test_validate_swap_alias_0x_normalized(tmp_path, monkeypatch):
+    _base_chain(monkeypatch)
+    d = _daemon(tmp_path)
+    intent = d._validate_dex_swap(_swap_params(venue="0x"))
+    assert intent["venue"] == "matcha"
+
+
+def test_validate_swap_rejects_non_allowlisted_venue(tmp_path, monkeypatch):
+    from spellbook.evm import EvmError
+    _base_chain(monkeypatch)
+    d = _daemon(tmp_path, {"allowed_venues": ["uniswap"]})
+    with pytest.raises(EvmError, match="not on your allowed list"):
+        d._validate_dex_swap(_swap_params(venue="matcha"))
+
+
+def test_validate_swap_rejects_unknown_venue(tmp_path, monkeypatch):
+    from spellbook.evm import EvmError
+    _base_chain(monkeypatch)
+    d = _daemon(tmp_path)
+    with pytest.raises(EvmError, match="unknown DEX venue"):
+        d._validate_dex_swap(_swap_params(venue="sushiswap"))
+
+
+def test_validate_swap_rejects_unserved_chain_at_request_time(tmp_path):
+    # Robinhood Chain is in evm.CHAINS but served by neither venue: the
+    # refusal happens at request time with a clear reason, not as a
+    # confusing failure at execution.
+    from spellbook.evm import EvmError
+    d = _daemon(tmp_path)
+    with pytest.raises(EvmError, match="does not serve"):
+        d._validate_dex_swap(_swap_params(chain="evm-4663"))
+
+
+def test_rt_dex_venues(tmp_path):
+    d = _daemon(tmp_path, {"allowed_venues": ["matcha"]})
+    out = d.rt_dex_venues({}, "muse-test")
+    assert out["allowed_venues"] == ["matcha"]
+    assert out["known_venues"]["matcha"]["env_key"] == "ZERO_EX_API_KEY"
+    assert out["known_venues"]["uniswap"]["env_key"] == "UNISWAP_API_KEY"
+    assert 8453 in out["known_venues"]["matcha"]["chain_ids"]
+    assert 4663 not in out["known_venues"]["matcha"]["chain_ids"]

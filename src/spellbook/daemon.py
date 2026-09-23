@@ -59,7 +59,7 @@ REQUEST_ROUTES = {
     "coin_combine", "coin_split", "coin_autocombine",
     "bulk_send", "multi_send",
     "message_sign",
-    "dex_swap", "dex_lp_add",
+    "dex_swap", "dex_lp_add", "dex_venues",
 }
 APPROVE_ROUTES = {
     "queue_approve", "queue_reject", "publish_directory_entry",
@@ -442,6 +442,28 @@ class Daemon:
         # JSON-RPC to a public node — no relay to deploy; the endpoint sees
         # public addresses, balances, and already-signed transactions only.
         self.solana_cfg = self.cfg.get("solana", {})
+        # DEX venue allowlist (SPEC §10 v2): the user's chosen swap venues.
+        # spellbook.json may carry {"dex": {"allowed_venues":
+        # ["matcha", "uniswap"]}} — default is both. Unknown names fail the
+        # daemon at startup (fail closed); the list is enforced again on
+        # every dex_swap validation and at execution time, so a venue
+        # removed from the config can never execute even for an intent
+        # queued before the change.
+        dex_cfg = self.cfg.get("dex", {})
+        if not isinstance(dex_cfg, dict):
+            raise ValueError("dex must be an object")
+        raw_venues = dex_cfg.get("allowed_venues",
+                                 list(dex_mod.DEFAULT_ALLOWED_VENUES))
+        if (not isinstance(raw_venues, list) or not raw_venues
+                or any(not isinstance(v, str) for v in raw_venues)):
+            raise ValueError(
+                "dex.allowed_venues must be a non-empty list of venue names")
+        try:
+            self.dex_allowed_venues = [dex_mod.normalize_venue(v)
+                                       for v in raw_venues]
+        except dex_mod.DexError as e:
+            raise ValueError(f"bad dex.allowed_venues: {e}")
+        self._dex_allowed_set = frozenset(self.dex_allowed_venues)
         # The Sage RPC child process, if we started one. The daemon owns the
         # whole Chia execution path (O10): it spawns `sage rpc start` against
         # the configured data home and talks to it over local mTLS. If Sage
@@ -841,8 +863,23 @@ class Daemon:
         dl = params.get("deadline_sec")
         if dl is not None and time.time() > dl:
             raise evm.EvmError("swap intent expired — refusing")
-        venue = params["venue"]
-        env_key = "ZERO_EX_API_KEY" if venue == "0x" else "UNISWAP_API_KEY"
+        # The allowlist is re-checked here, not just at queue time: the
+        # config may have changed across a daemon restart while this
+        # intent sat queued. A venue removed from the list can never
+        # execute.
+        try:
+            venue = dex_mod.normalize_venue(params["venue"])
+        except dex_mod.DexError as e:
+            raise evm.EvmError(f"schema violation: {e}")
+        if venue not in self._dex_allowed_set:
+            raise evm.EvmError(
+                f"venue {venue!r} is not on the current allowed list "
+                f"({', '.join(self.dex_allowed_venues)}) — refusing")
+        if not dex_mod.venue_serves_chain(venue, info["chain_id"]):
+            raise evm.EvmError(
+                f"venue {venue!r} does not serve chain id "
+                f"{info['chain_id']} — refusing")
+        env_key = dex_mod.VENUE_ENV_KEYS[venue]
         api_key = os.environ.get(env_key)
         if not api_key:
             raise evm.EvmError(
@@ -851,7 +888,7 @@ class Daemon:
         sell, buy = params["sell_token"], params["buy_token"]
         amount = params["sell_amount_wei"]
         # Firm quote, fetched at execution time (quotes live ~30s).
-        if venue == "0x":
+        if venue == dex_mod.VENUE_MATCHA:
             quote = dex_mod.ZeroExClient(api_key).quote(
                 info["chain_id"], sell, buy, amount, sender,
                 slippage_bps=params["max_slippage_bps"])
@@ -2990,9 +3027,21 @@ class Daemon:
         if chain not in evm.CHAINS:
             raise evm.EvmError(f"unknown EVM chain: {chain!r}")
         venue = p.get("venue")
-        if venue not in ("0x", "uniswap"):
+        try:
+            venue = dex_mod.normalize_venue(venue)
+        except dex_mod.DexError as e:
+            raise evm.EvmError(f"schema violation: {e}")
+        if venue not in self._dex_allowed_set:
             raise evm.EvmError(
-                f"venue must be '0x' or 'uniswap', got {venue!r}")
+                f"venue {venue!r} is not on your allowed list "
+                f"({', '.join(self.dex_allowed_venues)}) — refusing. "
+                "Set dex.allowed_venues in spellbook.json and restart "
+                "the daemon to change it.")
+        chain_id = evm.CHAINS[chain]["chain_id"]
+        if not dex_mod.venue_serves_chain(venue, chain_id):
+            raise evm.EvmError(
+                f"venue {venue!r} does not serve {chain} "
+                f"(chain id {chain_id}) — refusing")
         sell = p.get("sell_token", "")
         buy = p.get("buy_token", "")
         for tok, what in ((sell, "sell_token"), (buy, "buy_token")):
@@ -3017,7 +3066,7 @@ class Daemon:
                 "min_buy_amount_wei": p["min_buy_amount_wei"],
                 "max_slippage_bps": sl, "purpose": p.get("purpose", ""),
                 "deadline_sec": dl,
-                "chain_id": evm.CHAINS[chain]["chain_id"]}
+                "chain_id": chain_id}
 
     def _validate_dex_lp_add(self, p: dict) -> dict:
         """Schema + bounds validation for a dex_lp_add intent."""
@@ -3092,6 +3141,25 @@ class Daemon:
                    (intent["chain"], intent["token_b"].lower(),
                     intent["amount_b_wei"])]
         return self._run_fund_intent(intent, muse_id, entries, "dex_lp_add")
+
+    def rt_dex_venues(self, p: dict, muse_id: str) -> dict:
+        """Read-only: the user's chosen swap-venue allowlist (SPEC §10 v2).
+
+        No funds move; this reports which venues a dex_swap intent may
+        name. The list comes from dex.allowed_venues in spellbook.json
+        (default: matcha + uniswap) and takes effect on daemon restart.
+        """
+        return {
+            "allowed_venues": list(self.dex_allowed_venues),
+            "known_venues": {
+                v: {"env_key": dex_mod.VENUE_ENV_KEYS[v],
+                    "chain_ids": sorted(dex_mod.VENUE_CHAINS[v])}
+                for v in dex_mod.KNOWN_VENUES
+            },
+            "note": ("to change the list, set dex.allowed_venues in "
+                     "spellbook.json (0600, daemon-user-owned) and restart "
+                     "the daemon"),
+        }
 
     # ------------------------------------------------------------ offer intents
     def _chia_offer_guards(self, params: dict, chain: str) -> None:
