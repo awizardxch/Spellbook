@@ -69,18 +69,8 @@ pointing a wallet at any public full node.
 │   daemon     │ ───────────────────────▶ │ spellbook-chia-   │ ───────────────▶ │ testnet11  │
 │ keys + BLS   │   coins / broadcast /    │ relay (Railway)   │  persistent peer │ full nodes │
 │ signing HERE │   tx status              │ no keys, no seeds │  connections     │ :58444     │
-└──────────────┘   + "network" selector   └───────────────────┘                  ├────────────┤
-                                                  one peer pool                  │ mainnet    │
-                                                  per enabled network            │ full nodes │
-                                                                                 │ :8444      │
-                                                                                 └────────────┘
+└──────────────┘                          └───────────────────┘                  └────────────┘
 ```
-
-One deployment serves both networks (`RELAY_NETWORKS`, default
-`testnet11,mainnet`). Every endpoint takes an optional `network`
-selector (`"network"` in POST bodies, `?network=` on GETs); omitted,
-requests use `RELAY_NETWORK` (default `testnet11`), so old clients keep
-working unchanged.
 
 What the relay **never** receives: seeds, private keys, mnemonics.
 What the relay **does** receive: puzzle hashes (public), signed spend
@@ -161,15 +151,13 @@ from a pure network client.
 - Bearer token from env `RELAY_API_TOKEN` (32+ bytes, generated at
   deploy). Constant-time compare. No token, no access — including
   `/v1/status` (which leaks watched addresses).
-- Network pinning, per pool: `RELAY_NETWORKS` (default
-  `testnet11,mainnet`) starts one peer pool per network. The relay
-  verifies each peer's handshake `network_id` matches its pool's network
-  and drops the peer otherwise. Requests select a pool with an optional
-  `network` selector (`"network"` in POST bodies, `?network=` on GETs);
-  omitted, they use `RELAY_NETWORK` (default `testnet11`) — there is no
-  silent fallback to another network. The genesis challenge
-  (`37a90eb5…36615` on testnet11) pins the AGG_SIG_ME domain separately
-  at signing time, on the daemon.
+- Network pinning: `RELAY_NETWORK` (`testnet11` default). The relay
+  verifies the peer's handshake `network_id` equals `"testnet11"` (the
+  protocol network identifier) and drops the peer otherwise. The
+  genesis challenge
+  (`37a90eb5…36615`) pins the AGG_SIG_ME domain separately. Mainnet
+  requires explicitly setting `RELAY_NETWORK=mainnet` — there is no
+  silent fallback.
 - Request limits: ≤ 50 puzzle hashes per `/v1/coins` call; ≤ 5 MB
   bundle per `/v1/broadcast`; naive per-IP rate limit (60 req/min).
   Bodies are schema-validated; anything else is a 400.
@@ -238,18 +226,6 @@ Config:
 
 ## 5. Frontend (`web/`, Vercel)
 
-> **Superseded (2026-09-22).** The paste-token dashboard described below
-> was never built. It is replaced by the `/dashboard` route in `web/`
-> (Next.js App Router): a demo login gate (clearly labeled "Demo — not
-> real authentication"), then Portfolio / Networks / Queue / Activity
-> tabs. Portfolio reads live testnet balances through the server-side
-> `GET /api/holdings` proxy — the browser never holds the relay token
-> and never talks to an RPC or the relay directly. Queue/Activity are
-> labeled demo content in v1. See `web/README.md` for the current
-> posture and the Vercel env vars.
-
-_Original design (kept for history):_
-
 A static single-page dashboard for the first tester. No build step;
 deploys to Vercel as-is. It talks to the relay API with a token the
 tester pastes (stored in `sessionStorage` only, never persisted).
@@ -290,11 +266,8 @@ cd web
 vercel --prod
 ```
 
-Then set the server-only env vars for the dashboard's Chia row (see
-`web/README.md`): `NEXT_PUBLIC_RELAY_URL` and `SPELLBOOK_RELAY_TOKEN`
-(copy of the relay's `RELAY_BEARER_TOKEN` from Railway). No CORS
-configuration is needed — the browser never calls the relay directly;
-`GET /api/holdings` proxies server-side.
+Then set the dashboard's relay URL + token in the page. CORS on the
+relay allows the Vercel origin (env `RELAY_CORS_ORIGIN`).
 
 ## 7. Test plan (before Speechless deploys)
 

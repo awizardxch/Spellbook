@@ -29,12 +29,6 @@ API (from docs/chia-relay.md):
                                                    status_name, error, ...}}
                                (HTTP 404 when the relay never saw the txid)
 
-Multi-network: the relay holds one peer pool per enabled Chia network
-(testnet11 + mainnet). Every method below takes an optional ``network``
-selector ("testnet11" | "mainnet"); omitted, the relay answers from its
-default network (historically testnet11), so existing callers are
-unaffected.
-
 Mempool status is the Chia mempool-inclusion int (1=SUCCESS, 2=PENDING,
 3=FAILED); status_name is its string form. `expected_txid` is the
 relay-computed sha256 of the bundle bytes it received — the daemon
@@ -208,27 +202,19 @@ class RelayRpc:
 
     # ---- API methods ----
 
-    def status(self, network: str | None = None) -> dict:
-        """GET /v1/status — relay health, network, peer count, height.
-
-        network: optional Chia network selector ("testnet11" | "mainnet").
-        Omitted -> the relay's default network (backward compatible).
-        """
-        path = "/v1/status"
-        if network is not None:
-            path += f"?network={urllib.parse.quote(str(network))}"
-        out = self._request("GET", path)
+    def status(self) -> dict:
+        """GET /v1/status — relay health, network, peer count, height."""
+        out = self._request("GET", "/v1/status")
         for field in ("ok", "network", "peak_height", "peers"):
             if field not in out:
                 raise RelayError(
                     f"/v1/status missing field {field!r}: {out!r}")
         return out
 
-    def coins(self, puzzle_hashes: list, network: str | None = None) -> list:
+    def coins(self, puzzle_hashes: list) -> list:
         """POST /v1/coins — CoinStates for the given puzzle hashes.
 
         puzzle_hashes: list of 32-byte hex strings (≤ 50 per the relay).
-        network: optional Chia network selector; omitted -> relay default.
         Returns the list of coin dicts; empty list means no coins (not an
         error).
         """
@@ -244,22 +230,19 @@ class RelayRpc:
                 bytes.fromhex(ph)
             except ValueError:
                 raise RelayError(f"bad puzzle hash hex: {ph!r}")
-        body: dict = {"puzzle_hashes": puzzle_hashes}
-        if network is not None:
-            body["network"] = network
-        out = self._request("POST", "/v1/coins", body)
+        out = self._request("POST", "/v1/coins",
+                            {"puzzle_hashes": puzzle_hashes})
         coins = out.get("coins")
         if not isinstance(coins, list):
             raise RelayError(f"/v1/coins gave no coins list: {out!r}")
         return coins
 
-    def broadcast(self, spend_bundle: str, network: str | None = None) -> dict:
+    def broadcast(self, spend_bundle: str) -> dict:
         """POST /v1/broadcast — submit a signed spend bundle.
 
         spend_bundle: hex of the serialized SpendBundle (built and
         signed locally via chia_sign.py). Sent as {"spend_bundle": hex}
         per the documented contract.
-        network: optional Chia network selector; omitted -> relay default.
         Returns {ok, txid, expected_txid, status, status_name, error}
         where status is the mempool inclusion int (1=SUCCESS, 2=PENDING,
         3=FAILED) and status_name is its string form. `expected_txid` is
@@ -278,15 +261,13 @@ class RelayRpc:
         # rejects, but we never even send.
         # Documented field name is `spend_bundle`; the relay tolerates the
         # legacy `spend_bundle_hex` alias but we send the documented shape.
-        body = {"spend_bundle": spend_bundle}
-        if network is not None:
-            body["network"] = network
-        out = self._request("POST", "/v1/broadcast", body)
+        out = self._request("POST", "/v1/broadcast",
+                            {"spend_bundle": spend_bundle})
         if "txid" not in out:
             raise RelayError(f"/v1/broadcast gave no txid: {out!r}")
         return out
 
-    def coin(self, coin_id_hex: str, network: str | None = None) -> dict:
+    def coin(self, coin_id_hex: str) -> dict:
         """GET /v1/coin/{coin_id} — poll a coin's spent/created heights."""
         if not isinstance(coin_id_hex, str) or len(coin_id_hex) != 64:
             raise RelayError(f"bad coin id: {coin_id_hex!r}")
@@ -294,17 +275,13 @@ class RelayRpc:
             bytes.fromhex(coin_id_hex)
         except ValueError:
             raise RelayError(f"bad coin id hex: {coin_id_hex!r}")
-        path = f"/v1/coin/{coin_id_hex}"
-        if network is not None:
-            path += f"?network={urllib.parse.quote(str(network))}"
-        return self._request("GET", path)
+        return self._request("GET", f"/v1/coin/{coin_id_hex}")
 
-    def coin_ids(self, coin_id_hexes: list, network: str | None = None) -> dict:
+    def coin_ids(self, coin_id_hexes: list) -> dict:
         """POST /v1/coin_ids — batch coin-state lookup (Sage get_coins_by_ids).
 
         Returns {"coins": [...], "not_found": [hex...]}. Coins come back
         in request order; unknown ids land in "not_found" (not an error).
-        network: optional Chia network selector; omitted -> relay default.
         """
         if not isinstance(coin_id_hexes, list):
             raise RelayError("coin_ids must be a list")
@@ -319,25 +296,21 @@ class RelayRpc:
                 bytes.fromhex(cid)
             except ValueError:
                 raise RelayError(f"bad coin id hex: {cid!r}")
-        body = {"coin_ids": coin_id_hexes}
-        if network is not None:
-            body["network"] = network
-        out = self._request("POST", "/v1/coin_ids", body)
+        out = self._request("POST", "/v1/coin_ids",
+                            {"coin_ids": coin_id_hexes})
         coins = out.get("coins")
         not_found = out.get("not_found")
         if not isinstance(coins, list) or not isinstance(not_found, list):
             raise RelayError(f"/v1/coin_ids gave bad shape: {out!r}")
         return {"coins": coins, "not_found": not_found}
 
-    def broadcast_status(self, txid_hex: str,
-                         network: str | None = None) -> dict:
+    def broadcast_status(self, txid_hex: str) -> dict:
         """GET /v1/broadcasts/{txid} — what did the relay see for this txid?
 
         Returns the broadcast record {txid, status, status_name, error,
         coin_spends, time}. Raises RelayError (with HTTP 404) when the
         relay has never seen the txid — meaning it was NOT submitted
         through this relay instance.
-        network: optional filter; omitted searches every network's records.
         """
         if not isinstance(txid_hex, str) or len(txid_hex) != 64:
             raise RelayError(f"bad txid: {txid_hex!r}")
@@ -346,10 +319,7 @@ class RelayRpc:
             bytes.fromhex(txid_hex)
         except ValueError:
             raise RelayError(f"bad txid hex: {txid_hex!r}")
-        path = f"/v1/broadcasts/{txid_hex}"
-        if network is not None:
-            path += f"?network={urllib.parse.quote(str(network))}"
-        out = self._request("GET", path)
+        out = self._request("GET", f"/v1/broadcasts/{txid_hex}")
         record = out.get("broadcast")
         if not isinstance(record, dict):
             raise RelayError(

@@ -22,27 +22,19 @@ bearer-authed JSON API.
   public full node.
 - **Not an approver.** It cannot approve anything — it only forwards what
   the daemon (after human approval) tells it to forward.
-- **Multi-network.** One deployment holds a peer pool per enabled Chia
-  network (`RELAY_NETWORKS`, default `testnet11,mainnet`). Every endpoint
-  takes an optional `network` selector (`"network"` in POST bodies,
-  `?network=` on GETs); omitted, the relay answers from `RELAY_NETWORK`
-  (default `testnet11`), so old clients keep working.
+- **Not mainnet-ready by default.** It pins `RELAY_NETWORK=testnet11`.
+  Mainnet needs an explicit config change and separate authorization.
 
 ## API (all routes require `Authorization: Bearer <token>`, except `/health`)
-
-Every endpoint accepts an optional network selector: `"network"` key in
-POST bodies, `?network=` query param on GETs. Omitted → `RELAY_NETWORK`.
 
 | Method | Path | Body | Returns |
 |---|---|---|---|
 | GET | `/health` | — | `{"ok": true, "service": "spellbook-chia-relay"}` — **no auth**, for Railway/K8s health checks. Non-sensitive by design. |
-| GET | `/v1/status` | — | `{ok, network, networks, peak_height, peers, peers_connected, watched_puzzle_hashes, cached_coins, uptime_s}` |
-| POST | `/v1/coins` | `{puzzle_hashes: [hex32…]}` (1–50) + optional `network` | `{network, coins: [{coin_id, parent_coin_info, puzzle_hash, amount_mojos, created_height, spent_height\|null}]}` |
-| POST | `/v1/coin_ids` | `{coin_ids: [hex32…]}` (1–50) + optional `network` | `{network, coins, not_found}` |
-| POST | `/v1/broadcast` | `{spend_bundle: hex}` (≤ 5 MB) + optional `network` | `{network, txid, expected_txid, status, status_name, error}` — `status` is Chia's mempool status (1 SUCCESS, 2 PENDING, 3 FAILED) |
-| GET | `/v1/coin/{coin_id}` | — | `{network, coin}` or 404 — confirmation tracking |
-| GET | `/v1/broadcasts` | — | recent broadcast log (newest first) for drill reconciliation; `?network=` filters |
-| GET | `/v1/broadcasts/{txid}` | — | `{broadcast}` or 404; searches every network unless `?network=` is given |
+| GET | `/v1/status` | — | `{ok, network, peak_height, peers, peers_connected, watched_puzzle_hashes, cached_coins, uptime_s}` |
+| POST | `/v1/coins` | `{puzzle_hashes: [hex32…]}` (1–50) | `{coins: [{coin_id, parent_coin_info, puzzle_hash, amount_mojos, created_height, spent_height\|null}]}` |
+| POST | `/v1/broadcast` | `{spend_bundle: hex}` (≤ 5 MB) | `{txid, expected_txid, status, status_name, error}` — `status` is Chia's mempool status (1 SUCCESS, 2 PENDING, 3 FAILED) |
+| GET | `/v1/coin/{coin_id}` | — | `{coin}` or 404 — confirmation tracking |
+| GET | `/v1/broadcasts` | — | recent broadcast log (newest first) for drill reconciliation |
 
 Errors are `{ok: false, error: "..."}` with HTTP 400 / 401 / 404 / 429 /
 502 / 503. Fail-closed: malformed bundles never reach a peer; a FAILED
@@ -54,13 +46,11 @@ double-spend if the first actually landed).
 | Var | Required | Default | Notes |
 |---|---|---|---|
 | `RELAY_BEARER_TOKEN` | **yes** | — | ≥ 16 chars. Generate: `python3 -c "import secrets; print(secrets.token_hex(32))"` |
-| `RELAY_NETWORKS` | no | `testnet11,mainnet` | Comma list of Chia networks to serve — one peer pool each. |
-| `RELAY_NETWORK` | no | `testnet11` | Default network for requests that omit the selector. Must be in `RELAY_NETWORKS`. |
-| `RELAY_PEER_PORT` | no | `58444` | Peer port for the *default* network (mainnet default: `8444`). |
-| `RELAY_INTRODUCER` | no | `dns-introducer-testnet11.chia.net` | DNS introducer for the *default* network (mainnet default: `dns-introducer.chia.net`). |
-| `RELAY_PEERS` | no | — | Override discovery for the *default* network: `"host:port,host:port"`. |
-| `RELAY_PEERS_MAINNET` / `RELAY_PEERS_TESTNET11` | no | — | Per-network peer override. |
-| `RELAY_MAX_PEERS` | no | `3` | Max simultaneous peer connections *per network*. |
+| `RELAY_NETWORK` | no | `testnet11` | Handshake network pin. Peers with any other `network_id` are dropped. |
+| `RELAY_PEER_PORT` | no | `58444` | Testnet11 peer port (mainnet: `8444`). |
+| `RELAY_INTRODUCER` | no | `dns-introducer-testnet11.chia.net` | DNS introducer for peer discovery. |
+| `RELAY_PEERS` | no | — | Override discovery: `"host:port,host:port"`. |
+| `RELAY_MAX_PEERS` | no | `3` | Max simultaneous peer connections. |
 | `RELAY_CORS_ORIGIN` | no | — | Exact Vercel origin to allow, e.g. `https://spellbook-web.vercel.app`. Unset = no browser CORS. |
 | `RELAY_CERT_DIR` | no | `./certs` | Where the node TLS cert lives. |
 | `RELAY_CHIA_CA_DIR` | no | — | Dir with `chia_ca.crt`/`chia_ca.key` if you don't want the Docker-bundled CA. |

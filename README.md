@@ -45,24 +45,6 @@ curl -fsSL -o install.sh \
 bash install.sh v0.1.0 --agent-user <agent-os-user> --human-user <your-login>
 ```
 
-Releases are signed with the Spellbook release key. The fingerprint is the
-trust anchor — cross-check it against the pinned town thread, never against
-a value that arrived inside a release:
-
-```
-7DEA43CA62DF3F8FB041C1551FCF79089E54DC35
-```
-
-Import the key and hand the installer the fingerprint you verified:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/awizardxch/Spellbook/main/docs/release-key.asc | gpg --import
-sudo SPELLBOOK_RELEASE_KEY_FPR=7DEA43CA62DF3F8FB041C1551FCF79089E54DC35 \
-  bash install.sh v0.1.0 --agent-user <agent-os-user> --human-user <your-login>
-```
-
-Full key details and custody: [`docs/RELEASE_KEY.md`](docs/RELEASE_KEY.md).
-
 Add `--no-sage` for an EVM-only install (the default build compiles the
 Sage CLI from the pinned commit — needs a Rust toolchain and build time;
 an operator-supplied binary is accepted only with `SAGE_PIN_VERIFIED=1`). The installer:

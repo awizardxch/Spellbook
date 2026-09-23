@@ -89,30 +89,10 @@ async def manager():
 
 
 @pytest_asyncio.fixture
-async def mainnet_manager():
-    m = FakeManager()
-    # Distinguish the pools: mainnet serves a different coin set.
-    m.coins = [_cs(PH1, 9_000_000, 1_000)]
-    m.real_ids = [cs.coin.coin_id().hex() for cs in m.coins]
-    m.by_id = dict(zip(m.real_ids, m.coins))
-    m.by_ph = {PH1: m.coins}
-    return m
-
-
-@pytest_asyncio.fixture
-async def client(manager, mainnet_manager):
+async def client(manager):
     cfg = {
         "token": TOKEN,
         "network_id": "testnet11",
-        "networks": ["testnet11", "mainnet"],
-        "network_configs": {
-            "testnet11": {"peer_port": 58444,
-                          "introducer_host": "dns-introducer-testnet11.chia.net",
-                          "peers_override": None, "max_peers": 3},
-            "mainnet": {"peer_port": 8444,
-                        "introducer_host": "dns-introducer.chia.net",
-                        "peers_override": None, "max_peers": 3},
-        },
         "peer_port": 58444,
         "introducer_host": "dns-introducer-testnet11.chia.net",
         "peers_override": None,
@@ -125,7 +105,7 @@ async def client(manager, mainnet_manager):
     # Strip real startup/cleanup: no certs, no WSS, no sessions.
     app.on_startup.clear()
     app.on_cleanup.clear()
-    app["state"].managers = {"testnet11": manager, "mainnet": mainnet_manager}
+    app["state"].manager = manager
     cli = TestClient(TestServer(app))
     cli.relay_app = app  # test-only handle: seed/inspect server state
     await cli.start_server()
@@ -234,77 +214,6 @@ async def test_broadcast_tx_bad_txid(client):
     async with client.get("/v1/broadcasts/not-a-txid",
                           headers=_auth()) as r:
         assert r.status == 400
-
-
-# ---- multi-network routing ------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_coins_default_network_is_backward_compatible(client, manager):
-    """No network selector -> default (testnet11) pool, as before."""
-    rid1 = manager.real_ids[0]
-    async with client.post("/v1/coins", json={"puzzle_hashes": [PH1]},
-                           headers=_auth()) as r:
-        assert r.status == 200
-        body = await r.json()
-    assert body["network"] == "testnet11"
-    assert [c["coin_id"] for c in body["coins"]] == [rid1]
-
-
-@pytest.mark.asyncio
-async def test_coins_explicit_network_routes_to_pool(client, mainnet_manager):
-    rid = mainnet_manager.real_ids[0]
-    async with client.post("/v1/coins",
-                           json={"puzzle_hashes": [PH1], "network": "mainnet"},
-                           headers=_auth()) as r:
-        assert r.status == 200
-        body = await r.json()
-    assert body["network"] == "mainnet"
-    assert [c["coin_id"] for c in body["coins"]] == [rid]
-    assert body["coins"][0]["amount_mojos"] == 9_000_000
-
-
-@pytest.mark.asyncio
-async def test_unknown_network_is_400(client):
-    async with client.post("/v1/coins",
-                           json={"puzzle_hashes": [PH1], "network": "nope"},
-                           headers=_auth()) as r:
-        assert r.status == 400
-        body = await r.json()
-    assert body["ok"] is False
-    async with client.get("/v1/status?network=nope",
-                          headers=_auth()) as r:
-        assert r.status == 400
-
-
-@pytest.mark.asyncio
-async def test_status_reports_enabled_networks(client):
-    async with client.get("/v1/status", headers=_auth()) as r:
-        body = await r.json()
-    assert body["network"] == "testnet11"
-    assert body["networks"] == ["testnet11", "mainnet"]
-    async with client.get("/v1/status?network=mainnet",
-                          headers=_auth()) as r:
-        body = await r.json()
-    assert body["network"] == "mainnet"
-    assert body["peak_height"] == 4_715_123
-
-
-@pytest.mark.asyncio
-async def test_coin_ids_network_selector(client, mainnet_manager):
-    rid = mainnet_manager.real_ids[0]
-    async with client.post("/v1/coin_ids",
-                           json={"coin_ids": [rid], "network": "mainnet"},
-                           headers=_auth()) as r:
-        body = await r.json()
-    assert body["network"] == "mainnet"
-    assert [c["coin_id"] for c in body["coins"]] == [rid]
-
-
-@pytest.mark.asyncio
-async def test_legacy_manager_alias_still_works(client, manager):
-    """Old single-network code/tests touching state.manager get the
-    default network's pool."""
-    assert client.relay_app["state"].manager is manager
 
 
 # ---- regressions on existing endpoints -------------------------------------

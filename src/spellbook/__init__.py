@@ -24,30 +24,6 @@ The conversational agent can request and relay, but must never approve —
 the two-token split (SPEC §4 S7) is enforced by the daemon, not by convention.
 """
 
-__version__ = "0.1.0"  # fallback; VERSION file at repo root is canonical
-
-
-def _read_version_file() -> str | None:
-    try:
-        import os
-        here = os.path.dirname(os.path.abspath(__file__))
-        # src/spellbook/__init__.py -> repo root is two levels up
-        for candidate in (
-            os.path.join(here, "..", "..", "VERSION"),
-            os.path.join("/opt/spellbook", "VERSION"),
-        ):
-            candidate = os.path.normpath(candidate)
-            if os.path.isfile(candidate):
-                with open(candidate) as f:
-                    v = f.read().strip()
-                    if v:
-                        return v
-    except Exception:
-        pass
-    return None
-
-
-__version__ = _read_version_file() or __version__
-del _read_version_file
+__version__ = "0.1.0"
 
 from spellbook.client import AgentClient, HumanClient, SpellbookError  # noqa: F401
