@@ -60,9 +60,12 @@ ZEROX_BASE = "https://api.0x.org"
 UNISWAP_BASE = "https://trade-api.gateway.uniswap.org/v1"
 
 #: Chains the 0x Swap API v2 serves (from 0x docs; not exhaustive).
+#: Robinhood Chain mainnet (4663) added 2026-09-23 after the user's
+#: frontend verification — matcha.xyz quotes 4663 swaps.
 ZEROX_CHAINS = frozenset({
     1,       # Ethereum
     8453,    # Base
+    4663,    # Robinhood Chain mainnet (user-verified 2026-09-23)
     42161,   # Arbitrum
     10,      # Optimism
     137,     # Polygon
@@ -82,10 +85,13 @@ ZEROX_CHAINS = frozenset({
 
 #: Chains the Uniswap Trading API serves for classic routing. This is a
 #: conservative subset — the API supports more; unknown chains are refused
-#: rather than guessed at.
+#: rather than guessed at. Robinhood Chain mainnet (4663) added
+#: 2026-09-23 after the user's frontend verification —
+#: app.uniswap.org routes 4663 swaps.
 UNISWAP_CHAINS = frozenset({
     1,      # Ethereum
     8453,   # Base
+    4663,   # Robinhood Chain mainnet (user-verified 2026-09-23)
     42161,  # Arbitrum
     10,     # Optimism
     137,    # Polygon

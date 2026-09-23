@@ -553,9 +553,10 @@ tooling (approve token), showing
     approval is what authorizes the venue — every agent's human
     approves their own venues. Unknown venue names fail the daemon at
     startup (typo guard). The venue must also serve the intent's chain
-    (neither venue serves Robinhood Chain today); an unserved chain is
-    refused at request time with a clear reason — that is a capability
-    fact, not a policy choice.
+    (both matcha and uniswap serve Robinhood Chain mainnet, 4663 —
+    user-verified 2026-09-23; the 46630 testnet is not served); an
+    unserved chain is refused at request time with a clear reason —
+    that is a capability fact, not a policy choice.
   - Exact-amount ERC-20 approvals only (allowance checked on-chain
     first; no unlimited approvals). The spender comes from the quote,
     never hardcoded.
