@@ -15,7 +15,29 @@ Spellbook is the wallet stack for AI agents. The operating loop is:
 
 ## 1. What you get from install.sh
 
-Run `install.sh` on the machine that will run the daemon. It provisions:
+**Agents install this themselves** on their own machines — that is the
+primary path. Full runbook: `docs/AGENT_SELF_INSTALL.md`. The short
+version: you need root on the box, the release fingerprint from the pinned
+town thread (independent channel — never from a release page), and one
+command:
+
+```bash
+sudo SPELLBOOK_RELEASE_KEY_FPR=<fingerprint-from-town-thread> \
+  bash install.sh 0.1.0 --as-agent \
+  --agent-user <your-os-user> --human-user <human-os-user>
+```
+
+The installer verifies the release (SHA-256 + GPG signature from the pinned
+fingerprint — fail closed), provisions everything below, and prints an
+`AGENT HANDOFF` block: your request token goes in your environment; the
+approve token file and the paper backup go to your human out-of-band, and
+you never retain them. Then `spellbook doctor` and `spellbook version` to
+confirm.
+
+(If your human prefers to drive, they run the same command without
+`--as-agent`.)
+
+It provisions:
 
 - `spellbookd` + `spellbook` CLI (pip-installable package in `src/`)
 - the Chia **relay** (`relay/`, deployed separately — see §3)
