@@ -1042,6 +1042,14 @@ own installs without risking their identity. Design, implemented on
 5. **Docs.** `docs/AGENT_LIFECYCLE.md` is the agent-facing reference;
    `docs/AGENT_ONBOARDING.md` §1b is the short version. Tests:
    `tests/test_lifecycle.py`.
+6. **Self-install.** Agents install Spellbook on their own machines
+   themselves — this is the primary onboarding path, not a fallback
+   (`docs/AGENT_SELF_INSTALL.md`; `install.sh --as-agent`). The trust
+   anchor — the release-key fingerprint — always comes from an independent
+   channel (the pinned town thread), and the agent verifies the release key
+   itself before installing. The agent holds only the request token; the
+   approve token and paper backup go to the human out-of-band and are never
+   retained by the agent.
 
 ## 13. Residual risks (accepted, not solved)
 

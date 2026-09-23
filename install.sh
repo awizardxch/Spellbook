@@ -81,6 +81,12 @@ usage() {
   echo "                   --upgrade mode defaults to the value in install.env)"
   echo "  --human-user     OS user whose tooling holds the approve token (default: \$SUDO_USER;"
   echo "                   in --upgrade mode defaults to the value in install.env)"
+  echo "  --as-agent       the agent is running this install itself (self-install"
+  echo "                   on the agent's own machine). Prints a structured HANDOFF"
+  echo "                   block at the end: what the agent keeps (request token)"
+  echo "                   vs what must go to the human out-of-band (approve token"
+  echo "                   file location, paper backup). The agent must deliver the"
+  echo "                   human's material and never retain it."
   exit 2
 }
 
@@ -92,6 +98,7 @@ while [ $# -gt 0 ]; do
     --from-dir) FROM_DIR="${2:-}"; shift 2 ;;
     --agent-user) AGENT_USER="${2:-}"; shift 2 ;;
     --human-user) HUMAN_USER="${2:-}"; shift 2 ;;
+    --as-agent) AS_AGENT=1; shift ;;
     -h|--help) usage ;;
     *) [ -z "$TAG" ] && [ -z "$FROM_DIR" ] && TAG="$1" || usage; shift ;;
   esac
@@ -150,10 +157,19 @@ else
 
   if [ -n "$RELEASE_KEY_FPR" ]; then
     log "verifying release signature ..."
-    # The release key is fetched out-of-band; its fingerprint MUST match the
-    # pinned town thread. Never trust a key fetched from the same release page.
-    gpg --verify "spellbook-${TAG}.tar.gz.asc" "spellbook-${TAG}.tar.gz" \
-      || fail "signature mismatch — refusing to install"
+    # The release public key must be imported out-of-band (see README: the
+    # fingerprint is pinned in the town thread; import the key, compare its
+    # fingerprint yourself). We trust the signature ONLY if gpg reports a
+    # valid signature AND the signer's fingerprint equals the pinned value.
+    # A valid signature from any other key is refused.
+    norm_fpr() { echo "$1" | tr -d ' ' | tr 'a-f' 'A-F'; }
+    SIG_FPR="$(gpg --status-fd 1 --verify "spellbook-${TAG}.tar.gz.asc" \
+      "spellbook-${TAG}.tar.gz" 2>/dev/null \
+      | awk '/^\[GNUPG:\] VALIDSIG /{print $3}' | tail -1)"
+    [ -n "$SIG_FPR" ] || fail "signature mismatch — refusing to install"
+    [ "$(norm_fpr "$SIG_FPR")" = "$(norm_fpr "$RELEASE_KEY_FPR")" ] \
+      || fail "signature valid but not from the pinned release key — refusing to install"
+    log "signature OK (release key $(norm_fpr "$SIG_FPR"))"
   else
     fail "no release-key fingerprint configured (SPELLBOOK_RELEASE_KEY_FPR). refusing to install unverified code."
   fi
@@ -607,4 +623,36 @@ NEXT STEPS (all opt-in):
 
 note: the default config is a signer, not a policy engine (S4).
 EOF
+if [ "${AS_AGENT:-0}" = "1" ]; then
+cat <<EOF
+
+================================================================
+AGENT HANDOFF — you ran this install yourself. Follow the protocol.
+================================================================
+
+YOURS (store in your environment file, never in chat/logs/code):
+  export SPELLBOOK_SOCKET=${SOCK_PATH}
+  export SPELLBOOK_REQUEST_TOKEN=<redacted>
+  (also at ${PREFIX}/request.token, 0600 — the daemon already has it)
+
+HUMAN'S (deliver out-of-band NOW, then never touch again):
+  1. Approve token — file: ${PREFIX}/approve.token (0600).
+     Have YOUR HUMAN copy it to their separate device using THEIR OWN
+     machine access (O5). NEVER read it into your environment, logs, or
+     chat. The daemon verifies approvals against it; you must not be able
+     to approve your own spends.
+  2. Paper backup — the two word sets printed above. Read them to your
+     human; they write them down on paper, offline, two copies in two
+     places. Confirm receipt, then drop the words from your context. The
+     daemon keeps seed.key; you keep no copy.
+
+VERIFY BEFORE YOU FINISH:
+  spellbook doctor    # every check green
+  spellbook version   # local == installed == daemon
+
+From here you self-serve: spellbook upgrade --check / spellbook upgrade
+<tag> (signed releases, forward-only) and spellbook doctor --repair.
+================================================================
+EOF
+fi
 fi

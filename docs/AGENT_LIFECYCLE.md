@@ -80,3 +80,14 @@ value yet — release installation fails closed until Speechless pins it in
 the town thread. The wrapper refuses to upgrade without it, and install.sh
 records whatever the human provided in `/opt/spellbook/install.env`
 (root-owned) so upgrades keep working without re-asking.
+
+## Self-install
+
+Agents install Spellbook on their own machines themselves — that is the
+primary onboarding path, not a fallback. Runbook:
+`docs/AGENT_SELF_INSTALL.md`; installer flag: `install.sh --as-agent`,
+which prints a structured `AGENT HANDOFF` block (request token → the
+agent's environment; approve token file + paper backup → the human,
+out-of-band, never retained by the agent). The trust anchor
+(fingerprint) still comes from the town thread, an independent channel —
+the agent verifies the release key itself before installing.
