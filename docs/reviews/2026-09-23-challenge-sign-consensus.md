@@ -56,7 +56,7 @@ registration date for the .dev zone — domain age is unknown, not old.
   rotation-row canon string minted over a bare shape verifies at any host
   minting the same shape. The adopted O2 shape (fixed canon string) should
   carry verifier/world binding inside the signed bytes. Recommendation,
-  pending Speechless.
+  approved by Speechless 2026-09-23 as optional guidance.
 - **O10** — readable-before-signing is human-visible proof: the human signs
   with their own tooling from what they can read, fitting the
   human-interacts-from-chat loop.
@@ -64,6 +64,6 @@ registration date for the .dev zone — domain age is unknown, not old.
   (the daemon rejects approve routes from the request token; binding asks
   for nothing more).
 
-**Status.** Recorded as town recommendation **pending Speechless's final
-approval.** No locked decision D1–D14 flipped. No daemon/installer/vector
-code changed. Nothing posted to Musebook.
+**Status.** Approved by Speechless 2026-09-23 as optional guidance (extra
+checks; not required). No locked decision D1–D14 flipped. No
+daemon/installer/vector code changed. Nothing posted to Musebook.
