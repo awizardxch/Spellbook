@@ -1,12 +1,14 @@
-"""DEX aggregation for the Spellbook wallet — read-only quotes + calldata builders.
+"""DEX aggregation for the Spellbook wallet — quotes, calldata builders,
+and execution-time validation.
 
 Two quote venues (both free API keys, see docs/AGENT_ONBOARDING.md):
 
-- **0x Swap API v2** — the engine behind matcha.xyz. ``https://api.0x.org``.
-  ``GET /swap/allowance-holder/quote`` and ``/swap/permit2/quote`` return
-  firm quotes with ready-to-sign calldata. Header ``0x-api-key`` +
-  ``0x-version: v2``. Chain via ``chainId`` query param.
-- **Uniswap Trading API** — ``https://trade-api.gateway.uniswap.org/v1``.
+- **matcha** — the 0x Swap API v2, the engine behind matcha.xyz.
+  ``https://api.0x.org``. ``GET /swap/allowance-holder/quote`` and
+  ``/swap/permit2/quote`` return firm quotes with ready-to-sign calldata.
+  Header ``0x-api-key`` + ``0x-version: v2``. Chain via ``chainId`` query
+  param.
+- **Uniswap** — ``https://trade-api.gateway.uniswap.org/v1``.
   Flow: ``POST /check_approval`` -> ``POST /quote`` -> ``POST /swap``
   (unsigned tx). Header ``x-api-key``. ``X-Agent-Info`` attribution is
   sent on every call.
@@ -20,14 +22,18 @@ Uniswap-v2-style pools on Robinhood Chain):
 - Uniswap v3 ``exactInputSingle`` (SwapRouter) / ``mint``
   (NonfungiblePositionManager)
 
-SECURITY BOUNDARY (SPEC §10/S13): nothing in this module signs or
-broadcasts. Quotes are fetched and normalized; calldata is *built*, not
-signed. Executing a swap means signing arbitrary contract calldata, which
-v1 deliberately cannot express (S13) — that is a v2 spec decision
-(calldata decoder, ``allow_opaque_calldata``, ``allowance_cap``). The
-daemon will refuse to sign anything from this module until that decision
-lands. The agent's loop stays: quote read-only -> human approves the
-decoded intent -> (v2) daemon executes.
+VENUE RECOMMENDATIONS + EXECUTION (SPEC §10 v2): the user keeps a
+recommended-venue list via ``dex.recommended_venues`` in spellbook.json
+(default: matcha + uniswap; ``normalize_venue`` maps the "0x" alias to
+"matcha"). The list is advisory, not a gate: a swap naming another
+venue carries a prominent warning on the queued intent, and the human's
+per-transaction approval is what authorizes the venue. Nothing in this
+module signs or broadcasts. Quotes are fetched and normalized here; at
+execution time the daemon fetches the firm quote again and validates it
+field-by-field against the human-approved bounds
+(``validate_swap_intent_against_quote``) before anything is signed. A
+venue that doesn't serve the intent's chain is refused — that is a
+capability fact, not a policy choice.
 
 All amounts are integers in base units (wei etc.). All addresses are
 checksummed-or-lowercase hex; they are validated, never assumed.
@@ -93,6 +99,70 @@ NATIVE_SENTINEL = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 
 #: Attribution header Uniswap asks AI-agent integrations to send.
 AGENT_INFO = "spellbook/dex ai-agent"
+
+
+# ---------------------------------------------------------------------------
+# Venue registry — canonical names, aliases, and the user's recommended
+# venue list (advisory; the human's approval authorizes the venue).
+# ---------------------------------------------------------------------------
+
+#: Canonical venue name for the 0x Swap API v2 (the engine behind matcha.xyz).
+VENUE_MATCHA = "matcha"
+
+#: Canonical venue name for the Uniswap Trading API.
+VENUE_UNISWAP = "uniswap"
+
+#: Every venue the DEX layer knows how to talk to.
+KNOWN_VENUES = (VENUE_MATCHA, VENUE_UNISWAP)
+
+#: User-facing spellings -> canonical names. "0x" is the API brand behind
+#: matcha; both spellings are accepted wherever a venue is named.
+VENUE_ALIASES = {
+    "0x": VENUE_MATCHA,
+    "matcha": VENUE_MATCHA,
+    "uniswap": VENUE_UNISWAP,
+}
+
+#: Which chains each venue's API serves. Conservative subsets — unknown
+#: chains are refused, never guessed.
+VENUE_CHAINS = {
+    VENUE_MATCHA: ZEROX_CHAINS,
+    VENUE_UNISWAP: UNISWAP_CHAINS,
+}
+
+#: API-key env var per venue (keys live in the daemon's environment,
+#: never in the repo).
+VENUE_ENV_KEYS = {
+    VENUE_MATCHA: "ZERO_EX_API_KEY",
+    VENUE_UNISWAP: "UNISWAP_API_KEY",
+}
+
+#: Recommended venues used when spellbook.json names no
+#: dex.recommended_venues. Advisory only — the human's per-transaction
+#: approval is the actual authorization; other venues trigger a warning.
+DEFAULT_RECOMMENDED_VENUES = (VENUE_MATCHA, VENUE_UNISWAP)
+
+
+def normalize_venue(name) -> str:
+    """Map a user-supplied venue name to its canonical form.
+
+    Accepts the canonical names plus the "0x" alias (case- and
+    whitespace-tolerant). Unknown names raise DexError — the venue set
+    is closed.
+    """
+    if isinstance(name, str):
+        canon = VENUE_ALIASES.get(name.strip().lower())
+        if canon is not None:
+            return canon
+    raise DexError(
+        f"unknown DEX venue {name!r} — known venues: "
+        f"{', '.join(KNOWN_VENUES)}")
+
+
+def venue_serves_chain(venue: str, chain_id: int) -> bool:
+    """True if the venue's API serves chain_id. Unknown venues and
+    unlisted chains are refused (False), never guessed."""
+    return chain_id in VENUE_CHAINS.get(venue, frozenset())
 
 
 def _is_address(s) -> bool:
@@ -187,7 +257,7 @@ class ZeroExClient:
     def _check_chain(self, chain_id: int) -> int:
         if chain_id not in ZEROX_CHAINS:
             raise DexError(
-                f"0x does not serve chain {chain_id} "
+                f"matcha (0x API) does not serve chain {chain_id} "
                 f"(known: {sorted(ZEROX_CHAINS)})")
         return chain_id
 
@@ -208,7 +278,7 @@ class ZeroExClient:
         if buy is None:
             raise DexError(f"0x price response missing buyAmount: {raw!r}"[:300])
         return _norm_quote(
-            venue="0x", chain_id=chain_id,
+            venue="matcha", chain_id=chain_id,
             sell_token=sell_token, buy_token=buy_token,
             sell_amount=sell_amount, buy_amount=int(buy),
             min_buy_amount=int(raw["minBuyAmount"]) if raw.get("minBuyAmount") else None,
@@ -259,7 +329,7 @@ class ZeroExClient:
         buy_amount = int(raw.get("buyAmount", "0"))
         min_buy = raw.get("minBuyAmount")
         return _norm_quote(
-            venue="0x", chain_id=chain_id,
+            venue="matcha", chain_id=chain_id,
             sell_token=sell_token, buy_token=buy_token,
             sell_amount=sell_amount, buy_amount=buy_amount,
             min_buy_amount=int(min_buy) if min_buy else None,
@@ -641,6 +711,9 @@ __all__ = [
     "DexError",
     "ZEROX_BASE", "UNISWAP_BASE", "ZEROX_CHAINS", "UNISWAP_CHAINS",
     "NATIVE_SENTINEL",
+    "VENUE_MATCHA", "VENUE_UNISWAP", "KNOWN_VENUES", "VENUE_ALIASES",
+    "VENUE_CHAINS", "VENUE_ENV_KEYS", "DEFAULT_RECOMMENDED_VENUES",
+    "normalize_venue", "venue_serves_chain",
     "ZeroExClient", "UniswapClient",
     "build_approve_calldata", "build_allowance_calldata", "decode_allowance",
     "build_v2_swap_calldata", "build_v2_add_liquidity_calldata",

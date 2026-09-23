@@ -386,13 +386,15 @@ Notes:
 - The dashboard is strictly read-only: it cannot approve, sign,
   broadcast, or mint anything, for either role.
 
-## 9. DEX trading — swaps and LP (0x + Uniswap)
+## 9. DEX trading — swaps and LP (matcha + Uniswap)
 
 `src/spellbook/dex.py` gives the Spellbook wallet aggregate trading on
-EVM: the same routing engines as matcha.xyz (0x) and the Uniswap app
-(Uniswap Trading API), plus raw calldata builders for direct pool
-interaction. It is **read-only + build-only**: it fetches quotes and
-builds calldata, but never signs or broadcasts.
+EVM: the same routing engines as matcha.xyz (the 0x Swap API — the
+**matcha** venue) and the Uniswap app (Uniswap Trading API), plus raw
+calldata builders for direct pool interaction. It is **read-only +
+build-only**: it fetches quotes and builds calldata, but never signs or
+broadcasts. Which venues may actually *execute* swaps is the user's
+choice — see "Choosing your swap venues" below.
 
 ### API keys
 
@@ -401,7 +403,7 @@ in the repo):
 
 | Venue | Env var | Get it at |
 |---|---|---|
-| 0x (matcha engine) | `ZERO_EX_API_KEY` | dashboard.0x.org |
+| matcha (0x Swap API) | `ZERO_EX_API_KEY` | dashboard.0x.org |
 | Uniswap | `UNISWAP_API_KEY` | developers.uniswap.org/dashboard |
 
 Direct pool calldata (v2/v3 builders) needs no key — only an RPC for
@@ -417,8 +419,9 @@ spellbook dex-quote --chain 8453 \
   --amount 1000000000000000000
 
 # Firm executable quotes (short-lived calldata; --taker required):
-spellbook dex-quote --firm --venue 0x --chain 8453 \
+spellbook dex-quote --firm --venue matcha --chain 8453 \
   --sell-token ... --buy-token ... --amount ... --taker 0xYourWallet
+# (--venue 0x also works — it is an alias for matcha.)
 ```
 
 Output is a ranked comparison: best output-per-input first, with the
@@ -444,10 +447,10 @@ best = dex.compare_quotes([q, firm])["best"]
 
 ### When to use which venue
 
-- **0x** — widest aggregation (it is what matcha.xyz routes through);
-  serves Ethereum, Base, Arbitrum, Optimism, Polygon, BNB, Avalanche and
-  more. Two modes: `allowance-holder` (classic approve-then-swap) and
-  `permit2` (signature-based approvals).
+- **matcha** — widest aggregation (the 0x Swap API is what matcha.xyz
+  routes through); serves Ethereum, Base, Arbitrum, Optimism, Polygon,
+  BNB, Avalanche and more. Two modes: `allowance-holder` (classic
+  approve-then-swap) and `permit2` (signature-based approvals).
 - **Uniswap** — Uniswap routing + UniswapX; serves the major chains.
   Canonical flow is `check_approval` → `quote` → `swap`. Chained
   multi-step routings (`DUTCH_V2` etc.) are refused rather than
@@ -455,6 +458,38 @@ best = dex.compare_quotes([q, firm])["best"]
 - **Neither serves Robinhood Chain.** For its Uniswap-v2-style pools
   (e.g. PLANK/WETH), build the swap calldata directly with
   `build_v2_swap_calldata` and the pool's router address.
+
+### Recommended swap venues
+
+The recommended venue list is a default guardrail, not a gate. The
+user's `dex.recommended_venues` in spellbook.json (daemon-user-owned,
+mode 0600) names the venues they prefer; the default is both:
+
+```json
+{ "dex": { "recommended_venues": ["matcha", "uniswap"] } }
+```
+
+To see the effective list (and every known venue with its served
+chains):
+
+```bash
+spellbook dex-venues
+```
+
+A `dex-swap` naming any other venue is **not** refused — it is queued
+with a prominent `venue_warning` on the intent, and the human's
+per-transaction approval is what authorizes the venue. Every agent's
+human approves their own venues; the list is just the default
+recommendation. Changes take effect on daemon restart; unknown venue
+names fail the daemon at startup rather than silently doing nothing.
+
+**Agent rule:** when you surface a queued `dex_swap` for human approval,
+always show the venue and the `venue_warning` (when present)
+prominently — the human is authorizing the venue with their approval,
+so the choice must be impossible to miss. The venue must also serve
+the chain: asking for a matcha swap on Robinhood Chain is refused
+immediately with "does not serve", since neither aggregator lists it
+(a capability fact, not a policy choice).
 
 ### Direct pool calldata (no API key)
 

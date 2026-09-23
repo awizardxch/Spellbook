@@ -462,7 +462,13 @@ mTLS cert, or submit transactions.
   decoder below.)
 - `POST /v1/dex_swap {intent, chain, venue, sell_token, buy_token,
   sell_amount_wei, min_buy_amount_wei, max_slippage_bps, purpose?,
-  deadline_sec?}` → bounded swap intent (v2, §10)
+  deadline_sec?}` → bounded swap intent (v2, §10). `venue` is "matcha"
+  (the 0x Swap API; "0x" also accepted) or "uniswap". The user's
+  `dex.recommended_venues` list (default: both) is advisory — a swap
+  naming another venue is queued with a warning, and the human's
+  per-transaction approval is what authorizes the venue.
+- `GET /v1/dex_venues` → the user's recommended swap venues plus every
+  known venue (API-key env var, served chain ids). Read-only.
 - `POST /v1/dex_lp_add {intent, chain, protocol, router, token_a, token_b,
   amount_a_wei, amount_b_wei, amount_a_min_wei?, amount_b_min_wei?,
   fee?, tick_lower?, tick_upper?, purpose?, deadline_sec?}` → bounded
@@ -539,6 +545,17 @@ tooling (approve token), showing
     validated field-by-field against the approved bounds
     (`dex.validate_swap_intent_against_quote`); LP calldata is built
     locally from the approved bounds via whitelisted builders only.
+  - **Venue recommendations (not a gate):** the user keeps a
+    recommended-venue list, `dex.recommended_venues` in spellbook.json
+    (default: matcha + uniswap; "0x" is accepted as an alias for
+    matcha). The list is advisory: a swap naming another venue is
+    queued with a prominent warning, and the human's per-transaction
+    approval is what authorizes the venue — every agent's human
+    approves their own venues. Unknown venue names fail the daemon at
+    startup (typo guard). The venue must also serve the intent's chain
+    (neither venue serves Robinhood Chain today); an unserved chain is
+    refused at request time with a clear reason — that is a capability
+    fact, not a policy choice.
   - Exact-amount ERC-20 approvals only (allowance checked on-chain
     first; no unlimited approvals). The spender comes from the quote,
     never hardcoded.
