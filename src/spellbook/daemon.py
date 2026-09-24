@@ -590,7 +590,7 @@ class Daemon:
         try:
             return handler(params, req.get("muse_id", "?"))
         except (evm.EvmError, chia.SageError, chia_relay.RelayError,
-                solana_mod.SolanaError) as e:
+                solana_mod.SolanaError, dex_mod.DexError) as e:
             # A request handler must never let a validation/broadcast
             # error escape as a dropped connection: return a structured
             # failure instead (e.g. an invalid fee_mojos raised from
@@ -3183,7 +3183,7 @@ class Daemon:
             return {"ok": True, "decision": "approved-submit-unknown",
                     "tx_hash": ref, "note": str(e)}
         except (evm.EvmError, chia.SageError, chia_relay.RelayError,
-                solana_mod.SolanaError) as e:
+                solana_mod.SolanaError, dex_mod.DexError) as e:
             self.ledger.append(muse_id, canon, None,
                                "approved-submit-failed:" + str(e))
             return {"ok": False, "decision": "approved-submit-failed",
@@ -3538,7 +3538,7 @@ class Daemon:
             return {"ok": True, "decision": "approved-submit-unknown",
                     "tx_hash": ref, "note": str(e)}
         except (evm.EvmError, chia.SageError, chia_relay.RelayError,
-                solana_mod.SolanaError) as e:
+                solana_mod.SolanaError, dex_mod.DexError) as e:
             self.ledger.append(muse_id, canon, None,
                                "approved-submit-failed:" + str(e))
             return {"ok": False, "decision": "approved-submit-failed",
@@ -4649,7 +4649,7 @@ class Daemon:
                     "decision": "approved-submit-unknown",
                     "note": str(e)}
         except (evm.EvmError, chia.SageError, chia_relay.RelayError,
-                solana_mod.SolanaError) as e:
+                solana_mod.SolanaError, dex_mod.DexError) as e:
             # Approved but never executed: the human's approval is consumed,
             # the failure is ledgered, nothing is recorded as spent. The
             # agent reports it; the human re-requests if they still want it.
