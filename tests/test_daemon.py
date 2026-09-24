@@ -421,3 +421,30 @@ def test_evm_gas_price_applies_headroom():
 
     assert daemon_mod.EVM_GAS_PRICE_BUMP_BPS == 2500
     assert daemon_mod._evm_gas_price(_R()) == 125
+
+
+def test_dex_error_during_approve_is_submit_failed_not_crash(tmp_path, monkeypatch):
+    """Regression 2026-09-24: a DexError raised mid-execution (e.g. the
+    relay dropping the firm-quote fetch) must ledger approved-submit-failed
+    and return a structured error — never escape and kill the daemon."""
+    from spellbook import dex as dex_mod
+    from spellbook.daemon import Daemon
+    d = _evm_daemon(tmp_path, monkeypatch)
+    params = {"chain": "evm-4663", "intent": "dex_swap",
+              "sell_token": "0x" + "ee" * 20,
+              "buy_token": "0x" + "ab" * 20,
+              "sell_amount_wei": 10 ** 15,
+              "min_buy_amount_wei": 1, "purpose": "t"}
+    d.queue["99"] = {"params": params, "muse_id": "muse_test",
+                     "queued_at": 0}
+
+    def _boom(self, p):
+        raise dex_mod.DexError("DEX API unreachable: boom")
+
+    monkeypatch.setattr(Daemon, "_execute_spend", _boom)
+    resp = d.rt_queue_approve({"queue_id": "99"}, "muse_test")
+    assert resp["ok"] is False
+    assert "unreachable" in resp["error"]
+    rows = d.ledger.read_all()
+    assert any(r["decision"].startswith("approved-submit-failed")
+               for r in rows)
