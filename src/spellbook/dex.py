@@ -13,6 +13,12 @@ Two quote venues (both free API keys, see docs/AGENT_ONBOARDING.md):
   (unsigned tx). Header ``x-api-key``. ``X-Agent-Info`` attribution is
   sent on every call.
 
+- **cast** — Cast (``https://cast.awizard.dev``), aWizard's swap router
+  over the 0x Swap API on Base and Robinhood Chain. No API key. Its
+  agent API (``/api/agent/quote``) returns allowance-holder calldata plus
+  the spender, and it also serves token lists, token lookup and USD
+  prices. Cast takes its platform fee inside the quoted swap.
+
 Plus pure-Python calldata builders for direct pool interaction (no API
 key needed — useful on chains neither aggregator covers, e.g. the
 Uniswap-v2-style pools on Robinhood Chain):
@@ -80,6 +86,9 @@ ZEROX_BASE = _os.environ.get("ZEROX_BASE_URL", "https://api.0x.org")
 #: Uniswap Trading API base URL.
 UNISWAP_BASE = "https://trade-api.gateway.uniswap.org/v1"
 
+#: Cast base URL (override with CAST_BASE_URL, e.g. for a preview deploy).
+CAST_BASE = _os.environ.get("CAST_BASE_URL", "https://cast.awizard.dev").rstrip("/")
+
 #: Chains the 0x Swap API v2 serves, mirrored from 0x's official
 #: supported-chains documentation — the docs are the authority; this
 #: list is re-checked against them, never hand-maintained:
@@ -140,6 +149,12 @@ UNISWAP_CHAINS = frozenset({
     11155111, # Ethereum Sepolia (testnet)
 })
 
+#: Chains Cast serves, mirrored from its GET /api/agent/networks.
+CAST_CHAINS = frozenset({
+    8453,    # Base
+    4663,    # Robinhood Chain mainnet
+})
+
 #: 0x's sentinel for the native currency (per the 0x docs, native is
 #: represented as 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE).
 NATIVE_SENTINEL = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
@@ -181,8 +196,11 @@ VENUE_MATCHA = "matcha"
 #: Canonical venue name for the Uniswap Trading API.
 VENUE_UNISWAP = "uniswap"
 
+#: Canonical venue name for Cast (cast.awizard.dev).
+VENUE_CAST = "cast"
+
 #: Every venue the DEX layer knows how to talk to.
-KNOWN_VENUES = (VENUE_MATCHA, VENUE_UNISWAP)
+KNOWN_VENUES = (VENUE_MATCHA, VENUE_UNISWAP, VENUE_CAST)
 
 #: User-facing spellings -> canonical names. "0x" is the API brand behind
 #: matcha; both spellings are accepted wherever a venue is named.
@@ -190,6 +208,7 @@ VENUE_ALIASES = {
     "0x": VENUE_MATCHA,
     "matcha": VENUE_MATCHA,
     "uniswap": VENUE_UNISWAP,
+    "cast": VENUE_CAST,
 }
 
 #: Which chains each venue's API serves. Conservative subsets — unknown
@@ -197,6 +216,7 @@ VENUE_ALIASES = {
 VENUE_CHAINS = {
     VENUE_MATCHA: ZEROX_CHAINS,
     VENUE_UNISWAP: UNISWAP_CHAINS,
+    VENUE_CAST: CAST_CHAINS,
 }
 
 #: API-key env var per venue (keys live in the daemon's environment,
@@ -204,7 +224,12 @@ VENUE_CHAINS = {
 VENUE_ENV_KEYS = {
     VENUE_MATCHA: "ZERO_EX_API_KEY",
     VENUE_UNISWAP: "UNISWAP_API_KEY",
+    VENUE_CAST: "CAST_API_KEY",
 }
+
+#: Venues whose API key is optional — the call works without one. Cast's
+#: agent API is open; CAST_API_KEY is only sent if the operator set one.
+VENUES_KEY_OPTIONAL = frozenset({VENUE_CAST})
 
 #: Recommended venues used when spellbook.json names no
 #: dex.recommended_venues. Advisory only — the human's per-transaction
@@ -465,6 +490,178 @@ class ZeroExClient:
             venue="matcha", chain_id=chain_id,
             sell_token=sell_token, buy_token=buy_token,
             sell_amount=sell_amount, buy_amount=buy_amount,
+            min_buy_amount=int(min_buy) if min_buy else None,
+            price_impact_bps=None, gas_estimate=txn.get("gas"),
+            tx=tx, allowance_target=allowance_target, raw=raw)
+
+
+# ---------------------------------------------------------------------------
+# Cast (cast.awizard.dev)
+# ---------------------------------------------------------------------------
+
+
+class CastClient:
+    """Client for Cast's API — the agent swap endpoints plus its read-only
+    token and price endpoints. Docs: https://cast.awizard.dev/agents
+
+    Quotes are 0x allowance-holder quotes with Cast's platform fee taken
+    inside the swap. As with every venue, only ``tx`` and
+    ``allowance_target`` are used: the daemon builds its own exact-amount
+    approval and never signs Cast's ``approval`` calldata.
+    """
+
+    def __init__(self, api_key: str | None = None, base_url: str | None = None):
+        self.api_key = api_key or None
+        self.base = (base_url or CAST_BASE).rstrip("/")
+
+    def _headers(self) -> dict:
+        h = {"Accept": "application/json"}
+        if self.api_key:
+            h["Authorization"] = f"Bearer {self.api_key}"
+        return h
+
+    def _get(self, path: str, params: dict | None = None) -> dict:
+        qs = f"?{urllib.parse.urlencode(params)}" if params else ""
+        return _http_json("GET", f"{self.base}{path}{qs}", self._headers())
+
+    def _post(self, path: str, body: dict) -> dict:
+        return _http_json("POST", f"{self.base}{path}", self._headers(), body)
+
+    @staticmethod
+    def _check_chain(chain_id: int) -> int:
+        if chain_id not in CAST_CHAINS:
+            raise DexError(
+                f"cast does not serve chain {chain_id} "
+                f"(known: {sorted(CAST_CHAINS)})")
+        return chain_id
+
+    # -- read-only info ----------------------------------------------------
+
+    def networks(self) -> dict:
+        """Supported chains, common + wizard tokens, fee recipient, flow."""
+        return self._get("/api/agent/networks")
+
+    def tokens(self, chain_id: int, source: str | None = None) -> dict:
+        """A token list for the chain: ``{"records": {address: {symbol,
+        name, decimals, logoURI}}}``. Source keys per chain are listed by
+        ``networks()``; omitted, Cast uses the chain's primary list."""
+        self._check_chain(chain_id)
+        params = {"chainId": chain_id}
+        if source:
+            params["source"] = source
+        return self._get("/api/wizardswap/tokens", params)
+
+    def token_lookup(self, chain_id: int, address: str) -> dict:
+        """Symbol, name and decimals for any token address on the chain."""
+        self._check_chain(chain_id)
+        return self._get("/api/token-lookup", {
+            "chainId": chain_id,
+            "address": _require_address(address, "token")})
+
+    def token_prices(self, chain_id: int, addresses: list,
+                     decimals: list | None = None) -> dict:
+        """USD prices: ``{address_lower: price}`` for the ones Cast could
+        price. Display only — never used to bound a swap."""
+        self._check_chain(chain_id)
+        addrs = [_require_address(a, "token") for a in addresses]
+        if not addrs:
+            return {}
+        params = {"chainId": chain_id, "addresses": ",".join(addrs)}
+        if decimals:
+            if len(decimals) != len(addrs):
+                raise DexError("decimals must match addresses one-to-one")
+            params["decimals"] = ",".join(str(int(d)) for d in decimals)
+        return self._get("/api/token-prices", params).get("prices", {})
+
+    # -- swaps -------------------------------------------------------------
+
+    def _swap_body(self, chain_id, sell_token, buy_token, sell_amount,
+                   taker, slippage_bps) -> dict:
+        self._check_chain(chain_id)
+        body = {
+            "chainId": chain_id,
+            "sellToken": _require_address(sell_token, "sell token"),
+            "buyToken": _require_address(buy_token, "buy token"),
+            "sellAmount": str(_require_positive_int(sell_amount, "sell amount")),
+        }
+        if taker:
+            body["taker"] = _require_address(taker, "taker")
+        if slippage_bps is not None:
+            if not (0 < slippage_bps <= 500):
+                raise DexError("slippage_bps must be 1..500 (0.01%..5%)")
+            body["slippageBps"] = slippage_bps
+        return body
+
+    def _check_echo(self, raw: dict, chain_id: int, body: dict) -> None:
+        """Cast echoes the request; a mismatch means the answer is not for
+        this request, so refuse it rather than trust it."""
+        if raw.get("chainId") != chain_id:
+            raise DexError(f"cast answered for chain {raw.get('chainId')}, "
+                           f"asked {chain_id} — refusing")
+        for k in ("sellToken", "buyToken"):
+            if str(raw.get(k, "")).lower() != body[k].lower():
+                raise DexError(f"cast answered {k} {raw.get(k)!r}, asked "
+                               f"{body[k]!r} — refusing")
+
+    def price(self, chain_id: int, sell_token: str, buy_token: str,
+              sell_amount: int, taker: str | None = None) -> dict:
+        """Indicative price — no calldata, safe to poll for display."""
+        body = self._swap_body(chain_id, sell_token, buy_token, sell_amount,
+                               taker, None)
+        raw = self._post("/api/agent/price", body)
+        self._check_echo(raw, chain_id, body)
+        if raw.get("buyAmount") is None:
+            raise DexError(f"cast price response missing buyAmount: {raw!r}"[:300])
+        return _norm_quote(
+            venue=VENUE_CAST, chain_id=chain_id,
+            sell_token=raw["sellToken"], buy_token=raw["buyToken"],
+            sell_amount=int(raw.get("sellAmount") or sell_amount),
+            buy_amount=int(raw["buyAmount"]),
+            min_buy_amount=int(raw["minBuyAmount"]) if raw.get("minBuyAmount") else None,
+            price_impact_bps=None, gas_estimate=None,
+            tx=None, allowance_target=None, raw=raw)
+
+    def quote(self, chain_id: int, sell_token: str, buy_token: str,
+              sell_amount: int, taker: str, slippage_bps: int = 50) -> dict:
+        """Firm quote with executable calldata (allowance-holder).
+
+        The returned sell amount is Cast's echo, not the request, so
+        ``validate_swap_intent_against_quote`` really compares it against
+        the approved amount. Expires in seconds — never store or replay.
+        """
+        _require_address(taker, "taker")
+        body = self._swap_body(chain_id, sell_token, buy_token, sell_amount,
+                               taker, slippage_bps)
+        raw = self._post("/api/agent/quote", body)
+        self._check_echo(raw, chain_id, body)
+        txn = raw.get("transaction") or {}
+        to, data = txn.get("to"), txn.get("data")
+        if not to or not data:
+            raise DexError(f"cast quote missing executable transaction: {raw!r}"[:300])
+        if txn.get("chainId") not in (None, chain_id):
+            raise DexError("cast quote transaction is for another chain — refusing")
+        # Spender: from the quote, never hardcoded or inferred from tx.to.
+        allowance_target = raw.get("allowanceTarget")
+        approval_spender = (raw.get("approval") or {}).get("spender")
+        if not allowance_target:
+            allowance_target = approval_spender
+        elif approval_spender and approval_spender.lower() != allowance_target.lower():
+            raise DexError("cast quote names two different spenders — refusing")
+        if allowance_target and not _is_address(allowance_target):
+            raise DexError(f"cast returned bad allowanceTarget: {allowance_target!r}")
+        tx = {
+            "to": to,
+            "data": data,
+            "value": str(txn.get("value", "0")),
+            "gas": txn.get("gas"),
+            "gas_price": txn.get("gasPrice"),
+        }
+        min_buy = raw.get("minBuyAmount")
+        return _norm_quote(
+            venue=VENUE_CAST, chain_id=chain_id,
+            sell_token=raw["sellToken"], buy_token=raw["buyToken"],
+            sell_amount=int(raw.get("sellAmount") or 0),
+            buy_amount=int(raw.get("buyAmount") or 0),
             min_buy_amount=int(min_buy) if min_buy else None,
             price_impact_bps=None, gas_estimate=txn.get("gas"),
             tx=tx, allowance_target=allowance_target, raw=raw)
@@ -864,12 +1061,14 @@ def compare_quotes(quotes: list[dict]) -> dict:
 
 __all__ = [
     "DexError",
-    "ZEROX_BASE", "UNISWAP_BASE", "ZEROX_CHAINS", "UNISWAP_CHAINS",
+    "ZEROX_BASE", "UNISWAP_BASE", "CAST_BASE",
+    "ZEROX_CHAINS", "UNISWAP_CHAINS", "CAST_CHAINS",
     "NATIVE_SENTINEL", "NATIVE_ZERO",
-    "VENUE_MATCHA", "VENUE_UNISWAP", "KNOWN_VENUES", "VENUE_ALIASES",
-    "VENUE_CHAINS", "VENUE_ENV_KEYS", "DEFAULT_RECOMMENDED_VENUES",
+    "VENUE_MATCHA", "VENUE_UNISWAP", "VENUE_CAST", "KNOWN_VENUES",
+    "VENUE_ALIASES", "VENUE_CHAINS", "VENUE_ENV_KEYS", "VENUES_KEY_OPTIONAL",
+    "DEFAULT_RECOMMENDED_VENUES",
     "normalize_venue", "venue_serves_chain", "relay_mode",
-    "ZeroExClient", "UniswapClient",
+    "ZeroExClient", "UniswapClient", "CastClient",
     "build_approve_calldata", "build_allowance_calldata", "decode_allowance",
     "build_v2_swap_calldata", "build_v2_add_liquidity_calldata",
     "build_v3_exact_input_single_calldata", "build_v3_mint_calldata",

@@ -430,6 +430,17 @@ spellbook dex-quote --chain 8453 \
 spellbook dex-quote --firm --venue matcha --chain 8453 \
   --sell-token ... --buy-token ... --amount ... --taker 0xYourWallet
 # (--venue 0x also works — it is an alias for matcha.)
+
+# Cast (cast.awizard.dev) — no key. --venue all = matcha + uniswap + cast.
+spellbook dex-quote --firm --venue cast --chain 4663 \
+  --sell-token 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE \
+  --buy-token ... --amount ... --taker 0xYourWallet
+
+# Cast lookups (read-only, no key):
+spellbook cast networks                        # chains, tokens, fee recipient
+spellbook cast tokens --chain 4663             # token list (--source per networks)
+spellbook cast token  --chain 4663 --address 0x...
+spellbook cast prices --chain 4663 --addresses 0x...,0x...
 ```
 
 Output is a ranked comparison: best output-per-input first, with the
@@ -449,6 +460,13 @@ uni = dex.UniswapClient(os.environ["UNISWAP_API_KEY"])
 uq = uni.quote(chain_id=8453, token_in=WETH, token_out=USDC,
                amount=10**18, swapper=my_addr, slippage_pct=0.5)
 firm = uni.swap(uq["raw"], 8453, WETH, USDC, 10**18, my_addr)
+
+cast = dex.CastClient()          # no key; CAST_API_KEY only if Cast sets one
+cq = cast.quote(chain_id=4663, sell_token=dex.NATIVE_SENTINEL,
+                buy_token=TOKEN, sell_amount=10**16, taker=my_addr,
+                slippage_bps=100)
+cast.networks(); cast.tokens(4663); cast.token_lookup(4663, TOKEN)
+cast.token_prices(4663, [TOKEN])
 
 best = dex.compare_quotes([q, firm])["best"]
 ```
@@ -476,7 +494,16 @@ their semantics from memory:
   signature over it is required before /swap. Spellbook sends the
   `X-Agent-Info` header as the agent-attribution docs specify
   (JSON with `decision_origin: "human_mediated"`).
-- **Both serve Robinhood Chain mainnet (4663)** — per their official
+- **cast** — Cast, https://cast.awizard.dev/agents: aWizard's router
+  over the 0x Swap API (allowance-holder) on Base (8453) and Robinhood
+  Chain (4663). No API key; Cast takes its platform fee inside the
+  quoted swap. The daemon calls Cast's agent API directly
+  (`POST /api/agent/quote`), so no local quote shim or `ZEROX_BASE_URL`
+  relay is needed. As with every venue, only the quote's tx and
+  `allowanceTarget` are used — the daemon builds its own exact-amount
+  approval and never signs Cast's `approval` calldata. Override the host
+  with `CAST_BASE_URL` (e.g. a preview deploy).
+- **All three serve Robinhood Chain mainnet (4663)** — per their official
   supported-chains docs. The 46630 testnet is not served by either.
   For Uniswap-v2-style pools with no API key (e.g. PLANK/WETH),
   `build_v2_swap_calldata` builds the swap calldata directly against
@@ -486,10 +513,12 @@ their semantics from memory:
 
 The recommended venue list is a default guardrail, not a gate. The
 user's `dex.recommended_venues` in spellbook.json (daemon-user-owned,
-mode 0600) names the venues they prefer; the default is both:
+mode 0600) names the venues they prefer; the default is matcha +
+uniswap. Swapping through Cast without a warning on every intent means
+adding it:
 
 ```json
-{ "dex": { "recommended_venues": ["matcha", "uniswap"] } }
+{ "dex": { "recommended_venues": ["matcha", "uniswap", "cast"] } }
 ```
 
 To see the effective list (and every known venue with its served

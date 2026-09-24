@@ -171,7 +171,7 @@ Keep the hot wallet funded with nothing your agent may not lose.
 `spellbook.json` is daemon/agent configuration, not policy: seed paths,
 key derivation, address labels, network selections and mainnet gates,
 `dex.recommended_venues` — your preferred swap venues (default: matcha
-+ uniswap). Advisory, not a gate: a swap naming another venue is queued
++ uniswap; add `cast` to swap through cast.awizard.dev without a warning). Advisory, not a gate: a swap naming another venue is queued
 with a prominent warning, and **your** per-transaction approval is what
 authorizes the venue. `spellbook.json` also carries the UID allowlists
 in §8.

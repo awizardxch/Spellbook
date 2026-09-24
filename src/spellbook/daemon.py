@@ -902,9 +902,13 @@ class Daemon:
                 f"{info['chain_id']} — refusing")
         env_key = dex_mod.VENUE_ENV_KEYS[venue]
         api_key = os.environ.get(env_key) or ""
-        # In relay mode (Cast site via the shim) the relay holds the API key
-        # server-side, so a blank local key is fine — it is ignored.
-        if not api_key and not dex_mod.relay_mode():
+        # A blank key is fine when the venue's key is optional (Cast), or
+        # for matcha in relay mode: ZEROX_BASE_URL points at a quote relay
+        # (e.g. the Cast site via the shim) that holds the key server-side.
+        key_optional = (venue in dex_mod.VENUES_KEY_OPTIONAL
+                        or (venue == dex_mod.VENUE_MATCHA
+                            and dex_mod.relay_mode()))
+        if not api_key and not key_optional:
             raise evm.EvmError(
                 f"{env_key} not in the daemon environment — cannot fetch "
                 "a firm quote, refusing")
@@ -913,6 +917,10 @@ class Daemon:
         # Firm quote, fetched at execution time (quotes live ~30s).
         if venue == dex_mod.VENUE_MATCHA:
             quote = dex_mod.ZeroExClient(api_key).quote(
+                info["chain_id"], sell, buy, amount, sender,
+                slippage_bps=params["max_slippage_bps"])
+        elif venue == dex_mod.VENUE_CAST:
+            quote = dex_mod.CastClient(api_key).quote(
                 info["chain_id"], sell, buy, amount, sender,
                 slippage_bps=params["max_slippage_bps"])
         else:
@@ -3356,6 +3364,7 @@ class Daemon:
             "recommended_venues": list(self.dex_recommended_venues),
             "known_venues": {
                 v: {"env_key": dex_mod.VENUE_ENV_KEYS[v],
+                    "key_required": v not in dex_mod.VENUES_KEY_OPTIONAL,
                     "chain_ids": sorted(dex_mod.VENUE_CHAINS[v])}
                 for v in dex_mod.KNOWN_VENUES
             },

@@ -218,12 +218,14 @@ def _run_self_repair(item, report):
 def cmd_dex_quote(a, client=None):
     """Read-only DEX quotes across venues. No daemon, no signing, no
     broadcast — safe to run any time. Needs ZERO_EX_API_KEY and/or
-    UNISWAP_API_KEY in the environment (free keys, see docs)."""
+    UNISWAP_API_KEY in the environment (free keys, see docs); cast needs
+    no key."""
     import os
     from spellbook import dex as dexmod
 
-    venues = (["matcha", "uniswap"] if a.venue == "both"
-              else [dexmod.normalize_venue(a.venue)])
+    venues = ({"both": ["matcha", "uniswap"],
+               "all": ["matcha", "uniswap", "cast"]}.get(a.venue)
+              or [dexmod.normalize_venue(a.venue)])
     quotes = []
     if "matcha" in venues:
         key = os.environ.get("ZERO_EX_API_KEY")
@@ -257,7 +259,37 @@ def cmd_dex_quote(a, client=None):
             q = c.swap(q["raw"], a.chain, a.sell_token, a.buy_token,
                        a.amount, a.taker, slippage_pct=a.slippage_bps / 100)
         quotes.append(q)
+    if "cast" in venues:
+        c = dexmod.CastClient(os.environ.get("CAST_API_KEY"))
+        if a.firm:
+            if not a.taker:
+                raise SystemExit("spellbook: --taker is required for "
+                                 "firm Cast quotes")
+            quotes.append(c.quote(a.chain, a.sell_token, a.buy_token,
+                                  a.amount, a.taker,
+                                  slippage_bps=a.slippage_bps))
+        else:
+            quotes.append(c.price(a.chain, a.sell_token, a.buy_token,
+                                  a.amount, a.taker))
     _show(dexmod.compare_quotes(quotes))
+
+
+def cmd_cast(a):
+    """Read-only Cast (cast.awizard.dev) lookups: networks, token lists,
+    token metadata, USD prices. No daemon, no signing, no key."""
+    import os
+    from spellbook import dex as dexmod
+
+    c = dexmod.CastClient(os.environ.get("CAST_API_KEY"))
+    if a.what == "networks":
+        _show(c.networks())
+    elif a.what == "tokens":
+        _show(c.tokens(a.chain, a.source))
+    elif a.what == "token":
+        _show(c.token_lookup(a.chain, a.address))
+    elif a.what == "prices":
+        addrs = [x.strip() for x in a.addresses.split(",") if x.strip()]
+        _show(c.token_prices(a.chain, addrs))
 
 
 def cmd_request_spend(a, client: AgentClient):
@@ -550,9 +582,11 @@ def main(argv=None):
 
     # DEX quotes (read-only, local-first: no daemon, no signing, no broadcast).
     dq = sub.add_parser("dex-quote")
-    dq.add_argument("--venue", choices=["matcha", "0x", "uniswap", "both"],
+    dq.add_argument("--venue",
+                    choices=["matcha", "0x", "uniswap", "cast", "both", "all"],
                     default="both",
-                    help="quote venue(s); \"0x\" is an alias for matcha")
+                    help="quote venue(s); \"0x\" is an alias for matcha, "
+                         "\"both\" = matcha + uniswap, \"all\" adds cast")
     dq.add_argument("--chain", type=int, required=True,
                     help="EVM chain id (e.g. 8453 Base, 1 Ethereum)")
     dq.add_argument("--sell-token", required=True,
@@ -569,6 +603,16 @@ def main(argv=None):
     dq.add_argument("--firm", action="store_true",
                     help="fetch FIRM executable quotes (short-lived calldata); "
                          "default is indicative prices only")
+
+    # Cast lookups (read-only, local-first, no key).
+    ca = sub.add_parser("cast", help="read-only Cast lookups: networks, "
+                                     "token lists, token metadata, prices")
+    ca.add_argument("what", choices=["networks", "tokens", "token", "prices"])
+    ca.add_argument("--chain", type=int,
+                    help="EVM chain id (8453 Base, 4663 Robinhood)")
+    ca.add_argument("--source", help="tokens: list source (see networks)")
+    ca.add_argument("--address", help="token: the token address")
+    ca.add_argument("--addresses", help="prices: comma-separated addresses")
 
     dv = sub.add_parser("dex-venues",
                         help="show your recommended swap venues (read-only)")
@@ -589,13 +633,13 @@ def main(argv=None):
     rs.add_argument("--purpose", default="")
 
     dsw = sub.add_parser("dex-swap",
-                         help="request a bounded swap (matcha/uniswap); the "
+                         help="request a bounded swap (matcha/uniswap/cast); the "
                               "daemon fetches the firm quote at execution "
                               "and only signs inside the approved bounds")
     dsw.add_argument("--chain", required=True,
                      help="daemon chain name, e.g. evm-8453")
     dsw.add_argument("--venue", required=True,
-                     choices=["matcha", "0x", "uniswap"],
+                     choices=["matcha", "0x", "uniswap", "cast"],
                      help="swap venue (\"0x\" is an alias for matcha). "
                           "Venues outside your dex.recommended_venues list "
                           "are not blocked — the queued intent carries a "
@@ -818,11 +862,19 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     try:
-        if a.cmd in ("version", "upgrade", "doctor", "dex-quote"):
+        if a.cmd in ("version", "upgrade", "doctor", "dex-quote", "cast"):
             # Lifecycle + read-only commands are local-first and never take
             # the approve token; they build their own clients as needed.
+            if a.cmd == "cast":
+                need = {"tokens": ["chain"], "token": ["chain", "address"],
+                        "prices": ["chain", "addresses"]}.get(a.what, [])
+                missing = [f"--{n}" for n in need if getattr(a, n) is None]
+                if missing:
+                    raise SystemExit(f"spellbook cast {a.what}: needs "
+                                     f"{' '.join(missing)}")
             {"version": cmd_version, "upgrade": cmd_upgrade,
-             "doctor": cmd_doctor, "dex-quote": cmd_dex_quote}[a.cmd](a)
+             "doctor": cmd_doctor, "dex-quote": cmd_dex_quote,
+             "cast": cmd_cast}[a.cmd](a)
             return
         if a.cmd in ("approve", "reject"):
             client: HumanClient = HumanClient(_socket(a), _token(a, "SPELLBOOK_APPROVE_TOKEN"),
