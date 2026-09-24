@@ -90,6 +90,29 @@ Rules that protect you:
 - **Never approve what you don't understand.** Reject is always safe;
   your agent can re-request with a better explanation.
 
+### If `approve` seems to hang or reports a timeout
+
+Approving a spend *executes* it — the command waits for the firm quote,
+the broadcast, and the chain confirmation, which can take up to ~2
+minutes. That's normal. If your client reports a timeout or you get
+impatient:
+
+1. **Do not run `approve` again.** One approval = one execution attempt,
+   and the daemon may have completed the spend after your client gave up.
+   Re-approving the same queue item is impossible (it's already popped),
+   but re-requesting a "did it go through?" spend from your agent could
+   double-spend.
+2. Check the decision ledger instead — it's the source of truth:
+   `spellbook ledger` (or your Python client's `ledger()`), and look for
+   the terminal row for your intent: `approved-by-human` means success
+   (the transaction hash is in that row — verify it on the chain
+   explorer), `approved-submit-failed:<reason>` means nothing was
+   broadcast, `approved-submit-unknown:<reason>` means it broadcast but
+   confirmation is ambiguous — reconcile the hash on-chain before doing
+   anything else.
+3. A bare `executing` row with no terminal row means the attempt is still
+   in flight — wait, then check again.
+
 ### Approving a signature (no money moves — still your call)
 
 Your agent can also ask the daemon to *sign a message* with a wallet key

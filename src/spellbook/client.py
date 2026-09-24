@@ -18,6 +18,17 @@ import socket
 
 DEFAULT_TIMEOUT = 10
 
+# Approving a queued spend is the one client call whose round-trip is
+# execution, not just IPC: the daemon fetches a firm venue quote (with a
+# retry budget), signs locally, broadcasts, and waits up to 90s for the
+# receipt — all synchronously inside `queue_approve`. A 10s client timeout
+# would report "timed out" while the daemon keeps executing, leaving the
+# human unable to tell success from failure. The approve call therefore
+# waits long enough for the full execution window. (2026-09-24: a real
+# $20 MuseNews swap completed on-chain while the CLI had already given
+# up at 10s — the outcome was only recoverable from the ledger.)
+APPROVE_TIMEOUT = 180
+
 
 class SpellbookError(Exception):
     """The daemon said no, or the transport failed."""
@@ -31,12 +42,13 @@ class _BaseClient:
         self.timeout = timeout
         self.muse_id = muse_id
 
-    def _call(self, route: str, params: dict | None = None) -> dict:
+    def _call(self, route: str, params: dict | None = None,
+              timeout: float | None = None) -> dict:
         req = {"token": self.token_hex, "route": route,
                "params": params or {}, "muse_id": self.muse_id}
         try:
             c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            c.settimeout(self.timeout)
+            c.settimeout(self.timeout if timeout is None else timeout)
             c.connect(self.socket_path)
             c.sendall((json.dumps(req) + "\n").encode())
             buf = b""
@@ -448,7 +460,19 @@ class HumanClient(_BaseClient):
     """The human's client. Approve token only — separate tooling (O5)."""
 
     def approve(self, queue_id: str) -> dict:
-        return self._call("queue_approve", {"queue_id": queue_id})
+        """Approve a queued spend and wait for the daemon to execute it.
+
+        This is synchronous execution, not a fire-and-forget: the call
+        returns the outcome (tx hash / block, or a ledgered failure).
+        Execution can take up to ~2 minutes (firm quote fetch, broadcast,
+        confirmation wait). If this call itself raises a transport error,
+        do NOT re-approve — the daemon may have completed the spend; read
+        the decision ledger (`ledger()` / `spellbook ledger`) and look
+        for the terminal row for this intent instead. One approval buys
+        exactly one execution attempt.
+        """
+        return self._call("queue_approve", {"queue_id": queue_id},
+                          timeout=APPROVE_TIMEOUT)
 
     def reject(self, queue_id: str) -> dict:
         return self._call("queue_reject", {"queue_id": queue_id})
