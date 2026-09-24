@@ -406,13 +406,20 @@ choice — see "Choosing your swap venues" below.
 
 ### API keys
 
-Both venues need free API keys, kept in the agent's environment (never
-in the repo):
+**Agents are not asked for keys.** The operator holds them server-side;
+an agent adds its own only if it chooses to:
 
-| Venue | Env var | Get it at |
+| Venue | Without a key | With the agent's own key |
 |---|---|---|
-| matcha (0x Swap API) | `ZERO_EX_API_KEY` | dashboard.0x.org |
-| Uniswap | `UNISWAP_API_KEY` | developers.uniswap.org/dashboard |
+| matcha (0x Swap API) | quotes via Cast's 0x-compatible routes, `https://cast.awizard.dev/swap/allowance-holder/*` (0x key held server-side; Cast's platform fee is inside the quote) | `ZERO_EX_API_KEY` → `api.0x.org` directly, no Cast fee |
+| cast | works — Cast's agent API is open | `CAST_API_KEY`, only if Cast turns keys on |
+| Uniswap | not available — there is no server-side Uniswap key | `UNISWAP_API_KEY` (developers.uniswap.org/dashboard) |
+
+`ZEROX_BASE_URL` overrides where matcha quotes go (e.g. a local relay),
+key or not. A `dex-swap` naming Uniswap with no `UNISWAP_API_KEY` is
+refused when requested, so no approval is spent on a swap that could
+never fetch its quote. Keys a user does add live in the daemon's
+environment, never in the repo.
 
 Direct pool calldata (v2/v3 builders) needs no key — only an RPC for
 read calls like `allowance`.
@@ -452,7 +459,7 @@ tx, allowance target) attached.
 ```python
 from spellbook import dex
 
-zx = dex.ZeroExClient(os.environ["ZERO_EX_API_KEY"])
+zx = dex.ZeroExClient()          # no key: operator relay; or pass your own
 q = zx.quote(chain_id=8453, sell_token=WETH, buy_token=USDC,
              sell_amount=10**18, taker=my_addr, slippage_bps=50)
 
@@ -629,8 +636,8 @@ operational shape; Speechless decided it explicitly:
   so the ledger shows whose decision it was.
 - **The production seed never leaves the local daemon.**
   Cloud/deployed agents do not need it and do not receive it. The
-  quote relay (`ZEROX_BASE_URL` + `ZERO_EX_API_KEY` in the *daemon's*
-  environment) supplies routing and quotes only — it never signs,
+  quote relay (the operator's, by default — no key on the agent side;
+  `ZEROX_BASE_URL` to point elsewhere) supplies routing and quotes only — it never signs,
   never holds funds, never sees the seed. Never place a production
   seed in a website-login vault or a cloud deployment.
 - **Mainnet config:** `evm-4663` enabled with its mainnet RPC,
@@ -658,8 +665,9 @@ Speechless approved it: "You are an agent we give approval and authority
 and you should be able to execute swaps for us." The design above is the
 implementation — bounded intents instead of a generic calldata decoder,
 exact-amount approvals, no `allow_opaque_calldata` knob (opaque calldata
-is simply never signable). Venue API keys (`ZERO_EX_API_KEY`,
-`UNISWAP_API_KEY`) live in the *daemon's* environment, never in the repo.
+is simply never signable). Venue API keys are optional except for
+Uniswap (see "API keys"); any the user adds live in the *daemon's*
+environment, never in the repo.
 Why this took a spec change at all: v1 deliberately limited the daemon to
 plain transfers (S13) so a prompt-injected agent holding the request
 token couldn't talk it into signing arbitrary contract calldata — the

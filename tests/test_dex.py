@@ -218,9 +218,44 @@ def test_zerox_refuses_unknown_chain():
         c.quote(46630, A, B, 100, C)  # Robinhood Chain testnet not served by 0x
 
 
-def test_zerox_requires_key():
-    with pytest.raises(DexError):
-        ZeroExClient("")
+def test_zerox_quote_with_null_allowance_issue(monkeypatch):
+    # 0x sends issues.allowance = null when no approval is needed (native
+    # sell, or allowance already enough). That must parse, not crash.
+    raw = _zerox_quote_fixture()
+    raw.pop("allowanceTarget", None)
+    raw["issues"] = {"allowance": None, "balance": None}
+    monkeypatch.setattr(dex, "_http_json", lambda *a, **k: raw)
+    q = ZeroExClient("k").quote(8453, dex.NATIVE_SENTINEL, B, 10**18, C)
+    assert q["allowance_target"] is None
+
+
+def test_zerox_without_key_uses_operator_relay(monkeypatch):
+    # Cast (the operator's relay) holds the 0x key server-side: agents are not
+    # asked for one, and no empty key header is sent.
+    monkeypatch.delenv("ZEROX_BASE_URL", raising=False)
+    seen = {}
+
+    def fake_http(method, url, headers, body=None, timeout=25):
+        seen["url"], seen["headers"] = url, headers
+        return _zerox_quote_fixture()
+
+    monkeypatch.setattr(dex, "_http_json", fake_http)
+    for key in ("", None):
+        c = ZeroExClient(key)
+        assert c.base == dex.OPERATOR_QUOTE_RELAY == "https://cast.awizard.dev"
+        c.quote(8453, A, B, 10**18, C)
+        assert seen["url"].startswith(
+            f"{dex.OPERATOR_QUOTE_RELAY}/swap/allowance-holder/quote?")
+        assert "0x-api-key" not in seen["headers"]
+        assert seen["headers"]["0x-version"] == "v2"
+    assert ZeroExClient().base == dex.OPERATOR_QUOTE_RELAY
+
+
+def test_zerox_own_key_goes_direct(monkeypatch):
+    monkeypatch.delenv("ZEROX_BASE_URL", raising=False)
+    c = ZeroExClient("mykey")
+    assert c.base == dex.ZEROX_DIRECT == "https://api.0x.org"
+    assert c._headers()["0x-api-key"] == "mykey"
 
 
 def test_zerox_blank_key_allowed_in_relay_mode(monkeypatch):
@@ -232,11 +267,13 @@ def test_zerox_blank_key_allowed_in_relay_mode(monkeypatch):
     assert c.api_key == ""
 
 
-def test_zerox_blank_key_refused_without_relay(monkeypatch):
-    monkeypatch.delenv("ZEROX_BASE_URL", raising=False)
+def test_zerox_base_url_override_wins(monkeypatch):
+    # ZEROX_BASE_URL (e.g. a local shim) beats both defaults, key or not.
+    monkeypatch.setenv("ZEROX_BASE_URL", "http://127.0.0.1:8899/")
+    assert ZeroExClient("").base == "http://127.0.0.1:8899"
+    assert ZeroExClient("mykey").base == "http://127.0.0.1:8899"
+    monkeypatch.delenv("ZEROX_BASE_URL")
     assert dex.relay_mode() is False
-    with pytest.raises(DexError):
-        ZeroExClient("")
 
 
 def test_uniswap_flow(monkeypatch):

@@ -217,9 +217,10 @@ def _run_self_repair(item, report):
 
 def cmd_dex_quote(a, client=None):
     """Read-only DEX quotes across venues. No daemon, no signing, no
-    broadcast — safe to run any time. Needs ZERO_EX_API_KEY and/or
-    UNISWAP_API_KEY in the environment (free keys, see docs); cast needs
-    no key."""
+    broadcast — safe to run any time. matcha and cast need no key (keys
+    are held server-side); ZERO_EX_API_KEY is used only if you set one.
+    Uniswap needs UNISWAP_API_KEY and is skipped from "both"/"all"
+    without it."""
     import os
     from spellbook import dex as dexmod
 
@@ -228,11 +229,7 @@ def cmd_dex_quote(a, client=None):
               or [dexmod.normalize_venue(a.venue)])
     quotes = []
     if "matcha" in venues:
-        key = os.environ.get("ZERO_EX_API_KEY")
-        if not key:
-            raise SystemExit("spellbook: ZERO_EX_API_KEY not set "
-                             "(free at dashboard.0x.org)")
-        c = dexmod.ZeroExClient(key)
+        c = dexmod.ZeroExClient(os.environ.get("ZERO_EX_API_KEY"))
         if a.firm:
             if not a.taker:
                 raise SystemExit("spellbook: --taker is required for "
@@ -243,12 +240,19 @@ def cmd_dex_quote(a, client=None):
         else:
             quotes.append(c.price(a.chain, a.sell_token, a.buy_token,
                                   a.amount, a.taker))
+    uni_key = os.environ.get("UNISWAP_API_KEY")
+    if "uniswap" in venues and not uni_key:
+        if a.venue in ("both", "all"):
+            print("spellbook: skipping uniswap — no UNISWAP_API_KEY "
+                  "(uniswap has no server-side key)", file=sys.stderr)
+            venues = [v for v in venues if v != "uniswap"]
+        else:
+            raise SystemExit("spellbook: uniswap needs UNISWAP_API_KEY "
+                             "(it has no server-side key; free at "
+                             "developers.uniswap.org/dashboard). matcha "
+                             "and cast need no key.")
     if "uniswap" in venues:
-        key = os.environ.get("UNISWAP_API_KEY")
-        if not key:
-            raise SystemExit("spellbook: UNISWAP_API_KEY not set "
-                             "(free at developers.uniswap.org/dashboard)")
-        c = dexmod.UniswapClient(key)
+        c = dexmod.UniswapClient(uni_key)
         taker = a.taker or "0x0000000000000000000000000000000000000000"
         q = c.quote(a.chain, a.sell_token, a.buy_token, a.amount, taker,
                     slippage_pct=a.slippage_bps / 100)
