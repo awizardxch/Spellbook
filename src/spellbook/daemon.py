@@ -902,7 +902,7 @@ class Daemon:
                 f"{info['chain_id']} — refusing")
         env_key = dex_mod.VENUE_ENV_KEYS[venue]
         api_key = os.environ.get(env_key)
-        if not api_key:
+        if not api_key and venue not in dex_mod.VENUES_KEY_OPTIONAL:
             raise evm.EvmError(
                 f"{env_key} not in the daemon environment — cannot fetch "
                 "a firm quote, refusing")
@@ -911,6 +911,10 @@ class Daemon:
         # Firm quote, fetched at execution time (quotes live ~30s).
         if venue == dex_mod.VENUE_MATCHA:
             quote = dex_mod.ZeroExClient(api_key).quote(
+                info["chain_id"], sell, buy, amount, sender,
+                slippage_bps=params["max_slippage_bps"])
+        elif venue == dex_mod.VENUE_CAST:
+            quote = dex_mod.CastClient(api_key).quote(
                 info["chain_id"], sell, buy, amount, sender,
                 slippage_bps=params["max_slippage_bps"])
         else:
@@ -3354,6 +3358,7 @@ class Daemon:
             "recommended_venues": list(self.dex_recommended_venues),
             "known_venues": {
                 v: {"env_key": dex_mod.VENUE_ENV_KEYS[v],
+                    "key_required": v not in dex_mod.VENUES_KEY_OPTIONAL,
                     "chain_ids": sorted(dex_mod.VENUE_CHAINS[v])}
                 for v in dex_mod.KNOWN_VENUES
             },
