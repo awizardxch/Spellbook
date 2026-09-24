@@ -468,6 +468,7 @@ def cmd_message_sign(a, client: AgentClient):
     _show(client.message_sign(chain=a.chain, message=a.message,
                               address=a.address or "",
                               public_key=a.public_key or "",
+                              sign_type=a.sign_type,
                               purpose=a.purpose or ""))
 
 
@@ -759,6 +760,11 @@ def main(argv=None):
     sg.add_argument("--message", required=True)
     sg.add_argument("--address", default=None)
     sg.add_argument("--public-key", default=None)
+    sg.add_argument("--sign-type", default="plain",
+                    choices=("plain", "personal", "typed_data"),
+                    help="plain (Chia/Solana), personal (EIP-191) or "
+                         "typed_data (EIP-712) on EVM chains; for "
+                         "typed_data --message is the JSON envelope")
 
     oi = sub.add_parser("offer-import")
     oi.add_argument("--chain", required=True)

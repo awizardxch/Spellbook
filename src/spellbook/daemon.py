@@ -110,7 +110,7 @@ BULK_SEND_FIELDS = {"intent", "chain", "asset", "addresses", "amount_mojos",
                     "fee_mojos", "purpose", "memos"}
 MULTI_SEND_FIELDS = {"intent", "chain", "payments", "fee_mojos", "purpose"}
 MESSAGE_SIGN_FIELDS = {"intent", "chain", "address", "public_key",
-                       "message", "purpose"}
+                       "message", "purpose", "sign_type"}
 
 # DEX intents (SPEC §10 v2 — approved by Speechless 2026-09-23): bounded
 # swap / LP-add requests. The queue holds BOUNDS (tokens, exact sell
@@ -715,6 +715,11 @@ class Daemon:
         "default" label's key (v1).
         """
         chain = params["chain"]
+        # Single dispatch point for off-chain message signing (SPEC §10):
+        # Chia signs via Sage RPC; EVM and Solana sign locally with the
+        # daemon's own keys. message_sign never reaches a spend path.
+        if params.get("intent") == "message_sign":
+            return self._execute_message_sign(params)
         if chain in chia.NETWORKS:
             return self._execute_chia_spend(params)
         if chain in solana_mod.NETWORKS:
@@ -1324,8 +1329,6 @@ class Daemon:
             return self._execute_bulk_send_via_sage(params)
         if intent == "multi_send":
             return self._execute_multi_send_via_sage(params)
-        if intent == "message_sign":
-            return self._execute_message_sign_via_sage(params)
         kind, _ = chia_asset_kind(params.get("asset", "native"))
         if kind != "native":
             return self._execute_chia_spend_via_sage(params)
@@ -2852,6 +2855,171 @@ class Daemon:
         return {"submitted": False, "signature": sig, "signed_by": who,
                 "note": f"signed message as {who[:24]}…"}
 
+    def _execute_message_sign(self, params: dict) -> dict:
+        """Single dispatch point for off-chain message signing (SPEC §10).
+
+        Chain family decides the signer: Chia signs via Sage RPC (the only
+        path that touches a live wallet), EVM and Solana sign locally with
+        the daemon's own derived keys. The request-time chain/sign_type
+        gating is the first layer; membership checks here are the second.
+        Nothing is broadcast: every path returns submitted=False and no
+        velocity is recorded. Raises on any failure — a refused signature
+        records nothing.
+        """
+        chain = params.get("chain", "")
+        if chain in chia.NETWORKS:
+            return self._execute_message_sign_via_sage(params)
+        if chain in solana_mod.NETWORKS:
+            return self._execute_message_sign_solana(params)
+        if chain in evm.CHAINS:
+            return self._execute_message_sign_evm(params)
+        return {"submitted": False,
+                "note": f"message signing not configured for {chain!r}"}
+
+    @staticmethod
+    def _verify_sign_identity_evm(params: dict, priv: bytes,
+                                  addr: str) -> str:
+        """Re-verify the approved signing identity against the daemon's key.
+
+        The human approved a specific identity; execution refuses unless the
+        requested address (case-insensitive) or public key (uncompressed
+        secp256k1 hex, 04 prefix optional, 0x prefix optional) matches the
+        key being signed with. Returns the canonical identity string.
+        """
+        req_addr = params.get("address")
+        req_pk = params.get("public_key")
+        if req_addr and req_pk:
+            raise evm.EvmError(
+                "message_sign takes address OR public_key, not both")
+        if req_addr:
+            if not isinstance(req_addr, str) or req_addr.lower() != addr.lower():
+                raise evm.EvmError(
+                    "requested signing address does not match the daemon's "
+                    "EVM key for this chain — refusing")
+            return addr
+        if req_pk:
+            if not isinstance(req_pk, str):
+                raise evm.EvmError("public_key must be a string")
+            norm = req_pk.lower().removeprefix("0x")
+            if len(norm) == 128:  # 04 prefix omitted
+                norm = "04" + norm
+            derived = spellsign.secp256k1_pubkey_uncompressed_hex(priv)
+            if norm != derived:
+                raise evm.EvmError(
+                    "requested signing public key does not match the "
+                    "daemon's EVM key for this chain — refusing")
+            return addr
+        raise evm.EvmError("message_sign needs address or public_key")
+
+    def _execute_message_sign_evm(self, params: dict) -> dict:
+        """Sign an approved message with the daemon's EVM key (off-chain).
+
+        sign_type is personal (EIP-191) or typed_data (EIP-712). The
+        preimage/digest is built from the approved message inside sign.py
+        (P1) — never from caller-supplied raw bytes. For typed_data the
+        envelope's domain.chainId must equal the signing chain's id, or the
+        signature is refused: the human approved signing for THIS chain.
+        """
+        chain = params["chain"]
+        if chain not in evm.CHAINS:
+            raise evm.EvmError(f"unknown EVM chain: {chain!r}")
+        sign_type = params.get("sign_type", "plain")
+        if sign_type not in ("personal", "typed_data"):
+            raise evm.EvmError(
+                f"sign_type {sign_type!r} not supported for EVM chains")
+        priv, addr = self._evm_key(chain)
+        who = self._verify_sign_identity_evm(params, priv, addr)
+        message = params.get("message")
+        if not isinstance(message, str) or not message:
+            raise evm.EvmError("message_sign needs a non-empty message")
+        if sign_type == "personal":
+            sig65 = spellsign.evm_personal_sign(priv, message)
+        else:
+            try:
+                typed = json.loads(message)
+            except (json.JSONDecodeError, TypeError) as e:
+                raise evm.EvmError(
+                    f"typed_data message is not valid JSON: {e}")
+            if not isinstance(typed, dict):
+                raise evm.EvmError(
+                    "typed_data message must be a JSON object")
+            try:
+                domain_chain_id = int((typed.get("domain") or {}).get(
+                    "chainId"))
+            except (TypeError, ValueError):
+                raise evm.EvmError(
+                    "typed_data domain.chainId must be an integer")
+            expected = int(chain.split("-", 1)[1])
+            if domain_chain_id != expected:
+                raise evm.EvmError(
+                    f"typed_data domain chainId {domain_chain_id} does not "
+                    f"match signing chain {chain} — refusing")
+            try:
+                sig65 = spellsign.evm_sign_typed_data(priv, typed)
+            except ValueError as e:
+                raise evm.EvmError(f"bad typed_data envelope: {e}")
+        return {"submitted": False, "signature": "0x" + sig65.hex(),
+                "signed_by": who, "sign_type": sign_type,
+                "note": f"signed {sign_type} message as {who[:10]}…"}
+
+    @staticmethod
+    def _verify_sign_identity_solana(params: dict, kp) -> str:
+        """Re-verify the approved signing identity against the keypair.
+
+        The human approved a specific identity; execution refuses unless the
+        requested address equals the keypair's address, or the requested
+        public key (base58 or hex) equals the keypair's public key.
+        """
+        req_addr = params.get("address")
+        req_pk = params.get("public_key")
+        if req_addr and req_pk:
+            raise solana_mod.SolanaError(
+                "message_sign takes address OR public_key, not both")
+        expected = solana_mod.address_of_keypair(kp)
+        if req_addr:
+            if not isinstance(req_addr, str) or req_addr != expected:
+                raise solana_mod.SolanaError(
+                    "requested signing address does not match the daemon's "
+                    "Solana keypair for this chain — refusing")
+            return expected
+        if req_pk:
+            if not isinstance(req_pk, str):
+                raise solana_mod.SolanaError("public_key must be a string")
+            pub32 = solana_mod.pubkey_bytes(kp)
+            if req_pk != solana_mod.b58encode(pub32) \
+                    and req_pk.lower() != pub32.hex():
+                raise solana_mod.SolanaError(
+                    "requested signing public key does not match the "
+                    "daemon's Solana keypair for this chain — refusing")
+            return expected
+        raise solana_mod.SolanaError("message_sign needs address or public_key")
+
+    def _execute_message_sign_solana(self, params: dict) -> dict:
+        """Sign an approved message with the daemon's Solana keypair.
+
+        Solana plain messages have no envelope: the 64-byte ed25519
+        signature covers the raw UTF-8 message bytes (base58 in the
+        response). The signing identity is re-verified before signing.
+        """
+        chain = params["chain"]
+        if chain not in solana_mod.NETWORKS:
+            raise solana_mod.SolanaError(f"unknown Solana chain: {chain!r}")
+        if params.get("sign_type", "plain") != "plain":
+            raise solana_mod.SolanaError(
+                f"sign_type {params.get('sign_type')!r} not supported for "
+                "Solana chains")
+        kp = self._solana_keypair(chain)
+        who = self._verify_sign_identity_solana(params, kp)
+        message = params.get("message")
+        if not isinstance(message, str) or not message:
+            raise solana_mod.SolanaError(
+                "message_sign needs a non-empty message")
+        sig64 = spellsign.solana_sign_message(kp, message.encode("utf-8"))
+        return {"submitted": False,
+                "signature": solana_mod.b58encode(sig64),
+                "signed_by": who, "sign_type": "plain",
+                "note": f"signed message as {who[:10]}…"}
+
     def _wait_pending_tx(self, rpc, tx_id: str, timeout_s: int) -> bool:
         """True when tx_id shows up in Sage's pending transactions."""
         deadline = time.time() + timeout_s
@@ -4014,15 +4182,70 @@ class Daemon:
             return {"ok": False,
                     "error": "schema violation: message_sign needs chain, "
                              "message, and address or public_key"}
-        err = self._req_tx_guards(p, p["chain"])
-        if err:
-            return err
+        chain = p["chain"]
+        # Chain-family gating for sign_type (first layer; execution
+        # re-checks membership): EVM signs personal (EIP-191) or typed_data
+        # (EIP-712); Chia and Solana sign plain messages. Unknown families
+        # and unknown chains fail closed here.
+        if chain.startswith("evm-"):
+            if chain not in evm.CHAINS:
+                return {"ok": False, "error":
+                        f"schema violation: unknown EVM chain {chain!r}"}
+            allowed = {"personal", "typed_data"}
+        elif chain.startswith("solana-"):
+            if chain not in solana_mod.NETWORKS:
+                return {"ok": False, "error":
+                        f"schema violation: unknown Solana chain {chain!r}"}
+            allowed = {"plain"}
+            # Same network-mismatch rule as the spend path: a devnet-
+            # configured daemon asked to sign for mainnet-beta (or vice
+            # versa) refuses — the KDF label (and keypair) is per-chain.
+            try:
+                active = self._active_solana_chain()
+            except solana_mod.SolanaError as e:
+                return {"ok": False, "error": str(e)}
+            if chain != active:
+                return {"ok": False, "error":
+                        f"network mismatch: daemon is configured for "
+                        f"{active}, refusing {chain!r}"}
+        elif chain.startswith("chia-"):
+            if chain not in chia.NETWORKS:
+                return {"ok": False, "error":
+                        f"schema violation: unknown Chia chain {chain!r}"}
+            allowed = {"plain"}
+        else:
+            return {"ok": False, "error":
+                    "schema violation: message_sign needs a chia-*, evm-*, "
+                    f"or solana-* chain, got {chain!r}"}
+        # Absent sign_type keeps the v1 default (plain) for backward
+        # compatibility; a present-but-invalid value is a schema violation.
+        sign_type = p.get("sign_type", "plain")
+        if sign_type not in allowed:
+            return {"ok": False, "error":
+                    f"schema violation: sign_type {sign_type!r} not allowed "
+                    f"for chain {chain!r}"}
         try:
             message = p["message"]
             addr = p.get("address")
             pkey = p.get("public_key")
             if not isinstance(message, str) or not message:
                 raise chia.SageError("message must be a non-empty string")
+            if sign_type == "typed_data":
+                # Request-time shape check: the message must parse as a JSON
+                # object carrying the EIP-712 envelope keys. Full envelope
+                # validation happens again at execution (eip712_digest is
+                # the second layer).
+                try:
+                    typed = json.loads(message)
+                except (json.JSONDecodeError, TypeError):
+                    raise chia.SageError(
+                        "typed_data message must be a JSON string")
+                if not isinstance(typed, dict) or not all(
+                        k in typed for k in ("types", "primaryType",
+                                            "domain", "message")):
+                    raise chia.SageError(
+                        "typed_data message must be a JSON object with "
+                        "types/primaryType/domain/message")
             if addr and pkey:
                 raise chia.SageError(
                     "message_sign takes address OR public_key, not both")
@@ -4035,8 +4258,14 @@ class Daemon:
                     "message_sign needs address or public_key")
         except chia.SageError as e:
             return {"ok": False, "error": str(e)}
+        # Chia request-time guards (mainnet flag, seed, fee) — unchanged.
+        if chain in chia.NETWORKS:
+            err = self._req_tx_guards(p, p["chain"])
+            if err:
+                return err
         params = {"intent": "message_sign", "chain": p["chain"],
-                  "message": message, "purpose": p.get("purpose", "")}
+                  "message": message, "sign_type": sign_type,
+                  "purpose": p.get("purpose", "")}
         if addr:
             params["address"] = addr
         if pkey:
@@ -4349,7 +4578,7 @@ class Daemon:
                             "amount_mojos", "revocable", "nft_ids",
                             "coin_ids", "output_count", "max_coins",
                             "max_coin_amount", "addresses", "payments",
-                            "address", "public_key", "message"):
+                            "address", "public_key", "message", "sign_type"):
                     if p.get(key) is not None:
                         detail[key] = p[key]
                 entry.update(detail)
