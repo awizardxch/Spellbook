@@ -54,7 +54,15 @@ class DexError(Exception):
 
 
 #: 0x Swap API v2 base URL.
-ZEROX_BASE = "https://api.0x.org"
+#:
+#: Override with the ZEROX_BASE_URL environment variable to point at a
+#: Spellbook quote relay (e.g. https://spellbook.awizard.dev) instead of
+#: calling 0x directly. The relay holds the operator's 0x API key
+#: server-side and returns 0x-compatible quotes; the daemon still signs
+#: with its own seed — the relay never holds funds or signs.
+import os as _os
+
+ZEROX_BASE = _os.environ.get("ZEROX_BASE_URL", "https://api.0x.org")
 
 #: Uniswap Trading API base URL.
 UNISWAP_BASE = "https://trade-api.gateway.uniswap.org/v1"

@@ -917,72 +917,6 @@ async function discoverEvmNfts(
   return out;
 }
 
-/**
- * Discover fungible token contracts the wallet has received via Transfer
- * logs (recent window, no indexer key). Returns contracts NOT already in
- * the curated list. ERC-721s are excluded (handled by discoverEvmNfts).
- * Caps at 25 contracts. Never throws.
- */
-async function discoverEvmTokenContracts(
-  cfg: ChainConfig,
-  addresses: string[]
-): Promise<string[]> {
-  const out: string[] = [];
-  const seen = new Set<string>();
-  const known = new Set(
-    (cfg.tokens ?? []).map((t) => t.address.toLowerCase())
-  );
-  const TRANSFER_TOPIC =
-    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
-  const ERC721_IFACE = "0x01ffc9a7" + "80ac58cd".padStart(64, "0");
-  try {
-    const latest = await evmLatestBlock(cfg);
-    if (latest === null) return out;
-    const fromBlock = "0x" + Math.max(0, latest - 20000).toString(16);
-    for (const address of addresses) {
-      const padded = "0x" + abiPadAddress(address);
-      let logs: unknown[] = [];
-      try {
-        const json = (await fetchJson(cfg.rpcUrl as string, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            jsonrpc: "2.0",
-            id: 1,
-            method: "eth_getLogs",
-            params: [
-              {
-                fromBlock,
-                toBlock: "latest",
-                topics: [[TRANSFER_TOPIC, null, padded]],
-              },
-            ],
-          }),
-        })) as RpcResultItem;
-        if (Array.isArray(json.result)) logs = json.result as unknown[];
-      } catch {
-        continue;
-      }
-      for (const l of logs) {
-        const c = (l as { address?: unknown }).address;
-        if (typeof c !== "string") continue;
-        const lower = c.toLowerCase();
-        if (known.has(lower) || seen.has(lower)) continue;
-        seen.add(lower);
-        if (out.length >= 25) break;
-        // Skip ERC-721s (they're covered by NFT discovery).
-        const iface = await evmCall(cfg, c, ERC721_IFACE);
-        if (iface === "0x" + "0".repeat(63) + "1") continue;
-        out.push(c);
-      }
-      if (out.length >= 25) break;
-    }
-  } catch {
-    // best-effort
-  }
-  return out;
-}
-
 interface ChainAddresses {
   wallet: string;
   cfg: ChainConfig;
@@ -1083,12 +1017,7 @@ export async function GET(req: Request): Promise<NextResponse> {
       let tokens: TokenHolding[] = [];
       try {
         if (cfg.kind === "evm" && cfg.tokens && cfg.tokens.length > 0) {
-          const curated = cfg.tokens.map((t) => t.address);
-          // Autodiscover fungible tokens the wallet received (recent
-          // window). Merged with the curated list so new holdings show
-          // without a config change.
-          const discovered = await discoverEvmTokenContracts(cfg, slice);
-          const contracts = [...curated, ...discovered];
+          const contracts = cfg.tokens.map((t) => t.address);
           const [scan, prices] = await Promise.all([
             readEvmTokenBalances(cfg, slice, contracts),
             dexTokenPrices(cfg.networkId, contracts),
@@ -1102,8 +1031,6 @@ export async function GET(req: Request): Promise<NextResponse> {
               qty = qty === null ? q : addDecimalStrings(qty as string, q);
             });
             if (!qty) return;
-            // Dust filter: only show balances over 0.01 tokens.
-            if (parseFloat(qty) <= 0.01) return;
             const price = prices.get(cLower);
             const onChainNameOk = meta.name !== "Unknown token";
             rows.push({
