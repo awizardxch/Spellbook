@@ -375,11 +375,15 @@ class AgentClient(_BaseClient):
             chain, fee_mojos, purpose, payments=payments))
 
     def message_sign(self, *, chain: str, message: str, address: str = "",
-                     public_key: str = "", purpose: str = "") -> dict:
+                     public_key: str = "", purpose: str = "",
+                     sign_type: str = "plain") -> dict:
         """Queue signing a message (off-chain). Always requires human
         approval — a signature is a capability even with no funds moving.
-        Pass address OR public_key."""
-        params = self._tx_params(chain, 0, purpose, message=message)
+        Pass address OR public_key. sign_type: "plain" (Chia/Solana),
+        "personal" (EIP-191) or "typed_data" (EIP-712) on EVM chains.
+        For typed_data, message is the JSON envelope string."""
+        params = self._tx_params(chain, 0, purpose, message=message,
+                                 sign_type=sign_type)
         if address:
             params["address"] = address
         if public_key:

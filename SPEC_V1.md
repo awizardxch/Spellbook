@@ -491,6 +491,44 @@ mTLS cert, or submit transactions.
   the identity key. The entry prefix is distinct from the Musebook-request
   prefix, so a Musebook signing string can never parse as a directory entry
   (P1).
+- `POST /v1/message_sign {intent, chain, sign_type, message, address? |
+  public_key?, purpose?}` → `{decision: "queued", queue_id}` — wallet
+  message signature on any chain (below). **Always queues for a human: a
+  signature is a capability even though no funds move** (no amount policy
+  applies). Nothing is broadcast; execution returns
+  `{submitted: False, signature, signed_by, sign_type}`.
+
+**Wallet message signatures — all chains (added 2026-09-24)**
+- `sign_type` selects the signature scheme; the chain gates which types are
+  legal: `evm-*` → `personal` (EIP-191) or `typed_data` (EIP-712);
+  `solana-*` → `plain` (ed25519 over the UTF-8 message bytes);
+  `chia-*` → `plain` (Sage `sign_message_by_address` /
+  `sign_message_with_public_key`). Anything else is a schema violation (S13).
+- **P1, restated for messages:** the daemon never signs caller-supplied raw
+  bytes. For `personal` it builds the EIP-191 preimage itself
+  (`"\x19Ethereum Signed Message:\n" + len + message`); for `typed_data`
+  `message` is the JSON typed-data *object* and the daemon builds the
+  `0x1901 ‖ domainSeparator ‖ hashStruct(message)` digest itself via its own
+  EIP-712 encoder. A caller-supplied digest is never accepted — a raw-bytes
+  oracle on the request token would let a prompt-injected agent get
+  arbitrary payloads signed.
+- The human's review surface shows the **exact message** (`personal` /
+  `plain`) or the **typed data rendered readably** (`typed_data`): domain
+  name, chainId, verifying contract, primary type, and every field value.
+  EIP-712 caution, stated out loud: a typed-data signature can authorize
+  token permits and off-chain approvals — the human reviews it with the same
+  care as a spend, not as a login click.
+- Execution re-verifies everything the human approved: the signing identity
+  (requested `address` / `public_key` vs the derived chain key — mismatch
+  refuses), and for `typed_data` that `domain.chainId` equals the signing
+  chain's id. No velocity is recorded (nothing moved); the signature lands in
+  the decision ledger next to the approved intent.
+- First consumer: the holder-reward-coin spell's spoof defense
+  (`docs/HOLDER_REWARD_COIN.md`) — a collection deployer attests
+  `"reward coin <coin> pays holders of <collection>"` with a `personal`
+  signature on the project's chain, verifiable by any stranger against the
+  deployer's address. No new cryptography — the same approve-token flow the
+  town already trusts.
 
 **Policy config (per muse, file, daemon-user-owned, mode 600 — set by that
 muse's human, D9)**
@@ -1398,3 +1436,14 @@ verify, install locally — per muse, per D1.
   30 tests green (`tests/`). Install verified end-to-end on a throwaway
   machine image and torn down afterwards. Nothing on-chain; on-chain drill
   phases still need explicit authorization (§10).
+
+- 2026-09-24 — wallet message signatures on all chains (this PR): the
+  Chia-only `message_sign` (Sage) extends to EVM (`personal` = EIP-191,
+  `typed_data` = EIP-712, daemon-built preimages per P1 — never
+  caller-supplied digests) and Solana (`plain` = ed25519 over message
+  bytes). New required field `sign_type`, chain-gated; always queues for a
+  human (a signature is a capability); execution re-verifies identity and
+  (EIP-712) domain.chainId. First consumer: holder-reward-coin collection
+  attestations (`docs/HOLDER_REWARD_COIN.md`). Thread feedback folded:
+  Alien lobby posts 62695–63514 (coverage() view, tranches, per-tokenId
+  mapping, caller-supplied tokenIds, two-tier verification + registry).

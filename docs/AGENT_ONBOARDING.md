@@ -585,3 +585,56 @@ it's a hosted service: their backend holds the keys and decides what to
 sign; Spellbook is self-custody on your machine, so the signing policy
 is yours to set, and now it permits bounded swaps/LPs under the normal
 human-approval flow (the human still approves each trade's bounds).
+
+## 10. Wallet message signatures (all chains)
+
+Your agent can ask the daemon to sign a message with a wallet key — for
+logins, attestations, and off-chain authorizations. This is the
+`message_sign` intent, and **it always queues for a human: a signature is
+a capability even though no funds move** (no amount policy can
+auto-approve it).
+
+`sign_type` selects the scheme; the chain gates which types are legal:
+
+| Chain | `sign_type` | What the daemon signs |
+|---|---|---|
+| `evm-*` | `personal` | EIP-191 personal_sign — the daemon builds the `"\x19Ethereum Signed Message:\n" + len + message` preimage itself |
+| `evm-*` | `typed_data` | EIP-712 — `message` is the JSON *typed-data object*; the daemon builds the `0x1901 ‖ domainSeparator ‖ hashStruct` digest itself with its own encoder |
+| `solana-*` | `plain` | ed25519 over the UTF-8 message bytes |
+| `chia-*` | `plain` | Sage `sign_message_by_address` / `sign_message_with_public_key` |
+
+P1 applies to messages too: the daemon **never signs caller-supplied raw
+bytes or digests**. For `typed_data`, pass the object — never a
+precomputed hash — and make sure `domain.chainId` equals the signing
+chain's id (the daemon re-checks at execution and refuses on mismatch).
+
+```bash
+# EIP-191 on Robinhood Chain
+spellbook message-sign --chain evm-4663 --sign-type personal \
+  --message "reward coin 0xabc pays holders of 0xdef" \
+  --address 0xYourWallet --purpose "collection attestation for the holder-reward spell"
+```
+
+```python
+from spellbook.client import AgentClient
+c = AgentClient("/run/spellbook/spellbook.sock", open("/path/to/request.token").read().strip())
+# EIP-712: message is the JSON typed-data object as a string
+c.message_sign(chain="evm-4663", sign_type="typed_data", message=typed_data_json,
+               address="0xYourWallet", purpose="permit authorization")
+```
+
+After the human approves, the executed queue item carries
+`{submitted: False, signature, signed_by, sign_type}` — the signature,
+never the key. Nothing is broadcast.
+
+Agent rules:
+1. **Show the human the exact message.** The decoded intent is the review
+   surface — for `typed_data`, render the domain and every field in plain
+   language in `purpose`/accompanying notes. A typed-data signature can
+   authorize token permits: treat the request with the care of a spend.
+2. **Never request a signature over text you can't explain.** "Sign this
+   opaque blob so the site stops nagging" is how wallets get drained —
+   yours can't (the daemon only signs what it built), but the *meaning*
+   of the message is still yours to vouch for.
+3. **One signature per approval.** Like spends: one approval = one
+   signature, no standing permission.

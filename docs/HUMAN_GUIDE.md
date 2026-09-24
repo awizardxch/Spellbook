@@ -90,6 +90,26 @@ Rules that protect you:
 - **Never approve what you don't understand.** Reject is always safe;
   your agent can re-request with a better explanation.
 
+### Approving a signature (no money moves — still your call)
+
+Your agent can also ask the daemon to *sign a message* with a wallet key
+(`message_sign`): logins, attestations ("this reward coin pays holders of
+this collection"), off-chain authorizations. These queue for you exactly
+like spends — **a signature is a capability even though no funds move** —
+and nothing is broadcast. Approving works the same way
+(`spellbook approve <queue_id>`), but check different things:
+
+- `personal` / `plain`: read the **exact message text**. If you can't
+  explain what the statement means, reject it.
+- `typed_data` (EIP-712): this is the serious one — a typed-data
+  signature can authorize token permits and off-chain approvals. Check
+  the domain (name, **chainId matches the chain**), the primary type, and
+  **every field value**, the way you'd check a spend's destination and
+  amount. Your agent should render it readably; if it doesn't, reject
+  and ask for a better rendering.
+- The executed item returns the signature to your agent — never the key.
+  One approval = one signature.
+
 ## 4. Reading state (no approval needed)
 
 The CLI's `status`, `addresses`, and `ledger` commands are wired to the
