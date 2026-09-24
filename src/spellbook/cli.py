@@ -603,7 +603,9 @@ def main(argv=None):
     dsw.add_argument("--min-buy-amount-wei", type=int, required=True,
                      help="execution refuses below this")
     dsw.add_argument("--max-slippage-bps", type=int, default=50)
-    dsw.add_argument("--deadline-sec", type=int, default=None)
+    dsw.add_argument("--deadline-sec", type=int, default=None,
+                     help="ABSOLUTE unix timestamp (not seconds-from-now); "
+                     "execution refuses past it")
     dsw.add_argument("--purpose", default="")
 
     dlp = sub.add_parser("dex-lp-add",
@@ -623,7 +625,9 @@ def main(argv=None):
                      help="v3 fee tier: 100/500/3000/10000")
     dlp.add_argument("--tick-lower", type=int, default=None)
     dlp.add_argument("--tick-upper", type=int, default=None)
-    dlp.add_argument("--deadline-sec", type=int, default=None)
+    dlp.add_argument("--deadline-sec", type=int, default=None,
+                     help="ABSOLUTE unix timestamp (not seconds-from-now); "
+                     "execution refuses past it")
     dlp.add_argument("--purpose", default="")
 
     apv = sub.add_parser("approve")

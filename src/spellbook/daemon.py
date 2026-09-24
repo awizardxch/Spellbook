@@ -127,6 +127,22 @@ LP_ADD_FIELDS = {"intent", "chain", "protocol", "router", "token_a", "token_b",
                  "amount_b_min_wei", "fee", "tick_lower", "tick_upper",
                  "purpose", "deadline_sec"}
 
+# EVM gas-price headroom, in basis points over the node's quoted price.
+# Signing is legacy type-0 (see evm.py): on EIP-1559 chains the node reads
+# the legacy gasPrice as maxFeePerGas and rejects the submission when the
+# block base fee lands above it ("max fee per gas less than block base
+# fee"). A quote taken seconds before submission can already be stale, so
+# every EVM submission goes through _evm_gas_price() below. 25% headroom
+# absorbs normal base-fee movement. Note the cost is real: a legacy tx on
+# a 1559 chain pays its full gasPrice (base fee + the rest as tip to the
+# block producer), so the bump is kept modest on purpose.
+EVM_GAS_PRICE_BUMP_BPS = 2500
+
+
+def _evm_gas_price(rpc) -> int:
+    """Node gas price plus headroom — the single choke point for EVM submissions."""
+    return rpc.gas_price_wei() * (10_000 + EVM_GAS_PRICE_BUMP_BPS) // 10_000
+
 # Wallet-local metadata routes: direct (no queue, no chain, no funds).
 # Each has an explicit schema — S13 rejects anything else.
 OFFER_IMPORT_FIELDS = {"intent", "chain", "offer"}
@@ -766,7 +782,7 @@ class Daemon:
                         evm.TRANSFER_GAS_LIMIT)
         signed = evm.sign_legacy_transfer(priv, info["chain_id"],
                                           rpc.nonce(sender), dest, amount,
-                                          rpc.gas_price_wei(), gas_limit)
+                                          _evm_gas_price(rpc), gas_limit)
         # The approved intent, re-checked against the signed tx's fields.
         # Explicit checks, not assert: this module must stay fail-closed
         # even under `python -O` (which strips assert statements).
@@ -917,7 +933,7 @@ class Daemon:
              "max_slippage_bps": params["max_slippage_bps"]},
             quote)
         nonce = rpc.nonce(sender)
-        gas_price = rpc.gas_price_wei()
+        gas_price = _evm_gas_price(rpc)
         approve_tx = None
         if plan["needs_approval"]:
             approve_tx, nonce = self._evm_ensure_allowance(
@@ -968,7 +984,7 @@ class Daemon:
                 t0, t1, params["fee"], params["tick_lower"],
                 params["tick_upper"], a0, a1, m0, m1, sender, call_deadline)
         nonce = rpc.nonce(sender)
-        gas_price = rpc.gas_price_wei()
+        gas_price = _evm_gas_price(rpc)
         approve_txs = []
         for tok, amt in ((tok_a, amt_a), (tok_b, amt_b)):
             ah, nonce = self._evm_ensure_allowance(

@@ -404,3 +404,20 @@ def test_serve_survives_broken_pipe(tmp_path):
     rpc({"route": "ping"})  # server-side BrokenPipeError; must not kill serve
     resp = rpc({"route": "ping"})  # daemon must still be answering
     assert resp == {"ok": True, "n": 2}
+
+
+def test_evm_gas_price_applies_headroom():
+    """Every EVM submission must price gas above the node's quote.
+
+    Regression test for the 2026-09-24 Robinhood mainnet failures: the
+    daemon signed legacy txs at exactly eth_gasPrice and the node rejected
+    both submissions with "max fee per gas less than block base fee".
+    """
+    from spellbook import daemon as daemon_mod
+
+    class _R:
+        def gas_price_wei(self):
+            return 100
+
+    assert daemon_mod.EVM_GAS_PRICE_BUMP_BPS == 2500
+    assert daemon_mod._evm_gas_price(_R()) == 125
