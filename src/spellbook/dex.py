@@ -39,10 +39,16 @@ All amounts are integers in base units (wei etc.). All addresses are
 checksummed-or-lowercase hex; they are validated, never assumed.
 """
 
+import http.client
 import json
+import ssl
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
+
+from spellbook import __version__
 
 # ---------------------------------------------------------------------------
 # errors + venue metadata
@@ -242,24 +248,86 @@ def _require_positive_int(n, what: str) -> int:
     return n
 
 
+#: Sent on every DEX call. Python's default "Python-urllib/3.x" is refused
+#: or throttled by some edges, and a named client is easier to find in a
+#: venue's logs.
+USER_AGENT = f"spellbook/{__version__} (+https://github.com/awizardxch/Spellbook)"
+
+#: Backoff between attempts when a DEX call fails before the venue answered
+#: (connection reset, empty reply, timeout) or with a gateway error. Every
+#: DEX call in this module is read-only — quotes, prices, unsigned-tx
+#: building — so retrying one never signs, broadcasts or moves funds, and
+#: the quote that finally arrives is the one validated before signing.
+#: Spread over ~40s rather than a burst: drops tend to come in bursts on
+#: flaky egress, and a quick burst of retries all lands inside one.
+RETRY_DELAYS_SEC = (2, 5, 10, 20)
+
+#: Wall-clock cap across all attempts, so a dead venue fails in bounded time.
+RETRY_BUDGET_SEC = 90
+
+#: Gateway statuses: the venue's own upstream failed, the request was fine.
+_RETRYABLE_HTTP = frozenset({502, 503, 504})
+
+
+def _is_transient(e: BaseException) -> bool:
+    """True when the request or its response never completed — the venue
+    never gave an answer, so asking again is the only way to get one."""
+    if isinstance(e, urllib.error.HTTPError):
+        return e.code in _RETRYABLE_HTTP
+    if isinstance(e, urllib.error.URLError):
+        if not isinstance(e.reason, BaseException):
+            return False  # e.g. a malformed URL — config, not network
+        e = e.reason
+    if isinstance(e, ssl.SSLCertVerificationError):
+        return False  # a bad certificate is not a blip
+    return isinstance(e, (http.client.RemoteDisconnected,
+                          http.client.IncompleteRead,
+                          http.client.BadStatusLine,
+                          ConnectionError, TimeoutError, OSError))
+
+
 def _http_json(method: str, url: str, headers: dict, body: dict | None = None,
                timeout: int = 25) -> dict:
+    """One DEX API call, retried only on connection-level/gateway failures.
+
+    Each attempt carries ``X-Request-Id: <id>-<attempt>`` so a failure can
+    be matched against the venue's logs; the id is in every error message.
+    A definite answer from the venue (4xx, other 5xx, a parsed body) is
+    never retried.
+    """
     data = None
+    base_headers = dict(headers, **{"User-Agent": USER_AGENT})
     if body is not None:
         data = json.dumps(body).encode()
-        headers = dict(headers, **{"Content-Type": "application/json"})
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.load(r)
-    except urllib.error.HTTPError as e:
+        base_headers["Content-Type"] = "application/json"
+    request_id = uuid.uuid4().hex[:16]
+    started = time.monotonic()
+    attempt = 0
+    while True:
+        attempt += 1
+        rid = f"{request_id}-{attempt}"
+        req = urllib.request.Request(
+            url, data=data, headers=dict(base_headers, **{"X-Request-Id": rid}),
+            method=method)
         try:
-            detail = e.read().decode()[:500]
-        except Exception:
-            detail = ""
-        raise DexError(f"DEX API HTTP {e.code}: {detail}")
-    except Exception as e:
-        raise DexError(f"DEX API unreachable ({method} {url}): {e}")
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.load(r)
+        except Exception as e:
+            delays = RETRY_DELAYS_SEC
+            if attempt <= len(delays) and _is_transient(e):
+                delay = delays[attempt - 1]
+                if time.monotonic() - started + delay < RETRY_BUDGET_SEC:
+                    time.sleep(delay)
+                    continue
+            if isinstance(e, urllib.error.HTTPError):
+                try:
+                    detail = e.read().decode()[:500]
+                except Exception:
+                    detail = ""
+                raise DexError(f"DEX API HTTP {e.code} (request id {rid}, "
+                               f"attempt {attempt}): {detail}")
+            raise DexError(f"DEX API unreachable ({method} {url}; request id "
+                           f"{rid}, attempt {attempt}): {e}")
 
 
 def _norm_quote(venue: str, chain_id: int, sell_token: str, buy_token: str,
