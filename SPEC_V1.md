@@ -425,6 +425,26 @@ a txid mismatch is UNKNOWN fate, never safe-to-retry:
   coin id is the ledger reference.
 - The created coin id (CAT) / new coin id (NFT) is the stable `tx_hash`
   ledger reference, same as the XCH Sage path.
+- **Approve round-trip and the ledger as source of truth (added 2026-09-24).**
+  `queue_approve` executes synchronously in the daemon: firm quote fetch
+  (with retry budget), local signing, broadcast, and up-to-90s receipt wait.
+  The human's client therefore waits up to ~3 minutes for the outcome
+  (`APPROVE_TIMEOUT` in `client.py`) — a transport timeout on the client
+  side does NOT mean the spend failed; the daemon keeps executing. After
+  any client-side timeout, never re-approve: read the decision ledger
+  instead and find the terminal row for the intent. Terminal decisions are
+  `approved-by-human` (success — the chain reference is in the `sighash`
+  column), `approved-submit-failed:<reason>` (never broadcast; approval
+  consumed, safe to re-request), and `approved-submit-unknown:<reason>`
+  (broadcast, fate unknown — reconcile the chain reference on-chain first,
+  never blind-retry). A bare `executing` row with no terminal row means the
+  attempt is still in flight or the daemon died mid-execution — see
+  `unresolved_executions()`.
+- **Ledger `sighash` column semantics (clarified 2026-09-24).** The name is
+  historical (Chia sighash). It carries the executed spend's chain
+  reference: EVM transaction hash, Solana signature, Chia/XCH coin id, or
+  CAT/NFT coin id. On `approved-by-human` rows it is always populated —
+  that value is what the human reconciles against the chain.
 
 Policy is unchanged and already asset-keyed: `(chain, asset)` caps,
 thresholds, allowlists, and 24h velocity all work per CAT asset id and

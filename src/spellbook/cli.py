@@ -298,6 +298,10 @@ def cmd_dex_lp_add(a, client: AgentClient):
 
 
 def cmd_approve(a, client: HumanClient):
+    import sys
+    print("executing — this can take up to ~2 minutes (firm quote, "
+          "broadcast, confirmation wait); do not re-approve if it seems "
+          "slow, check `spellbook ledger` instead.", file=sys.stderr)
     _show(client.approve(a.queue_id))
 
 
