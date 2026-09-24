@@ -901,8 +901,10 @@ class Daemon:
                 f"venue {venue!r} does not serve chain id "
                 f"{info['chain_id']} — refusing")
         env_key = dex_mod.VENUE_ENV_KEYS[venue]
-        api_key = os.environ.get(env_key)
-        if not api_key:
+        api_key = os.environ.get(env_key) or ""
+        # In relay mode (Cast site via the shim) the relay holds the API key
+        # server-side, so a blank local key is fine — it is ignored.
+        if not api_key and not dex_mod.relay_mode():
             raise evm.EvmError(
                 f"{env_key} not in the daemon environment — cannot fetch "
                 "a firm quote, refusing")

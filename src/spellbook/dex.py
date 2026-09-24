@@ -68,6 +68,13 @@ class DexError(Exception):
 #: with its own seed — the relay never holds funds or signs.
 import os as _os
 
+
+def relay_mode() -> bool:
+    """Quote traffic is routed to a quote relay (e.g. the Cast site via the
+    local shim) instead of api.0x.org directly. The relay holds the API key
+    server-side, so the local key may be blank — it is ignored."""
+    return bool(_os.environ.get("ZEROX_BASE_URL"))
+
 ZEROX_BASE = _os.environ.get("ZEROX_BASE_URL", "https://api.0x.org")
 
 #: Uniswap Trading API base URL.
@@ -367,9 +374,11 @@ class ZeroExClient:
     """
 
     def __init__(self, api_key: str):
-        if not api_key:
+        if not api_key and not relay_mode():
             raise DexError("0x API key required (dashboard.0x.org, free)")
-        self.api_key = api_key
+        # In relay mode the key value is ignored — the relay (Cast site)
+        # holds the real key server-side — so a blank key is fine.
+        self.api_key = api_key or ""
 
     def _headers(self) -> dict:
         return {"0x-api-key": self.api_key, "0x-version": "v2"}
@@ -859,7 +868,7 @@ __all__ = [
     "NATIVE_SENTINEL", "NATIVE_ZERO",
     "VENUE_MATCHA", "VENUE_UNISWAP", "KNOWN_VENUES", "VENUE_ALIASES",
     "VENUE_CHAINS", "VENUE_ENV_KEYS", "DEFAULT_RECOMMENDED_VENUES",
-    "normalize_venue", "venue_serves_chain",
+    "normalize_venue", "venue_serves_chain", "relay_mode",
     "ZeroExClient", "UniswapClient",
     "build_approve_calldata", "build_allowance_calldata", "decode_allowance",
     "build_v2_swap_calldata", "build_v2_add_liquidity_calldata",
