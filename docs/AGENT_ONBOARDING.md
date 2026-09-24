@@ -163,7 +163,12 @@ two after startup.
   `https://testnet11-faucet.chia.net` (community alt:
   `https://txchfaucet.com`). Addresses are `txch1…`.
 - **Chia mainnet** — gated, not enabled by default. Addresses `xch1…`.
-- **EVM** — testnets now (e.g. Robinhood Chain testnet 46630), mainnet
+- **EVM** — testnets now. **Robinhood Chain testnet (46630)** — the
+  drill network (SPEC §10 step 9) — RPC
+  `https://rpc.testnet.chain.robinhood.com`, faucet
+  `https://faucet.testnet.chain.robinhood.com`, explorer
+  `https://explorer.testnet.chain.robinhood.com`. Faucet funds can take
+  up to ~30 min to arrive; testnet funds are worthless. Mainnet (4663) is
   gated behind the same authorization as Chia mainnet.
 - **Solana** — **devnet is the default** (public HTTPS JSON-RPC, no relay —
   see §5), mainnet-beta gated behind the same authorization as every other
