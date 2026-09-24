@@ -8,8 +8,8 @@ only if they choose to:
 - **matcha** — the 0x Swap API v2, the engine behind matcha.xyz.
   ``GET /swap/allowance-holder/quote`` and ``/swap/permit2/quote`` return
   firm quotes with ready-to-sign calldata. Without a key of the agent's
-  own, quotes go through the operator's 0x-compatible relay
-  (``SPELLBOOK_QUOTE_RELAY``), which holds the key server-side; with
+  own, quotes go through Cast's 0x-compatible routes
+  (``OPERATOR_QUOTE_RELAY``), which hold the key server-side; with
   ``ZERO_EX_API_KEY`` set they go to ``https://api.0x.org`` directly.
   Chain via ``chainId`` query param.
 - **Uniswap** — ``https://trade-api.gateway.uniswap.org/v1``.
@@ -73,23 +73,25 @@ import os as _os
 #: 0x Swap API v2, called directly when the agent brings its own key.
 ZEROX_DIRECT = "https://api.0x.org"
 
-#: The operator's 0x-compatible quote relay (web/app/swap/allowance-holder/*).
-#: It holds the 0x API key server-side, adds no fee, and returns 0x's
-#: response verbatim. matcha quotes go here when the agent has no key of
+#: The operator's 0x-compatible quote relay: Cast's
+#: /swap/allowance-holder/{price,quote}, the 0x Swap API v2 shape. Cast
+#: holds the 0x API key server-side and adds its platform fee inside the
+#: quote (so the quoted buyAmount — what the human's bounds are checked
+#: against — is already net of it). matcha quotes go here when the agent has no key of
 #: its own — agents are never asked for a key they don't want to manage.
 #: The daemon still signs with its own seed; the relay never holds funds
 #: or signs.
-SPELLBOOK_QUOTE_RELAY = "https://spellbook.awizard.dev"
+OPERATOR_QUOTE_RELAY = "https://cast.awizard.dev"
 
 
 def zerox_base(api_key: str | None = None) -> str:
     """Where matcha quotes go: ZEROX_BASE_URL if set (e.g. a local shim or
     another relay); else api.0x.org with the agent's own key; else the
-    operator's relay, which holds the key server-side."""
+    operator's relay (Cast), which holds the key server-side."""
     override = _os.environ.get("ZEROX_BASE_URL")
     if override:
         return override.rstrip("/")
-    return ZEROX_DIRECT if api_key else SPELLBOOK_QUOTE_RELAY
+    return ZEROX_DIRECT if api_key else OPERATOR_QUOTE_RELAY
 
 
 def relay_mode() -> bool:
@@ -420,7 +422,7 @@ class ZeroExClient:
     """
 
     def __init__(self, api_key: str | None = None):
-        # No key is fine: quotes then go to the operator's relay, which
+        # No key is fine: quotes then go to the operator's relay (Cast), which
         # holds the key server-side. A key of the agent's own goes direct.
         self.api_key = api_key or ""
         self.base = zerox_base(self.api_key)
@@ -496,7 +498,9 @@ class ZeroExClient:
         # Allowance target: NEVER hardcode. Read it from the quote.
         allowance_target = (
             raw.get("allowanceTarget")
-            or (raw.get("issues") or {}).get("allowance", {}).get("spender")
+            # issues.allowance is null when no approval is needed (native
+            # sell, or allowance already enough) — not a missing key
+            or ((raw.get("issues") or {}).get("allowance") or {}).get("spender")
         )
         if allowance_target and not _is_address(allowance_target):
             raise DexError(f"0x returned bad allowanceTarget: {allowance_target!r}")
@@ -1084,7 +1088,7 @@ def compare_quotes(quotes: list[dict]) -> dict:
 
 __all__ = [
     "DexError",
-    "ZEROX_BASE", "ZEROX_DIRECT", "SPELLBOOK_QUOTE_RELAY", "zerox_base",
+    "ZEROX_BASE", "ZEROX_DIRECT", "OPERATOR_QUOTE_RELAY", "zerox_base",
     "UNISWAP_BASE", "CAST_BASE",
     "ZEROX_CHAINS", "UNISWAP_CHAINS", "CAST_CHAINS",
     "NATIVE_SENTINEL", "NATIVE_ZERO",

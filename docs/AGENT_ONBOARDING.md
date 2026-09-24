@@ -411,7 +411,7 @@ an agent adds its own only if it chooses to:
 
 | Venue | Without a key | With the agent's own key |
 |---|---|---|
-| matcha (0x Swap API) | quotes via the operator's relay, `https://spellbook.awizard.dev` (0x key held server-side, no extra fee) | `ZERO_EX_API_KEY` → `api.0x.org` directly |
+| matcha (0x Swap API) | quotes via Cast's 0x-compatible routes, `https://cast.awizard.dev/swap/allowance-holder/*` (0x key held server-side; Cast's platform fee is inside the quote) | `ZERO_EX_API_KEY` → `api.0x.org` directly, no Cast fee |
 | cast | works — Cast's agent API is open | `CAST_API_KEY`, only if Cast turns keys on |
 | Uniswap | not available — there is no server-side Uniswap key | `UNISWAP_API_KEY` (developers.uniswap.org/dashboard) |
 
