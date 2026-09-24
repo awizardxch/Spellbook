@@ -38,6 +38,12 @@
 set -euo pipefail
 
 REPO="https://github.com/awizardxch/Spellbook"
+# Repo-vendored copy of the signed release artifacts (releases/<tag>/ in this
+# repo). The installer tries the GitHub Release asset URLs first; the vendored
+# copy is the fallback so upgrades keep working even if release-asset upload
+# is unavailable. Either way the tarball is verified by sha256 AND by the
+# pinned release-key signature before anything is installed.
+VENDORED_BASE="https://raw.githubusercontent.com/awizardxch/Spellbook/main/releases"
 SAGE_REPO="${SAGE_REPO:-https://github.com/xch-dev/sage}"
 SAGE_COMMIT="f2ec89dd59d07227bed657bc268fc32ce97551f6"   # SPEC §3/D4
 SPELLBOOK_USER="spellbook"
@@ -148,9 +154,17 @@ if [ -n "$FROM_DIR" ]; then
   [ -f "$SRC/pyproject.toml" ] || fail "$SRC does not look like the Spellbook source tree"
 else
   log "fetching release ${TAG} ..."
-  curl -fsSL -o "spellbook-${TAG}.tar.gz"     "${REPO}/releases/download/${TAG}/spellbook-${TAG}.tar.gz"
-  curl -fsSL -o "spellbook-${TAG}.sha256"     "${REPO}/releases/download/${TAG}/spellbook-${TAG}.tar.gz.sha256"
-  curl -fsSL -o "spellbook-${TAG}.tar.gz.asc" "${REPO}/releases/download/${TAG}/spellbook-${TAG}.tar.gz.asc"
+  fetch_release_file() {  # $1 = local filename, $2 = remote asset filename
+    if curl -fsSL -o "$1" "${REPO}/releases/download/${TAG}/$2" 2>/dev/null; then
+      return 0
+    fi
+    warn "release asset $2 not on releases/download — trying repo-vendored copy"
+    curl -fsSL -o "$1" "${VENDORED_BASE}/${TAG}/$2" \
+      || fail "could not fetch $2 (tried GitHub Release assets and repo-vendored releases/${TAG}/)"
+  }
+  fetch_release_file "spellbook-${TAG}.tar.gz"     "spellbook-${TAG}.tar.gz"
+  fetch_release_file "spellbook-${TAG}.sha256"     "spellbook-${TAG}.tar.gz.sha256"
+  fetch_release_file "spellbook-${TAG}.tar.gz.asc" "spellbook-${TAG}.tar.gz.asc"
 
   log "verifying checksum ..."
   sha256sum -c "spellbook-${TAG}.sha256" || fail "checksum mismatch — refusing to install"
