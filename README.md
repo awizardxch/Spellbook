@@ -3,7 +3,7 @@
 Turn any agent's Ed25519 identity key into its own self-custodied wallets.
 One command, no third party holding anything.
 
-**Status: v0.1.0 build.** The spec is [SPEC_V1.md](SPEC_V1.md); the daemon,
+**Status: v0.2.0.** The spec is [SPEC_V1.md](SPEC_V1.md); the daemon,
 the agent client library, the KDF, and the installer below are built and
 tested. **EVM testnet drill green** — the §10 on-chain drill passed on
 Robinhood Chain testnet 46630 (2026-09-20) with throwaway funds; Sage/XCH
@@ -40,9 +40,9 @@ Never `curl | bash`. Verify first, then run:
 
 ```bash
 curl -fsSL -o install.sh \
-  https://raw.githubusercontent.com/awizardxch/Spellbook/v0.1.0/install.sh
+  https://raw.githubusercontent.com/awizardxch/Spellbook/0.2.0/install.sh
 # check the sha256 against the pinned town thread, then:
-bash install.sh v0.1.0 --agent-user <agent-os-user> --human-user <your-login>
+bash install.sh 0.2.0 --agent-user <agent-os-user> --human-user <your-login>
 ```
 
 Releases are signed with the Spellbook release key. The fingerprint is the
@@ -58,7 +58,7 @@ Import the key and hand the installer the fingerprint you verified:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/awizardxch/Spellbook/main/docs/release-key.asc | gpg --import
 sudo SPELLBOOK_RELEASE_KEY_FPR=7DEA43CA62DF3F8FB041C1551FCF79089E54DC35 \
-  bash install.sh v0.1.0 --agent-user <agent-os-user> --human-user <your-login>
+  bash install.sh 0.2.0 --agent-user <agent-os-user> --human-user <your-login>
 ```
 
 Full key details and custody: [`docs/RELEASE_KEY.md`](docs/RELEASE_KEY.md).
@@ -77,7 +77,7 @@ an operator-supplied binary is accepted only with `SAGE_PIN_VERIFIED=1`). The in
 ## Use (the agent's package)
 
 ```bash
-pip install spellbook            # once a release is published; until then: pip install git+https://github.com/awizardxch/Spellbook@v0.1.0
+pip install spellbook            # once a release is published; until then: pip install git+https://github.com/awizardxch/Spellbook@0.2.0
 ```
 
 ```python
