@@ -573,6 +573,47 @@ holds a single asset.
    one execution attempt (approve + swap/LP = the single execution);
    unknown fate is never retried. Do not work around this by hand-rolling
    a signer outside the daemon.
+6. **`--deadline-sec` is an absolute unix timestamp**, not
+   seconds-from-now. Passing `3600` means January 1970 — the daemon
+   refuses the intent as expired on the spot. Compute it as
+   `$(date +%s) + seconds`.
+7. **Gas needs headroom.** The daemon signs legacy type-0 txs; on
+   EIP-1559 chains the node rejects a submission whose gas price lands
+   below the block base fee (`max fee per gas less than block base
+   fee`). Every EVM submission prices through the buffered
+   `_evm_gas_price()` (`EVM_GAS_PRICE_BUMP_BPS`) — never bypass it with
+   a raw `eth_gasPrice`.
+
+### The mainnet swap runbook — decided 2026-09-24
+
+First mainnet swap ($5 ETH → PORCH on Robinhood Chain 4663) set the
+operational shape; Speechless decided it explicitly:
+
+- **No dashboard approvals.** The dashboard is read-only by design —
+  it cannot approve, sign, or broadcast, and no approve button will be
+  added. The model is **agentic swaps with human delegation**:
+  the agent prepares (indicative quote → bounded queue intent), the
+  human approves **in chat**, and the agent conveys that approval via
+  the approve-token path as the human's delegate. The chat message is
+  the authorization — the agent never approves its own action. Note the
+  conveyance in the intent's purpose (e.g. `chat-approved 2026-09-24`)
+  so the ledger shows whose decision it was.
+- **The production seed never leaves the local daemon.**
+  Cloud/deployed agents do not need it and do not receive it. The
+  quote relay (`ZEROX_BASE_URL` + `ZERO_EX_API_KEY` in the *daemon's*
+  environment) supplies routing and quotes only — it never signs,
+  never holds funds, never sees the seed. Never place a production
+  seed in a website-login vault or a cloud deployment.
+- **Mainnet config:** `evm-4663` enabled with its mainnet RPC,
+  `mainnet_submit_enabled: true`, relay env vars on the daemon.
+- **Flow:** indicative quote → queue bounded intent → human chat
+  approval → delegate conveys → one execution attempt → receipt
+  verification → daemon shutdown (on-demand only; never idle).
+- **Unknown fate is never retried.** A broadcast whose receipt never
+  arrives is reconciled read-only from chain state. A failure *before*
+  broadcast (e.g. the node rejecting an underpriced submission) spends
+  nothing but still consumes the approval — the human re-requests if
+  they still want it.
 
 ### The v2 execution decision — decided 2026-09-23
 
