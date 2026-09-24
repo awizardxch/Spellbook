@@ -239,7 +239,7 @@ def test_daemon_swaps_through_cast_without_a_key(monkeypatch):
 @pytest.mark.parametrize("venue,relay,ok", [
     ("cast", False, True),      # Cast's key is optional
     ("matcha", True, True),     # relay (ZEROX_BASE_URL) holds the 0x key
-    ("matcha", False, False),   # direct 0x needs a key
+    ("matcha", False, True),    # operator relay holds the 0x key
     ("uniswap", True, False),   # the relay only stands in for 0x
 ])
 def test_daemon_blank_key_rules(monkeypatch, venue, relay, ok):
@@ -272,3 +272,23 @@ def test_daemon_blank_key_rules(monkeypatch, venue, relay, ok):
     else:
         with pytest.raises(evm.EvmError, match="not in the daemon environment"):
             daemon_mod.Daemon._execute_evm_swap(fake, params)
+
+
+def test_uniswap_swap_without_key_is_refused_at_request_time(tmp_path, monkeypatch):
+    """Uniswap has no server-side key: refuse the request before a human
+    spends an approval on a swap that could never fetch its quote."""
+    from spellbook import evm
+    from test_dex import _daemon
+
+    monkeypatch.delenv("UNISWAP_API_KEY", raising=False)
+    d = _daemon(tmp_path, {"recommended_venues": ["matcha", "uniswap", "cast"]})
+    base = {"intent": "dex_swap", "chain": "evm-4663",
+            "sell_token": dex.NATIVE_SENTINEL, "buy_token": TOKEN,
+            "sell_amount_wei": 1000, "min_buy_amount_wei": 1,
+            "max_slippage_bps": 100}
+    with pytest.raises(evm.EvmError, match="needs UNISWAP_API_KEY"):
+        d._validate_dex_swap({**base, "venue": "uniswap"})
+    for venue in ("matcha", "cast"):  # keyless venues pass
+        assert d._validate_dex_swap({**base, "venue": venue})["venue"] == venue
+    monkeypatch.setenv("UNISWAP_API_KEY", "k")
+    assert d._validate_dex_swap({**base, "venue": "uniswap"})["venue"] == "uniswap"

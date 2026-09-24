@@ -1,18 +1,21 @@
 """DEX aggregation for the Spellbook wallet — quotes, calldata builders,
 and execution-time validation.
 
-Two quote venues (both free API keys, see docs/AGENT_ONBOARDING.md):
+Three quote venues (see docs/AGENT_ONBOARDING.md). Agents need no API
+key for matcha or cast — keys are held server-side — and bring their own
+only if they choose to:
 
 - **matcha** — the 0x Swap API v2, the engine behind matcha.xyz.
-  ``https://api.0x.org``. ``GET /swap/allowance-holder/quote`` and
-  ``/swap/permit2/quote`` return firm quotes with ready-to-sign calldata.
-  Header ``0x-api-key`` + ``0x-version: v2``. Chain via ``chainId`` query
-  param.
+  ``GET /swap/allowance-holder/quote`` and ``/swap/permit2/quote`` return
+  firm quotes with ready-to-sign calldata. Without a key of the agent's
+  own, quotes go through the operator's 0x-compatible relay
+  (``SPELLBOOK_QUOTE_RELAY``), which holds the key server-side; with
+  ``ZERO_EX_API_KEY`` set they go to ``https://api.0x.org`` directly.
+  Chain via ``chainId`` query param.
 - **Uniswap** — ``https://trade-api.gateway.uniswap.org/v1``.
   Flow: ``POST /check_approval`` -> ``POST /quote`` -> ``POST /swap``
   (unsigned tx). Header ``x-api-key``. ``X-Agent-Info`` attribution is
-  sent on every call.
-
+  sent on every call. No server-side key: needs ``UNISWAP_API_KEY``.
 - **cast** — Cast (``https://cast.awizard.dev``), aWizard's swap router
   over the 0x Swap API on Base and Robinhood Chain. No API key. Its
   agent API (``/api/agent/quote``) returns allowance-holder calldata plus
@@ -65,23 +68,38 @@ class DexError(Exception):
     """Anything the DEX layer refuses to do or cannot complete."""
 
 
-#: 0x Swap API v2 base URL.
-#:
-#: Override with the ZEROX_BASE_URL environment variable to point at a
-#: Spellbook quote relay (e.g. https://spellbook.awizard.dev) instead of
-#: calling 0x directly. The relay holds the operator's 0x API key
-#: server-side and returns 0x-compatible quotes; the daemon still signs
-#: with its own seed — the relay never holds funds or signs.
 import os as _os
+
+#: 0x Swap API v2, called directly when the agent brings its own key.
+ZEROX_DIRECT = "https://api.0x.org"
+
+#: The operator's 0x-compatible quote relay (web/app/swap/allowance-holder/*).
+#: It holds the 0x API key server-side, adds no fee, and returns 0x's
+#: response verbatim. matcha quotes go here when the agent has no key of
+#: its own — agents are never asked for a key they don't want to manage.
+#: The daemon still signs with its own seed; the relay never holds funds
+#: or signs.
+SPELLBOOK_QUOTE_RELAY = "https://spellbook.awizard.dev"
+
+
+def zerox_base(api_key: str | None = None) -> str:
+    """Where matcha quotes go: ZEROX_BASE_URL if set (e.g. a local shim or
+    another relay); else api.0x.org with the agent's own key; else the
+    operator's relay, which holds the key server-side."""
+    override = _os.environ.get("ZEROX_BASE_URL")
+    if override:
+        return override.rstrip("/")
+    return ZEROX_DIRECT if api_key else SPELLBOOK_QUOTE_RELAY
 
 
 def relay_mode() -> bool:
-    """Quote traffic is routed to a quote relay (e.g. the Cast site via the
-    local shim) instead of api.0x.org directly. The relay holds the API key
-    server-side, so the local key may be blank — it is ignored."""
+    """ZEROX_BASE_URL points quote traffic at a relay instead of 0x."""
     return bool(_os.environ.get("ZEROX_BASE_URL"))
 
-ZEROX_BASE = _os.environ.get("ZEROX_BASE_URL", "https://api.0x.org")
+
+#: Default 0x base for display/back-compat; ZeroExClient resolves its own
+#: per key via zerox_base().
+ZEROX_BASE = _os.environ.get("ZEROX_BASE_URL", ZEROX_DIRECT)
 
 #: Uniswap Trading API base URL.
 UNISWAP_BASE = "https://trade-api.gateway.uniswap.org/v1"
@@ -220,16 +238,19 @@ VENUE_CHAINS = {
 }
 
 #: API-key env var per venue (keys live in the daemon's environment,
-#: never in the repo).
+#: never in the repo). Only Uniswap needs one; for the others it is the
+#: agent's choice to bring its own.
 VENUE_ENV_KEYS = {
     VENUE_MATCHA: "ZERO_EX_API_KEY",
     VENUE_UNISWAP: "UNISWAP_API_KEY",
     VENUE_CAST: "CAST_API_KEY",
 }
 
-#: Venues whose API key is optional — the call works without one. Cast's
-#: agent API is open; CAST_API_KEY is only sent if the operator set one.
-VENUES_KEY_OPTIONAL = frozenset({VENUE_CAST})
+#: Venues whose API key is optional — the call works without one:
+#: matcha falls back to the operator's quote relay (key held server-side),
+#: and Cast's agent API is open (CAST_API_KEY only sent if set). Uniswap
+#: has no server-side key, so it still needs the agent's own.
+VENUES_KEY_OPTIONAL = frozenset({VENUE_MATCHA, VENUE_CAST})
 
 #: Recommended venues used when spellbook.json names no
 #: dex.recommended_venues. Advisory only — the human's per-transaction
@@ -398,19 +419,21 @@ class ZeroExClient:
     re-fetched at execution time, never stored and replayed.
     """
 
-    def __init__(self, api_key: str):
-        if not api_key and not relay_mode():
-            raise DexError("0x API key required (dashboard.0x.org, free)")
-        # In relay mode the key value is ignored — the relay (Cast site)
-        # holds the real key server-side — so a blank key is fine.
+    def __init__(self, api_key: str | None = None):
+        # No key is fine: quotes then go to the operator's relay, which
+        # holds the key server-side. A key of the agent's own goes direct.
         self.api_key = api_key or ""
+        self.base = zerox_base(self.api_key)
 
     def _headers(self) -> dict:
-        return {"0x-api-key": self.api_key, "0x-version": "v2"}
+        h = {"0x-version": "v2"}
+        if self.api_key:
+            h["0x-api-key"] = self.api_key
+        return h
 
     def _get(self, path: str, params: dict) -> dict:
         qs = urllib.parse.urlencode(params)
-        return _http_json("GET", f"{ZEROX_BASE}{path}?{qs}", self._headers())
+        return _http_json("GET", f"{self.base}{path}?{qs}", self._headers())
 
     def _check_chain(self, chain_id: int) -> int:
         if chain_id not in ZEROX_CHAINS:
@@ -1061,7 +1084,8 @@ def compare_quotes(quotes: list[dict]) -> dict:
 
 __all__ = [
     "DexError",
-    "ZEROX_BASE", "UNISWAP_BASE", "CAST_BASE",
+    "ZEROX_BASE", "ZEROX_DIRECT", "SPELLBOOK_QUOTE_RELAY", "zerox_base",
+    "UNISWAP_BASE", "CAST_BASE",
     "ZEROX_CHAINS", "UNISWAP_CHAINS", "CAST_CHAINS",
     "NATIVE_SENTINEL", "NATIVE_ZERO",
     "VENUE_MATCHA", "VENUE_UNISWAP", "VENUE_CAST", "KNOWN_VENUES",
