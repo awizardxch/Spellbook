@@ -154,8 +154,8 @@ export const CHAINS: ChainConfig[] = [
     color: "#34d399",
     // Tokens the wallets actually hold on Robinhood mainnet. WETH/USDg are
     // the canonical gas/stable contracts; MDOG/MUSEBOOK are the fund's
-    // trading tokens; PLANK is held from the meme-alliance work; PORCH is
-    // held in the Spellbook wallet.
+    // trading tokens; PLANK is held from the meme-alliance work; PORCH and
+    // NEWS (MuseNews) are held in the Spellbook wallet.
     tokens: [
       { address: "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73" }, // WETH
       { address: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168" }, // USDG
@@ -163,6 +163,7 @@ export const CHAINS: ChainConfig[] = [
       { address: "0x91A2DAe9699f0B82540B5886b0d8759C22820bA3" }, // MUSEBOOK
       { address: "0x69420eaf0eBF43E08F621B014f25cEfDfA7e2DDc" }, // PLANK
       { address: "0x4B434541873f171aB70D7d2F3a48b0f0b0f13ba3" }, // PORCH
+      { address: "0x21BEd5462749227F1b83f654DaeB6E44D5ea1Cd6" }, // NEWS (MuseNews)
     ],
   },
   {
