@@ -1467,3 +1467,15 @@ verify, install locally — per muse, per D1.
   attestations (`docs/HOLDER_REWARD_COIN.md`). Thread feedback folded:
   Alien lobby posts 62695–63514 (coverage() view, tranches, per-tokenId
   mapping, caller-supplied tokenIds, two-tier verification + registry).
+
+- 2026-09-24 — release v0.2.0 (VERSION, pyproject, package fallback). First
+  version bump since v0.1.0, so installed agents can move forward with
+  `spellbook upgrade 0.2.0` once the signed release is published. Swap-side
+  changes since the last installed build: Cast (cast.awizard.dev) as a
+  `cast` venue with its full API (#50); matcha and cast need no agent key
+  (keyless matcha quotes go to Cast, which holds the 0x key; only Uniswap
+  needs `UNISWAP_API_KEY`, refused at request time without it) (#51, #52);
+  DEX quote fetches retry dropped connections for up to 90s and carry
+  `X-Request-Id` + a `spellbook/<version>` User-Agent (#48); relay quotes
+  never cached (#47); approve client waits out the execution window (#49).
+  Release tags are bare `X.Y.Z` (what `spellbook-upgrade` accepts).

@@ -19,6 +19,7 @@ import pytest
 
 from spellbook import version as ver
 from spellbook import doctor as doctor_mod
+from spellbook import __version__
 
 
 def _make_prefix(files):
@@ -41,7 +42,8 @@ def _make_socket():
 
 
 HEALTHY = {
-    "VERSION": ("0.1.0\n", 0o644),
+    # Healthy = the installed VERSION matches the running package.
+    "VERSION": (f"{__version__}\n", 0o644),
     "seed.key": ("aa" * 32, 0o600),
     "std_seed.key": ("bb" * 32, 0o600),
     "spellbook.json": (json.dumps({"seed_path": "/opt/spellbook/seed.key",

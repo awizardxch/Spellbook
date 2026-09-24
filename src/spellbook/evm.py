@@ -31,6 +31,8 @@ import urllib.request
 from coincurve import PrivateKey, PublicKey
 from Crypto.Hash import keccak
 
+from spellbook import __version__
+
 # chain name -> parameters. Only chains listed here can ever submit.
 CHAINS = {
     "evm-4663": {"chain_id": 4663, "testnet": False,
@@ -108,7 +110,7 @@ class Rpc:
                            "method": method, "params": params or []}).encode()
         req = urllib.request.Request(self.url, data=body,
                                      headers={"Content-Type": "application/json",
-                                              "User-Agent": "spellbook/0.1.0"})
+                                              "User-Agent": f"spellbook/{__version__}"})
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 resp = json.load(r)

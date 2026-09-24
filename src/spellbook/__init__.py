@@ -24,7 +24,7 @@ The conversational agent can request and relay, but must never approve —
 the two-token split (SPEC §4 S7) is enforced by the daemon, not by convention.
 """
 
-__version__ = "0.1.0"  # fallback; VERSION file at repo root is canonical
+__version__ = "0.2.0"  # fallback; VERSION file at repo root is canonical
 
 
 def _read_version_file() -> str | None:
