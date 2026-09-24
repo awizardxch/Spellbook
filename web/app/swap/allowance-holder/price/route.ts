@@ -23,13 +23,21 @@ export async function GET(req: Request) {
     const res = await fetch(target, {
       headers: { "0x-api-key": apiKey, "0x-version": "v2" },
       signal: controller.signal,
+      // Indicative prices go stale in seconds. Next.js caches fetch() in the
+      // Data Cache by default — no-store keeps every price request live.
+      cache: "no-store",
     });
     const data = await res.json().catch(() => null);
     if (!res.ok) return NextResponse.json(data, { status: res.status });
     if (data && typeof data === "object") {
-      return NextResponse.json({ ...data, relay: "spellbook", venue: "matcha" });
+      return NextResponse.json(
+        { ...data, relay: "spellbook", venue: "matcha" },
+        { headers: { "Cache-Control": "no-store" } }
+      );
     }
-    return NextResponse.json(data);
+    return NextResponse.json(data, {
+      headers: { "Cache-Control": "no-store" },
+    });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return NextResponse.json({ error: `price relay failed: ${msg}` }, { status: 502 });
