@@ -39,6 +39,12 @@ function proxy(endpoint: "quote" | "price") {
       const res = await fetch(target, {
         headers: { "0x-api-key": apiKey, "0x-version": "v2" },
         signal: controller.signal,
+        // Quotes are executable calldata computed against live pool state.
+        // Next.js caches fetch() in the Data Cache by default — without
+        // no-store, identical quote requests return a stale cached 0x
+        // response (stale block, stale zid) and the settlement reverts
+        // on-chain at estimateGas time.
+        cache: "no-store",
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) {
@@ -46,9 +52,14 @@ function proxy(endpoint: "quote" | "price") {
       }
       // Tag the response so callers know it came via the relay.
       if (data && typeof data === "object") {
-        return NextResponse.json({ ...data, relay: "spellbook", venue: "matcha" });
+        return NextResponse.json(
+          { ...data, relay: "spellbook", venue: "matcha" },
+          { headers: { "Cache-Control": "no-store" } }
+        );
       }
-      return NextResponse.json(data);
+      return NextResponse.json(data, {
+        headers: { "Cache-Control": "no-store" },
+      });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       return NextResponse.json(
