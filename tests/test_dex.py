@@ -223,6 +223,22 @@ def test_zerox_requires_key():
         ZeroExClient("")
 
 
+def test_zerox_blank_key_allowed_in_relay_mode(monkeypatch):
+    # Cast site (via the shim) holds the API key server-side — the local
+    # key is ignored, so blank is fine when ZEROX_BASE_URL is overridden.
+    monkeypatch.setenv("ZEROX_BASE_URL", "http://127.0.0.1:8899")
+    assert dex.relay_mode() is True
+    c = ZeroExClient("")
+    assert c.api_key == ""
+
+
+def test_zerox_blank_key_refused_without_relay(monkeypatch):
+    monkeypatch.delenv("ZEROX_BASE_URL", raising=False)
+    assert dex.relay_mode() is False
+    with pytest.raises(DexError):
+        ZeroExClient("")
+
+
 def test_uniswap_flow(monkeypatch):
     calls = []
     bodies = {}

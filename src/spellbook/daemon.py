@@ -901,8 +901,14 @@ class Daemon:
                 f"venue {venue!r} does not serve chain id "
                 f"{info['chain_id']} — refusing")
         env_key = dex_mod.VENUE_ENV_KEYS[venue]
-        api_key = os.environ.get(env_key)
-        if not api_key and venue not in dex_mod.VENUES_KEY_OPTIONAL:
+        api_key = os.environ.get(env_key) or ""
+        # A blank key is fine when the venue's key is optional (Cast), or
+        # for matcha in relay mode: ZEROX_BASE_URL points at a quote relay
+        # (e.g. the Cast site via the shim) that holds the key server-side.
+        key_optional = (venue in dex_mod.VENUES_KEY_OPTIONAL
+                        or (venue == dex_mod.VENUE_MATCHA
+                            and dex_mod.relay_mode()))
+        if not api_key and not key_optional:
             raise evm.EvmError(
                 f"{env_key} not in the daemon environment — cannot fetch "
                 "a firm quote, refusing")

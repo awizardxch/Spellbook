@@ -234,3 +234,41 @@ def test_daemon_swaps_through_cast_without_a_key(monkeypatch):
             "max_slippage_bps": 100, "deadline_sec": None})
     assert fetched and fetched[0][0] is None
     assert fetched[0][2] == {"slippage_bps": 100}
+
+
+@pytest.mark.parametrize("venue,relay,ok", [
+    ("cast", False, True),      # Cast's key is optional
+    ("matcha", True, True),     # relay (ZEROX_BASE_URL) holds the 0x key
+    ("matcha", False, False),   # direct 0x needs a key
+    ("uniswap", True, False),   # the relay only stands in for 0x
+])
+def test_daemon_blank_key_rules(monkeypatch, venue, relay, ok):
+    from spellbook import daemon as daemon_mod, evm
+
+    for k in ("CAST_API_KEY", "ZERO_EX_API_KEY", "UNISWAP_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    if relay:
+        monkeypatch.setenv("ZEROX_BASE_URL", "http://127.0.0.1:8899")
+    else:
+        monkeypatch.delenv("ZEROX_BASE_URL", raising=False)
+
+    class Fetched(Exception):
+        pass
+
+    def stop(*a, **kw):
+        raise Fetched
+
+    monkeypatch.setattr(dex.CastClient, "quote", stop)
+    monkeypatch.setattr(dex.ZeroExClient, "quote", stop)
+    monkeypatch.setattr(dex.UniswapClient, "quote", stop)
+    fake = type("D", (), {})()
+    fake._evm_dex_guards = lambda params: ({"chain_id": 4663}, None, b"\x01" * 32, TAKER)
+    params = {"venue": venue, "sell_token": dex.NATIVE_SENTINEL, "buy_token": TOKEN,
+              "sell_amount_wei": 1000, "min_buy_amount_wei": 1,
+              "max_slippage_bps": 100, "deadline_sec": None}
+    if ok:
+        with pytest.raises(Fetched):  # got past the key gate to the quote
+            daemon_mod.Daemon._execute_evm_swap(fake, params)
+    else:
+        with pytest.raises(evm.EvmError, match="not in the daemon environment"):
+            daemon_mod.Daemon._execute_evm_swap(fake, params)
