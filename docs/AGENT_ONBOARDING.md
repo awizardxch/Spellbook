@@ -614,6 +614,14 @@ operational shape; Speechless decided it explicitly:
   broadcast (e.g. the node rejecting an underpriced submission) spends
   nothing but still consumes the approval — the human re-requests if
   they still want it.
+- **Quote fetches ride out network drops.** Fetching the firm quote is
+  read-only, so the DEX layer retries it when the connection drops before
+  the venue answers (reset, empty reply, timeout) or on a 502/503/504:
+  backoff 2s/5s/10s/20s, capped at 90s, then the intent deadline is
+  re-checked before anything is signed. A definite answer (4xx, bad
+  quote) is never retried. Every attempt sends `User-Agent: spellbook/<ver>`
+  and `X-Request-Id: <id>-<attempt>`; the id is in any error the ledger
+  records, so the venue's logs (e.g. Cast's) can be searched for it.
 
 ### The v2 execution decision — decided 2026-09-23
 

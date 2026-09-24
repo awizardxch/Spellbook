@@ -926,6 +926,12 @@ class Daemon:
             # Normalize back to the intent's token representation for the
             # bounds check below.
             quote["sell_token"], quote["buy_token"] = sell, buy
+        # The quote fetch retries transient network drops for up to
+        # dex.RETRY_BUDGET_SEC, so the approval window may have closed
+        # while it waited.
+        if dl is not None and time.time() > dl:
+            raise evm.EvmError(
+                "swap intent expired while fetching the quote — refusing")
         plan = dex_mod.validate_swap_intent_against_quote(
             {"chain_id": info["chain_id"], "sell_token": sell,
              "buy_token": buy, "sell_amount_wei": amount,
