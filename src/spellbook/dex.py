@@ -27,9 +27,14 @@ key needed — useful on chains neither aggregator covers, e.g. the
 Uniswap-v2-style pools on Robinhood Chain):
 
 - ERC-20 ``approve`` / ``allowance``
-- Uniswap v2 ``swapExactTokensForTokens`` / ``addLiquidity``
-- Uniswap v3 ``exactInputSingle`` (SwapRouter) / ``mint``
+- Uniswap v2 ``swapExactTokensForTokens`` / ``addLiquidity`` /
+  ``removeLiquidity``
+- Uniswap v3 ``exactInputSingle`` (SwapRouter) / ``mint`` /
+  ``decreaseLiquidity`` / ``collect`` / ``multicall``
   (NonfungiblePositionManager)
+- Uniswap v4 ``modifyLiquidities`` (PositionManager): mint / decrease /
+  fee-claim command batches, plus the two-stage Permit2 approval path
+  and read helpers (position ownership, pool initialization)
 
 VENUE RECOMMENDATIONS + EXECUTION (SPEC §10 v2): the user keeps a
 recommended-venue list via ``dex.recommended_venues`` in spellbook.json
@@ -869,10 +874,56 @@ def _u24(n: int) -> bytes:
     return _u256(n)
 
 
+def _u128(n: int) -> bytes:
+    if not isinstance(n, int) or n < 0 or n >= 2 ** 128:
+        raise DexError(f"uint128 out of range: {n!r}")
+    return n.to_bytes(32, "big")
+
+
+def _u160(n: int) -> bytes:
+    if not isinstance(n, int) or n < 0 or n >= 2 ** 160:
+        raise DexError(f"uint160 out of range: {n!r}")
+    return n.to_bytes(32, "big")
+
+
+def _u48(n: int) -> bytes:
+    if not isinstance(n, int) or n < 0 or n >= 2 ** 48:
+        raise DexError(f"uint48 out of range: {n!r}")
+    return n.to_bytes(32, "big")
+
+
 def _i24(n: int) -> bytes:
     if not isinstance(n, int) or n < -(2 ** 23) or n >= 2 ** 23:
         raise DexError(f"int24 out of range: {n!r}")
     return (n % 2 ** 256).to_bytes(32, "big")
+
+
+def _enc_bytes(b: bytes) -> bytes:
+    """ABI-encode dynamic bytes: length word + right-padded data."""
+    if not isinstance(b, (bytes, bytearray)):
+        raise DexError("bytes payload must be bytes")
+    b = bytes(b)
+    return _u256(len(b)) + b + bytes(-len(b) % 32)
+
+
+def _enc_bytes_array(items: list[bytes]) -> bytes:
+    """ABI-encode bytes[]: length + offsets + elements (strict layout)."""
+    n = len(items)
+    for it in items:
+        if not isinstance(it, (bytes, bytearray)):
+            raise DexError("bytes[] elements must be bytes")
+    head_len = 32 * n
+    out = _u256(n)
+    off = head_len
+    tails = []
+    for it in items:
+        out += _u256(off)
+        enc = _enc_bytes(bytes(it))
+        tails.append(enc)
+        off += len(enc)
+    for t in tails:
+        out += t
+    return out
 
 
 def _enc_tuple(items: list[bytes]) -> bytes:
@@ -890,7 +941,9 @@ def _head_tail(head: list, tails: list[bytes]) -> bytes:
     encoding is the next entry of tails. Dynamic slots become offset
     pointers; tails are appended after the head block in order."""
     out = b""
-    off = 32 * len(head)
+    # Offset base is the real head byte length: a head entry may span
+    # several words (e.g. a v4 PoolKey), and a None slot costs 32 bytes.
+    off = sum(32 if h is None else len(h) for h in head)
     tail_iter = iter(tails)
     enc_tails = []
     for h in head:
@@ -907,12 +960,44 @@ def _head_tail(head: list, tails: list[bytes]) -> bytes:
 
 
 # Function selectors below are pinned constants (verified against the
+# canonical signatures with keccak-256 on 2026-09-25 — see the selector
+# check in the PR notes; never hand-transcribe a new one).
 ERC20_APPROVE_SELECTOR = "095ea7b3"      # approve(address,uint256)
 ERC20_ALLOWANCE_SELECTOR = "dd62ed3e"    # allowance(address,address)
 V2_SWAP_SELECTOR = "38ed1739"            # swapExactTokensForTokens(uint256,uint256,address[],address,uint256)
 V2_ADD_LIQ_SELECTOR = "e8e33700"         # addLiquidity(address,address,uint256,uint256,uint256,uint256,address,uint256)
-V3_EXACT_INPUT_SINGLE_SELECTOR = "414bf389"  # exactInputSingle((address,address,uint24,address,uint256,uint256,uint160))
+V2_REMOVE_LIQ_SELECTOR = "baa2abde"      # removeLiquidity(address,address,uint256,uint256,uint256,address,uint256)
+V3_EXACT_INPUT_SINGLE_SELECTOR = "414bf389"  # exactInputSingle((address,address,uint24,address,uint256,uint256,uint256,uint160))
 V3_MINT_SELECTOR = "88316456"            # mint((address,address,uint24,int24,int24,uint256,uint256,uint256,uint256,address,uint256))
+V3_DECREASE_LIQUIDITY_SELECTOR = "0c49ccbe"  # decreaseLiquidity((uint256,uint128,uint256,uint256,uint256))
+V3_COLLECT_SELECTOR = "fc6f7865"         # collect((uint256,address,uint128,uint128))
+V3_MULTICALL_SELECTOR = "ac9650d8"       # multicall(bytes[])
+ERC721_OWNER_OF_SELECTOR = "6352211e"    # ownerOf(uint256)
+V4_MODIFY_LIQUIDITIES_SELECTOR = "dd46508f"  # modifyLiquidities(bytes,uint256)
+PERMIT2_APPROVE_SELECTOR = "87517c45"    # approve(address,address,uint160,uint48)
+PERMIT2_ALLOWANCE_SELECTOR = "927da105"  # allowance(address,address,address)
+POSM_POOL_MANAGER_SELECTOR = "dc4c90d3"  # poolManager()
+POOL_MANAGER_GET_SLOT0_SELECTOR = "c815641c"  # getSlot0(bytes32)
+
+#: Uniswap v4 PositionManager action ids — official v4-periphery
+#: src/libraries/Actions.sol (verified 2026-09-25).
+V4_ACTIONS = {
+    "INCREASE_LIQUIDITY": 0x00,
+    "DECREASE_LIQUIDITY": 0x01,
+    "MINT_POSITION": 0x02,
+    "BURN_POSITION": 0x03,
+    "SETTLE_PAIR": 0x0D,
+    "TAKE_PAIR": 0x11,
+    "CLOSE_CURRENCY": 0x12,
+    "CLEAR_OR_TAKE": 0x13,
+    "SWEEP": 0x14,
+}
+
+#: Native currency in v4 pool keys (CurrencyLibrary.ADDRESS_ZERO).
+V4_NATIVE_CURRENCY = "0x0000000000000000000000000000000000000000"
+
+#: v4 dynamic-fee flag (fee = 0x800000 means "ask the hook").
+V4_DYNAMIC_FEE_FLAG = 0x800000
 
 
 def _calldata(selector_hex: str, payload: bytes) -> str:
@@ -1003,8 +1088,13 @@ def build_v2_add_liquidity_calldata(token_a: str, token_b: str,
 def build_v3_exact_input_single_calldata(token_in: str, token_out: str,
                                          fee: int, recipient: str,
                                          amount_in: int, amount_out_min: int,
+                                         deadline: int,
                                          sqrt_price_limit_x96: int = 0) -> str:
-    """SwapRouter.exactInputSingle(params) — single-hop v3 swap."""
+    """SwapRouter.exactInputSingle(params) — single-hop v3 swap.
+
+    NOTE: the real ExactInputSingleParams struct carries ``deadline``
+    between recipient and amountIn (selector 414bf389); it is required.
+    """
     _require_address(token_in, "token in")
     _require_address(token_out, "token out")
     _require_address(recipient, "recipient")
@@ -1013,10 +1103,12 @@ def build_v3_exact_input_single_calldata(token_in: str, token_out: str,
     _require_positive_int(amount_in, "amount_in")
     if not isinstance(amount_out_min, int) or amount_out_min < 0:
         raise DexError("amount_out_min must be a non-negative int")
+    _require_positive_int(deadline, "deadline")
     if not isinstance(sqrt_price_limit_x96, int) or sqrt_price_limit_x96 < 0:
         raise DexError("sqrt_price_limit_x96 must be a non-negative int")
     return _calldata(V3_EXACT_INPUT_SINGLE_SELECTOR, _enc_tuple([
         _addr(token_in), _addr(token_out), _u24(fee), _addr(recipient),
+        _u256(deadline),
         _u256(amount_in), _u256(amount_out_min),
         _u256(sqrt_price_limit_x96),
     ]))
@@ -1052,6 +1144,420 @@ def build_v3_mint_calldata(token0: str, token1: str, fee: int,
         _u256(amount0_min), _u256(amount1_min),
         _addr(recipient), _u256(deadline),
     ]))
+
+
+# ---------------------------------------------------------------------------
+# Uniswap v2 — remove liquidity
+# ---------------------------------------------------------------------------
+
+
+def build_v2_remove_liquidity_calldata(token_a: str, token_b: str,
+                                      liquidity: int,
+                                      amount_a_min: int, amount_b_min: int,
+                                      to: str, deadline: int) -> str:
+    """removeLiquidity(tokenA, tokenB, liquidity, amountAMin, amountBMin,
+    to, deadline). Burns ``liquidity`` LP (pair) tokens; the pair contract
+    must have an allowance to the router first."""
+    for t, w in ((token_a, "token A"), (token_b, "token B")):
+        _require_address(t, w)
+    _require_address(to, "recipient")
+    _require_positive_int(liquidity, "liquidity (LP tokens to burn)")
+    for n, w in ((amount_a_min, "amount A min"),
+                 (amount_b_min, "amount B min")):
+        if not isinstance(n, int) or n < 0:
+            raise DexError(f"{w} must be a non-negative int")
+    _require_positive_int(deadline, "deadline")
+    return _calldata(V2_REMOVE_LIQ_SELECTOR, _enc_tuple([
+        _addr(token_a), _addr(token_b),
+        _u256(liquidity),
+        _u256(amount_a_min), _u256(amount_b_min),
+        _addr(to), _u256(deadline),
+    ]))
+
+
+# ---------------------------------------------------------------------------
+# Uniswap v3 — decrease liquidity + collect fees
+# ---------------------------------------------------------------------------
+
+
+def build_v3_decrease_liquidity_calldata(token_id: int, liquidity: int,
+                                        amount0_min: int, amount1_min: int,
+                                        deadline: int) -> str:
+    """NonfungiblePositionManager.decreaseLiquidity(params) — withdraw
+    ``liquidity`` units from position ``token_id``. amount0Min/amount1Min
+    (uint256 per the official interface) are the slippage bounds on the
+    principal (fees accrue on top). The withdrawn tokens + fees stay
+    claimable via ``collect``."""
+    _require_positive_int(token_id, "token_id")
+    _require_positive_int(liquidity, "liquidity to remove")
+    for n, w in ((amount0_min, "amount0 min"), (amount1_min, "amount1 min")):
+        _u256(n)  # range-check only; encoded below
+        if not isinstance(n, int) or n < 0:
+            raise DexError(f"{w} must be a non-negative int")
+    _require_positive_int(deadline, "deadline")
+    return _calldata(V3_DECREASE_LIQUIDITY_SELECTOR, _enc_tuple([
+        _u256(token_id), _u128(liquidity), _u256(amount0_min),
+        _u256(amount1_min), _u256(deadline),
+    ]))
+
+
+def build_v3_collect_calldata(token_id: int, recipient: str,
+                             amount0_max: int = 2 ** 128 - 1,
+                             amount1_max: int = 2 ** 128 - 1) -> str:
+    """NonfungiblePositionManager.collect(params) — pull owed tokens
+    (withdrawn principal and/or accrued fees) to ``recipient``. Defaults
+    collect everything (type(uint128).max, the standard "claim all")."""
+    _require_positive_int(token_id, "token_id")
+    _require_address(recipient, "recipient")
+    for n, w in ((amount0_max, "amount0 max"), (amount1_max, "amount1 max")):
+        if not isinstance(n, int) or n < 0 or n >= 2 ** 128:
+            raise DexError(f"{w} must be a uint128")
+    return _calldata(V3_COLLECT_SELECTOR, _enc_tuple([
+        _u256(token_id), _addr(recipient),
+        _u128(amount0_max), _u128(amount1_max),
+    ]))
+
+
+def build_v3_multicall_calldata(calls: list[str]) -> str:
+    """NonfungiblePositionManager.multicall(bytes[]) — batch several NPM
+    calls (e.g. decreaseLiquidity + collect) into one transaction."""
+    if not calls:
+        raise DexError("multicall needs at least one call")
+    payloads = []
+    for c in calls:
+        h = c[2:] if c.startswith("0x") else c
+        if len(h) < 8 or len(h) % 2:
+            raise DexError(f"bad call payload: {c[:20]!r}…")
+        payloads.append(bytes.fromhex(h))
+    return _calldata(V3_MULTICALL_SELECTOR, _enc_bytes_array(payloads))
+
+
+def build_v3_remove_and_collect_calldata(token_id: int, liquidity: int,
+                                       amount0_min: int, amount1_min: int,
+                                       recipient: str, deadline: int) -> str:
+    """One-tx v3 exit: multicall(decreaseLiquidity, collect)."""
+    dec = build_v3_decrease_liquidity_calldata(
+        token_id, liquidity, amount0_min, amount1_min, deadline)
+    col = build_v3_collect_calldata(token_id, recipient)
+    return build_v3_multicall_calldata([dec, col])
+
+
+# ---------------------------------------------------------------------------
+# Uniswap v4 — PositionManager (command-based LP)
+#
+# Official semantics live in the Uniswap docs; Spellbook only encodes them:
+#   PositionManager.modifyLiquidities(bytes unlockData, uint256 deadline)
+#   unlockData = abi.encode(bytes actions, bytes[] params)
+# Add    = [MINT_POSITION, SETTLE_PAIR]
+# Remove = [DECREASE_LIQUIDITY, TAKE_PAIR] (+ BURN_POSITION for full exits)
+# Claim  = [DECREASE_LIQUIDITY (liquidity=0), TAKE_PAIR] — the periphery
+#          documents that decreasing with 0 liquidity credits the caller
+#          with the position's accrued fees.
+# Approvals are two-stage through Permit2: token.approve(Permit2) then
+# Permit2.approve(token, positionManager). See the Permit2 section below.
+# ---------------------------------------------------------------------------
+
+
+def _require_v4_pool_key_args(fee: int, tick_spacing: int,
+                             tick_lower: int, tick_upper: int) -> None:
+    if not isinstance(fee, int) or fee < 0 or fee >= 2 ** 24:
+        raise DexError(f"v4 fee must be a uint24, got {fee!r}")
+    if not isinstance(tick_spacing, int) or tick_spacing == 0 \
+            or abs(tick_spacing) >= 2 ** 23:
+        raise DexError(f"v4 tick_spacing must be a non-zero int24, "
+                       f"got {tick_spacing!r}")
+    for t, w in ((tick_lower, "tick_lower"), (tick_upper, "tick_upper")):
+        if not isinstance(t, int) or t < -(2 ** 23) or t >= 2 ** 23:
+            raise DexError(f"v4 {w} must be an int24")
+    if tick_lower >= tick_upper:
+        raise DexError("v4 tick_lower must be < tick_upper")
+    if tick_lower % tick_spacing != 0 or tick_upper % tick_spacing != 0:
+        raise DexError("v4 ticks must align with tick_spacing")
+
+
+def _require_v4_currencies(currency0: str, currency1: str) -> tuple[str, str]:
+    """Currencies must be sorted; native (address zero) sorts first.
+
+    Native-currency positions are refused here: settling them needs
+    msg.value + SWEEP, which the daemon's v4 intents do not send yet —
+    wrap to WETH first."""
+    _require_address(currency0, "currency0")
+    _require_address(currency1, "currency1")
+    if currency0.lower() == V4_NATIVE_CURRENCY or \
+            currency1.lower() == V4_NATIVE_CURRENCY:
+        raise DexError("v4 native-currency positions are not supported yet "
+                       "— wrap to WETH first")
+    if currency0.lower() >= currency1.lower():
+        raise DexError("v4 requires currency0 < currency1 (sort order)")
+    return currency0, currency1
+
+
+def build_v4_pool_key(currency0: str, currency1: str, fee: int,
+                     tick_spacing: int, hooks: str) -> bytes:
+    """ABI-encode a v4 PoolKey struct (5 words, static)."""
+    _require_v4_currencies(currency0, currency1)
+    _require_address(hooks, "hooks")
+    return b"".join([_addr(currency0), _addr(currency1), _u24(fee),
+                     _i24(tick_spacing), _addr(hooks)])
+
+
+def v4_pool_id(currency0: str, currency1: str, fee: int,
+               tick_spacing: int, hooks: str) -> str:
+    """PoolId = keccak256(abi.encode(poolKey)) — the id getSlot0 takes."""
+    from Crypto.Hash import keccak
+    key = build_v4_pool_key(currency0, currency1, fee, tick_spacing, hooks)
+    return "0x" + keccak.new(data=key, digest_bits=256).hexdigest()
+
+
+def build_v4_modify_liquidities_calldata(actions: bytes,
+                                         params: list[bytes],
+                                         deadline: int) -> str:
+    """PositionManager.modifyLiquidities(bytes unlockData, uint256 deadline).
+
+    ``actions`` is the packed action bytes (one byte per action);
+    ``params[i]`` is the ABI-encoded params for ``actions[i]``."""
+    if not actions:
+        raise DexError("modifyLiquidities needs at least one action")
+    if len(actions) != len(params):
+        raise DexError("actions and params length mismatch")
+    for a in actions:
+        if a not in V4_ACTIONS.values():
+            raise DexError(f"unknown v4 action byte: {a:#x}")
+    _require_positive_int(deadline, "deadline")
+    unlock_data = _head_tail([None, None],
+                             [_enc_bytes(bytes(actions)),
+                              _enc_bytes_array([bytes(p) for p in params])])
+    return _calldata(V4_MODIFY_LIQUIDITIES_SELECTOR,
+                     _head_tail([None, _u256(deadline)], [unlock_data]))
+
+
+def build_v4_mint_params(currency0: str, currency1: str, fee: int,
+                         tick_spacing: int, hooks: str,
+                         tick_lower: int, tick_upper: int, liquidity: int,
+                         amount0_max: int, amount1_max: int,
+                         owner: str, hook_data: bytes = b"") -> bytes:
+    """MINT_POSITION params: (PoolKey, tickLower, tickUpper, liquidity,
+    amount0Max, amount1Max, owner, hookData). amount0Max/amount1Max are the
+    hard maximum-spend (slippage) bounds."""
+    _require_v4_currencies(currency0, currency1)
+    _require_v4_pool_key_args(fee, tick_spacing, tick_lower, tick_upper)
+    _require_positive_int(liquidity, "liquidity")
+    for n, w in ((amount0_max, "amount0 max"), (amount1_max, "amount1 max")):
+        if not isinstance(n, int) or n < 0 or n >= 2 ** 128:
+            raise DexError(f"v4 {w} must be a uint128")
+    _require_address(owner, "owner")
+    pool_key = build_v4_pool_key(currency0, currency1, fee,
+                                 tick_spacing, hooks)
+    return _head_tail(
+        [pool_key, _i24(tick_lower), _i24(tick_upper), _u256(liquidity),
+         _u128(amount0_max), _u128(amount1_max), _addr(owner), None],
+        [_enc_bytes(bytes(hook_data))])
+
+
+def build_v4_decrease_params(token_id: int, liquidity: int,
+                             amount0_min: int, amount1_min: int,
+                             hook_data: bytes = b"") -> bytes:
+    """DECREASE_LIQUIDITY params: (tokenId, liquidity, amount0Min,
+    amount1Min, hookData). ``liquidity = 0`` is the documented fee-claim
+    path: it credits the caller with accrued fees without touching the
+    position's liquidity."""
+    _require_positive_int(token_id, "token_id")
+    if not isinstance(liquidity, int) or liquidity < 0:
+        raise DexError("v4 decrease liquidity must be a non-negative int")
+    for n, w in ((amount0_min, "amount0 min"), (amount1_min, "amount1 min")):
+        if not isinstance(n, int) or n < 0 or n >= 2 ** 128:
+            raise DexError(f"v4 {w} must be a uint128")
+    return _head_tail(
+        [_u256(token_id), _u256(liquidity), _u128(amount0_min),
+         _u128(amount1_min), None],
+        [_enc_bytes(bytes(hook_data))])
+
+
+def build_v4_settle_pair_params(currency0: str, currency1: str) -> bytes:
+    """SETTLE_PAIR params: (currency0, currency1) — pays the full open
+    debt for both currencies (payer is the unlock locker, i.e. us)."""
+    _require_v4_currencies(currency0, currency1)
+    return _addr(currency0) + _addr(currency1)
+
+
+def build_v4_take_pair_params(currency0: str, currency1: str,
+                             recipient: str) -> bytes:
+    """TAKE_PAIR params: (currency0, currency1, recipient) — takes the full
+    open credit for both currencies to ``recipient``."""
+    _require_v4_currencies(currency0, currency1)
+    _require_address(recipient, "recipient")
+    return _addr(currency0) + _addr(currency1) + _addr(recipient)
+
+
+def build_v4_burn_params(token_id: int) -> bytes:
+    """BURN_POSITION params: (tokenId, amount0Min=0, amount1Min=0,
+    hookData) — burns the position NFT. The periphery auto-decreases any
+    remaining liquidity to 0 first; explicit slippage belongs on the
+    DECREASE_LIQUIDITY step that precedes this."""
+    _require_positive_int(token_id, "token_id")
+    return _head_tail([_u256(token_id), _u128(0), _u128(0), None],
+                      [_enc_bytes(b"")])
+
+
+def build_v4_lp_add_calldata(currency0: str, currency1: str, fee: int,
+                             tick_spacing: int, hooks: str,
+                             tick_lower: int, tick_upper: int,
+                             liquidity: int,
+                             amount0_max: int, amount1_max: int,
+                             recipient: str, deadline: int) -> str:
+    """One-tx v4 add: [MINT_POSITION, SETTLE_PAIR]. ``liquidity`` is in
+    position liquidity units (compute off-chain, e.g. from the pool's
+    current price and the desired token amounts); amount0Max/amount1Max
+    bound the spend."""
+    mint = build_v4_mint_params(currency0, currency1, fee, tick_spacing,
+                                hooks, tick_lower, tick_upper, liquidity,
+                                amount0_max, amount1_max, recipient)
+    settle = build_v4_settle_pair_params(currency0, currency1)
+    return build_v4_modify_liquidities_calldata(
+        bytes([V4_ACTIONS["MINT_POSITION"], V4_ACTIONS["SETTLE_PAIR"]]),
+        [mint, settle], deadline)
+
+
+def build_v4_lp_remove_calldata(token_id: int, liquidity: int,
+                                amount0_min: int, amount1_min: int,
+                                currency0: str, currency1: str,
+                                recipient: str, deadline: int,
+                                burn_nft: bool = False) -> str:
+    """One-tx v4 remove: [DECREASE_LIQUIDITY, TAKE_PAIR]. With
+    ``burn_nft`` (full exits), appends BURN_POSITION to retire the NFT."""
+    _require_positive_int(liquidity, "liquidity to remove")
+    dec = build_v4_decrease_params(token_id, liquidity,
+                                   amount0_min, amount1_min)
+    take = build_v4_take_pair_params(currency0, currency1, recipient)
+    actions = [V4_ACTIONS["DECREASE_LIQUIDITY"], V4_ACTIONS["TAKE_PAIR"]]
+    params = [dec, take]
+    if burn_nft:
+        actions.append(V4_ACTIONS["BURN_POSITION"])
+        params.append(build_v4_burn_params(token_id))
+    return build_v4_modify_liquidities_calldata(bytes(actions), params,
+                                                deadline)
+
+
+def build_v4_lp_claim_calldata(token_id: int, currency0: str, currency1: str,
+                               recipient: str, deadline: int) -> str:
+    """One-tx v4 fee claim: [DECREASE_LIQUIDITY (0), TAKE_PAIR]. The
+    position's liquidity is untouched; accrued fees are credited and
+    taken to ``recipient``."""
+    dec = build_v4_decrease_params(token_id, 0, 0, 0)
+    take = build_v4_take_pair_params(currency0, currency1, recipient)
+    return build_v4_modify_liquidities_calldata(
+        bytes([V4_ACTIONS["DECREASE_LIQUIDITY"], V4_ACTIONS["TAKE_PAIR"]]),
+        [dec, take], deadline)
+
+
+# ---------------------------------------------------------------------------
+# Permit2 (v4 approval path)
+# ---------------------------------------------------------------------------
+
+
+def build_permit2_allowance_calldata(owner: str, token: str,
+                                    spender: str) -> str:
+    """Permit2.allowance(owner, token, spender) eth_call payload (read-only).
+    Returns (uint160 amount, uint48 expiration, uint48 nonce)."""
+    _require_address(owner, "owner")
+    _require_address(token, "token")
+    _require_address(spender, "spender")
+    return _calldata(PERMIT2_ALLOWANCE_SELECTOR,
+                     _addr(owner) + _addr(token) + _addr(spender))
+
+
+def decode_permit2_allowance(result_hex: str) -> tuple[int, int, int]:
+    """Decode Permit2.allowance's (amount, expiration, nonce) triple."""
+    h = result_hex[2:] if result_hex.startswith("0x") else result_hex
+    if len(h) != 192:
+        raise DexError(f"bad permit2 allowance return data: "
+                       f"{result_hex!r}"[:80])
+    return int(h[0:64], 16), int(h[64:128], 16), int(h[128:192], 16)
+
+
+def build_permit2_approve_calldata(token: str, spender: str, amount: int,
+                                  expiration: int) -> str:
+    """Permit2.approve(token, spender, amount, expiration) — the second
+    stage of the v4 approval path. ``amount`` is the EXACT position spend
+    and ``expiration`` a unix timestamp (the intent deadline); never
+    type(uint160).max unless the human explicitly asked."""
+    _require_address(token, "token")
+    _require_address(spender, "spender")
+    _u160(amount)  # range-check
+    _require_positive_int(amount, "permit2 approve amount")
+    _u48(expiration)  # range-check
+    _require_positive_int(expiration, "permit2 approve expiration")
+    return _calldata(PERMIT2_APPROVE_SELECTOR,
+                     _addr(token) + _addr(spender) + _u160(amount) +
+                     _u48(expiration))
+
+
+# ---------------------------------------------------------------------------
+# Read helpers: position ownership, posm -> poolManager, pool slot0
+# ---------------------------------------------------------------------------
+
+
+V2_PAIR_TOKEN0_SELECTOR = "0dfe1681"  # token0()
+V2_PAIR_TOKEN1_SELECTOR = "d21220a7"  # token1()
+
+
+def build_v2_pair_token0_calldata() -> str:
+    """UniswapV2Pair.token0() eth_call payload (read-only) — identifies
+    which token a pair contract claims to be the LP token for."""
+    return _calldata(V2_PAIR_TOKEN0_SELECTOR, b"")
+
+
+def build_v2_pair_token1_calldata() -> str:
+    """UniswapV2Pair.token1() eth_call payload (read-only)."""
+    return _calldata(V2_PAIR_TOKEN1_SELECTOR, b"")
+
+
+def build_erc721_owner_of_calldata(token_id: int) -> str:
+    """ownerOf(tokenId) eth_call payload — proves the wallet owns the v3/v4
+    position NFT before a remove/claim is attempted."""
+    _require_positive_int(token_id, "token_id")
+    return _calldata(ERC721_OWNER_OF_SELECTOR, _u256(token_id))
+
+
+def decode_erc721_owner_of(result_hex: str) -> str:
+    """Decode ownerOf's address return."""
+    h = result_hex[2:] if result_hex.startswith("0x") else result_hex
+    if len(h) != 64:
+        raise DexError(f"bad ownerOf return data: {result_hex!r}"[:80])
+    return "0x" + h[24:]
+
+
+def build_posm_pool_manager_calldata() -> str:
+    """PositionManager.poolManager() eth_call payload — reads the v4
+    PoolManager address from the PositionManager itself (also proves the
+    supplied address is actually a PositionManager)."""
+    return _calldata(POSM_POOL_MANAGER_SELECTOR, b"")
+
+
+def decode_address_return(result_hex: str) -> str:
+    """Decode a single-address eth_call return."""
+    h = result_hex[2:] if result_hex.startswith("0x") else result_hex
+    if len(h) != 64:
+        raise DexError(f"bad address return data: {result_hex!r}"[:80])
+    return "0x" + h[24:]
+
+
+def build_pool_manager_get_slot0_calldata(pool_id_hex: str) -> str:
+    """PoolManager.getSlot0(poolId) eth_call payload (read-only)."""
+    h = pool_id_hex[2:] if pool_id_hex.startswith("0x") else pool_id_hex
+    if len(h) != 64:
+        raise DexError(f"bad pool id: {pool_id_hex!r}"[:80])
+    return _calldata(POOL_MANAGER_GET_SLOT0_SELECTOR,
+                     bytes.fromhex(h))
+
+
+def decode_slot0_sqrt_price_x96(result_hex: str) -> int:
+    """Decode getSlot0's first word (sqrtPriceX96). Zero means the pool is
+    not initialized — minting into it would revert."""
+    h = result_hex[2:] if result_hex.startswith("0x") else result_hex
+    if len(h) < 64:
+        raise DexError(f"bad slot0 return data: {result_hex!r}"[:80])
+    return int(h[0:64], 16)
 
 
 # ---------------------------------------------------------------------------
@@ -1099,7 +1605,24 @@ __all__ = [
     "ZeroExClient", "UniswapClient", "CastClient",
     "build_approve_calldata", "build_allowance_calldata", "decode_allowance",
     "build_v2_swap_calldata", "build_v2_add_liquidity_calldata",
+    "build_v2_remove_liquidity_calldata",
+    "build_v2_pair_token0_calldata", "build_v2_pair_token1_calldata",
     "build_v3_exact_input_single_calldata", "build_v3_mint_calldata",
+    "build_v3_decrease_liquidity_calldata", "build_v3_collect_calldata",
+    "build_v3_multicall_calldata", "build_v3_remove_and_collect_calldata",
+    "V4_ACTIONS", "V4_NATIVE_CURRENCY", "V4_DYNAMIC_FEE_FLAG",
+    "build_v4_pool_key", "v4_pool_id",
+    "build_v4_modify_liquidities_calldata", "build_v4_mint_params",
+    "build_v4_decrease_params", "build_v4_settle_pair_params",
+    "build_v4_take_pair_params", "build_v4_burn_params",
+    "build_v4_lp_add_calldata", "build_v4_lp_remove_calldata",
+    "build_v4_lp_claim_calldata",
+    "build_permit2_allowance_calldata", "decode_permit2_allowance",
+    "build_permit2_approve_calldata",
+    "build_erc721_owner_of_calldata", "decode_erc721_owner_of",
+    "build_posm_pool_manager_calldata", "decode_address_return",
+    "build_pool_manager_get_slot0_calldata",
+    "decode_slot0_sqrt_price_x96",
     "compare_quotes",
 ]
 

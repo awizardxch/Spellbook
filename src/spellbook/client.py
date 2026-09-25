@@ -144,18 +144,26 @@ class AgentClient(_BaseClient):
         spellbook.json, takes effect on daemon restart."""
         return self._call("dex_venues")
 
-    def dex_lp_add(self, *, chain: str, protocol: str, router: str,
+    def dex_lp_add(self, *, chain: str, protocol: str, router: str | None = None,
                    token_a: str, token_b: str, amount_a_wei: int,
                    amount_b_wei: int, amount_a_min_wei: int = 0,
                    amount_b_min_wei: int = 0, fee: int | None = None,
                    tick_lower: int | None = None,
                    tick_upper: int | None = None,
+                   position_manager: str | None = None,
+                   permit2: str | None = None,
+                   tick_spacing: int | None = None,
+                   hooks: str | None = None, liquidity: int | None = None,
                    purpose: str = "", deadline_sec: int | None = None) -> dict:
-        """Request a bounded LP add (v2 addLiquidity or v3 mint).
+        """Request a bounded LP add (v2 addLiquidity, v3 mint, or v4
+        PositionManager mint).
 
         ``router`` is the v2 router or v3 NonfungiblePositionManager
         address — supplied by the agent, shown to the human, never
         guessed by the daemon. fee/ticks are v3-only (100/500/3000/10000).
+        v4 uses ``position_manager`` + ``permit2`` instead of ``router``;
+        amount_a/b_wei are the hard max spends and ``liquidity`` is the
+        position liquidity to mint (computed off-chain by the agent).
         """
         params = {"intent": "dex_lp_add", "chain": chain, "protocol": protocol,
                   "router": router, "token_a": token_a, "token_b": token_b,
@@ -163,8 +171,53 @@ class AgentClient(_BaseClient):
                   "amount_a_min_wei": amount_a_min_wei,
                   "amount_b_min_wei": amount_b_min_wei, "fee": fee,
                   "tick_lower": tick_lower, "tick_upper": tick_upper,
-                  "purpose": purpose, "deadline_sec": deadline_sec}
+                  "position_manager": position_manager, "permit2": permit2,
+                  "tick_spacing": tick_spacing, "hooks": hooks,
+                  "liquidity": liquidity, "purpose": purpose,
+                  "deadline_sec": deadline_sec}
         return self._call("dex_lp_add", params)
+
+    def dex_lp_remove(self, *, chain: str, protocol: str, token_a: str,
+                      token_b: str, liquidity: int, amount_a_min_wei: int = 0,
+                      amount_b_min_wei: int = 0,
+                      router: str | None = None,
+                      position_manager: str | None = None,
+                      pair: str | None = None, token_id: int | None = None,
+                      burn_nft: bool = False, purpose: str = "",
+                      deadline_sec: int | None = None) -> dict:
+        """Request an LP removal. Always queued for human approval.
+
+        v2 burns ``liquidity`` LP (pair) tokens via the router (``pair``
+        names the LP token; the daemon verifies its token0/token1).
+        v3 decreases via the NPM multicall(decrease, collect).
+        v4 decreases via PositionManager; ``burn_nft`` retires the NFT on
+        full exits. amount_a/b_min_wei are the minimum-receive bounds.
+        """
+        params = {"intent": "dex_lp_remove", "chain": chain,
+                  "protocol": protocol, "router": router,
+                  "position_manager": position_manager, "pair": pair,
+                  "token_a": token_a, "token_b": token_b,
+                  "token_id": token_id, "liquidity": liquidity,
+                  "amount_a_min_wei": amount_a_min_wei,
+                  "amount_b_min_wei": amount_b_min_wei, "burn_nft": burn_nft,
+                  "purpose": purpose, "deadline_sec": deadline_sec}
+        return self._call("dex_lp_remove", params)
+
+    def dex_lp_claim(self, *, chain: str, protocol: str, token_a: str,
+                     token_b: str, token_id: int,
+                     router: str | None = None,
+                     position_manager: str | None = None, purpose: str = "",
+                     deadline_sec: int | None = None) -> dict:
+        """Request an LP fee claim (v3 collect / v4 zero-liquidity
+        decrease + take). Always queued for human approval. v2 has no
+        separate claim — fees live in the LP token.
+        """
+        params = {"intent": "dex_lp_claim", "chain": chain,
+                  "protocol": protocol, "router": router,
+                  "position_manager": position_manager, "token_a": token_a,
+                  "token_b": token_b, "token_id": token_id,
+                  "purpose": purpose, "deadline_sec": deadline_sec}
+        return self._call("dex_lp_claim", params)
 
     def status(self) -> dict:
         return self._call("status")

@@ -626,8 +626,9 @@ holds a single asset.
 5. **How the daemon executes swaps (SPEC §10 v2 — approved by Speechless
    2026-09-23).** The queue holds *bounds*, never calldata: `dex-swap`
    carries venue, tokens, exact sell amount, minimum buy, max slippage,
-   deadline; `dex-lp-add` carries protocol, router, tokens, amounts, mins,
-   v3 fee/ticks. At execution the daemon fetches the firm quote *then*,
+   deadline; `dex-lp-add` carries protocol, router (v2/v3) or
+   position_manager + permit2 (v4), tokens, amounts (v4: hard max spends +
+   position liquidity), mins, v3 fee/ticks or v4 pool key. At execution the daemon fetches the firm quote *then*,
    validates it field-by-field against the approved bounds
    (`validate_swap_intent_against_quote` — chain, tokens, exact sell
    amount, min buy, allowance target, tx value), does the exact-amount
@@ -643,7 +644,51 @@ holds a single asset.
    seconds-from-now. Passing `3600` means January 1970 — the daemon
    refuses the intent as expired on the spot. Compute it as
    `$(date +%s) + seconds`.
-7. **Gas needs headroom.** The daemon signs legacy type-0 txs; on
+7. **LP add / remove / claim (v2, v3, v4).** The semantics below are the
+   official Uniswap contracts' behavior — Spellbook only adds the
+   guardrails. Sources: the v3
+   [NonfungiblePositionManager](https://github.com/Uniswap/v3-periphery/blob/main/contracts/NonfungiblePositionManager.sol)
+   source, the v4 [PositionManager](https://github.com/Uniswap/v4-periphery/blob/main/src/PositionManager.sol)
+   and [Actions](https://github.com/Uniswap/v4-periphery/blob/main/src/libraries/Actions.sol)
+   sources, and the official [position-manager](https://docs.uniswap.org/contracts/v4/guides/position-manager)
+   and [mint-position](https://docs.uniswap.org/docs/protocols/v4/guides/managing-liquidity/mint-position)
+   guides.
+   - **v2:** `dex-lp-add` → `addLiquidity` (exact amounts in, LP tokens
+     out). Fees are **not** distributed — they accrue inside the LP-token
+     value itself, so there is **no separate fee claim**; `dex-lp-claim`
+     refuses v2 and points at remove. `dex-lp-remove` → `removeLiquidity`
+     burns the LP tokens and returns both tokens; needs an exact-amount
+     approval of the LP (pair) token to the router first.
+   - **v3:** positions are NFTs on the NonfungiblePositionManager.
+     `dex-lp-add` → `mint` (fee tier 100/500/3000/10000, tick range).
+     Removing is two on-chain steps: `decreaseLiquidity` records what you
+     are owed but **does not transfer tokens** — follow it with
+     `collect`, and the daemon sends both in one `multicall`.
+     `dex-lp-claim` → `collect` (everything owed, max uint128).
+   - **v4:** positions are NFTs on the PositionManager; liquidity moves
+     happen as action batches through
+     `modifyLiquidities(actions, params, deadline)`. `dex-lp-add` →
+     `[MINT_POSITION, SETTLE_PAIR]`; the daemon computes the pool id from
+     the pool key and refuses unless the pool is initialized (`getSlot0`
+     non-zero). ERC-20 funding goes through **two exact-amount Permit2
+     stages**: token → Permit2, then Permit2 → PositionManager (expiry =
+     the intent deadline), skipping stages the on-chain allowance
+     already covers. `dex-lp-remove` →
+     `[DECREASE_LIQUIDITY, TAKE_PAIR]` (+ `BURN_POSITION` when
+     `burn-nft` retires the NFT on full exits). `dex-lp-claim` → a
+     **zero-liquidity** `DECREASE_LIQUIDITY` (the documented fee-credit
+     path) + `TAKE_PAIR`.
+   - **Spellbook's guardrails on top:** remove/claim always queue for
+     human approval (never auto-execute, never count toward velocity —
+     they receive value, not spend it). Execution pre-flights are
+     read-only and fail closed: the wallet must own the position NFT
+     (`ownerOf`), the v2 pair contract's `token0`/`token1` must match
+     the intent before any approval, v4 is **hookless pools only** and
+     refuses native currency (wrap to WETH first), approvals are always
+     exact amounts (never unlimited), and one approval = one execution
+     attempt with no retries. Never accept or forward opaque calldata —
+     the daemon builds every call from the approved bounds.
+8. **Gas needs headroom.** The daemon signs legacy type-0 txs; on
    EIP-1559 chains the node rejects a submission whose gas price lands
    below the block base fee (`max fee per gas less than block base
    fee`). Every EVM submission prices through the buffered
