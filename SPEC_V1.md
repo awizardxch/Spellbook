@@ -489,10 +489,27 @@ mTLS cert, or submit transactions.
   per-transaction approval is what authorizes the venue.
 - `GET /v1/dex_venues` → the user's recommended swap venues plus every
   known venue (API-key env var, served chain ids). Read-only.
-- `POST /v1/dex_lp_add {intent, chain, protocol, router, token_a, token_b,
-  amount_a_wei, amount_b_wei, amount_a_min_wei?, amount_b_min_wei?,
-  fee?, tick_lower?, tick_upper?, purpose?, deadline_sec?}` → bounded
-  LP-add intent (v2, §10)
+- `POST /v1/dex_lp_add {intent, chain, protocol, router?, position_manager?,
+  permit2?, token_a, token_b, amount_a_wei, amount_b_wei,
+  amount_a_min_wei?, amount_b_min_wei?, fee?, tick_lower?, tick_upper?,
+  tick_spacing?, hooks?, liquidity?, purpose?, deadline_sec?}` → bounded
+  LP-add intent (v2/v3/v4, §10). v2/v3 name a `router` (v2 router or v3
+  NonfungiblePositionManager); v4 names `position_manager` + `permit2`,
+  where `amount_a/b_wei` are the hard max spends and `liquidity` is the
+  position liquidity to mint.
+- `POST /v1/dex_lp_remove {intent, chain, protocol, router?,
+  position_manager?, pair?, token_a, token_b, token_id?, liquidity,
+  amount_a_min_wei?, amount_b_min_wei?, burn_nft?, purpose?,
+  deadline_sec?}` → bounded LP-remove intent (v2/v3/v4, §10). v2 burns
+  `liquidity` LP (pair) tokens; v3/v4 reduce `liquidity` units on the
+  position NFT; v4 `burn_nft` retires the NFT on full exits. Always
+  queued for human approval — never auto-executes, never counts toward
+  velocity.
+- `POST /v1/dex_lp_claim {intent, chain, protocol, router?,
+  position_manager?, token_a, token_b, token_id, purpose?,
+  deadline_sec?}` → bounded fee-claim intent (v3/v4, §10). v2 is refused:
+  v2 fees live in the LP-token value, so there is no separate claim —
+  use `dex_lp_remove`. Always queued like removes.
 - `GET /v1/queue` → pending human approvals with full decoded intent
 - `POST /v1/queue/{id}/approve` and `/reject` → approve-token only
 - `GET /v1/status` → balances, caps, velocity windows, queue depth
@@ -624,6 +641,26 @@ tooling (approve token), showing
     retried (existing §10 unknown-fate rule).
   - The human's queue view shows the decoded bounds (sell/buy/min/slippage
     or LP range/amounts/router) — never just a hash.
+  - **LP remove/claim (implemented 2026-09-25):** `dex_lp_remove` and
+    `dex_lp_claim` are force-queued — they always need human approval
+    and never auto-execute, even with an empty velocity footprint.
+    Remove/claim receive value rather than spend it, so they count
+    nothing toward velocity. Execution-time pre-flight checks (read-only,
+    fail closed): the v3/v4 position NFT must be owned by the wallet
+    (`ownerOf`); a v2 remove verifies the pair contract's `token0`/`token1`
+    match the intent before the exact-amount LP-token approval goes to
+    the router; a v4 add proves the address is a real PositionManager,
+    that the pool is initialized (`getSlot0` non-zero), and funds through
+    two exact-amount Permit2 stages (token → Permit2, then Permit2 →
+    PositionManager with expiry = the intent deadline — never unlimited).
+    v4 is hookless-pools-only and refuses native currency (wrap to WETH
+    first) in this release; v2 claims are refused outright because v2
+    fees are embedded in the LP token — the remove is the claim.
+    Protocol semantics come from the official Uniswap docs (v3
+    NonfungiblePositionManager, v4 PositionManager / Actions guides);
+    the spec above describes only what Spellbook adds: strict schemas,
+    daemon-built calldata, bounded approvals, forced human approval, and
+    one-attempt execution.
 - **No malicious-relay assumption:** the v1 "agent relays the human's chat
   approval" design is removed with the two-token split (S7). The daemon's job
   remains bounding *autonomous* agent spends.

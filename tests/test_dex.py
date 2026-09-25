@@ -20,8 +20,35 @@ from spellbook.dex import (
     decode_allowance,
     build_v2_swap_calldata,
     build_v2_add_liquidity_calldata,
+    build_v2_remove_liquidity_calldata,
     build_v3_exact_input_single_calldata,
     build_v3_mint_calldata,
+    build_v3_decrease_liquidity_calldata,
+    build_v3_collect_calldata,
+    build_v3_multicall_calldata,
+    build_v3_remove_and_collect_calldata,
+    V4_ACTIONS,
+    V4_NATIVE_CURRENCY,
+    build_v4_pool_key,
+    v4_pool_id,
+    build_v4_modify_liquidities_calldata,
+    build_v4_mint_params,
+    build_v4_decrease_params,
+    build_v4_settle_pair_params,
+    build_v4_take_pair_params,
+    build_v4_burn_params,
+    build_v4_lp_add_calldata,
+    build_v4_lp_remove_calldata,
+    build_v4_lp_claim_calldata,
+    build_permit2_allowance_calldata,
+    decode_permit2_allowance,
+    build_permit2_approve_calldata,
+    build_erc721_owner_of_calldata,
+    decode_erc721_owner_of,
+    build_posm_pool_manager_calldata,
+    decode_address_return,
+    build_pool_manager_get_slot0_calldata,
+    decode_slot0_sqrt_price_x96,
     compare_quotes,
     normalize_venue,
     venue_serves_chain,
@@ -115,22 +142,31 @@ def test_v2_add_liquidity_layout():
 # --------------------------------------------------------------------------
 
 def test_v3_exact_input_single_layout():
-    cd = build_v3_exact_input_single_calldata(A, B, 3000, C, 10**18, 997 * 10**15)
+    cd = build_v3_exact_input_single_calldata(
+        A, B, 3000, C, 10**18, 997 * 10**15, 1800000000)
     assert cd.startswith("0x414bf389")
     p = _payload(cd)
-    assert len(p) == 7 * 32  # single tuple param, all static
+    assert len(p) == 8 * 32  # single tuple param, all static
     assert p[12:32] == bytes.fromhex(A[2:])
     assert p[32 + 12:64] == bytes.fromhex(B[2:])
     assert _word(p, 2) == 3000
     assert p[3 * 32 + 12:4 * 32] == bytes.fromhex(C[2:])
-    assert _word(p, 4) == 10**18
-    assert _word(p, 5) == 997 * 10**15
-    assert _word(p, 6) == 0  # no price limit
+    assert _word(p, 4) == 1800000000  # deadline sits before amountIn
+    assert _word(p, 5) == 10**18
+    assert _word(p, 6) == 997 * 10**15
+    assert _word(p, 7) == 0  # no price limit
+
+
+def test_v3_exact_input_single_requires_deadline():
+    with pytest.raises(TypeError):
+        # deadline is positional-required: no accidental zero-deadline swaps
+        build_v3_exact_input_single_calldata(A, B, 3000, C, 100, 90)
 
 
 def test_v3_exact_input_single_rejects_bad_fee():
     with pytest.raises(DexError):
-        build_v3_exact_input_single_calldata(A, B, 1234, C, 100, 90)
+        build_v3_exact_input_single_calldata(A, B, 1234, C, 100, 90,
+                                             1800000000)
 
 
 def test_v3_mint_layout_and_sort_guard():
@@ -149,6 +185,256 @@ def test_v3_mint_layout_and_sort_guard():
         build_v3_mint_calldata(B, A, 500, -100, 100, 1, 1, 0, 0, C, 99)
     with pytest.raises(DexError):
         build_v3_mint_calldata(A, B, 500, 100, 100, 1, 1, 0, 0, C, 99)
+
+
+# --------------------------------------------------------------------------
+# LP remove / claim builders (v2, v3, v4) + Permit2
+# --------------------------------------------------------------------------
+
+DEADLINE = 1800000000
+
+
+def test_v2_remove_liquidity_layout():
+    cd = build_v2_remove_liquidity_calldata(A, B, 1234, 500, 600, C,
+                                            DEADLINE)
+    assert cd.startswith("0xbaa2abde")
+    p = _payload(cd)
+    assert len(p) == 7 * 32
+    assert p[12:32] == bytes.fromhex(A[2:])
+    assert p[32 + 12:64] == bytes.fromhex(B[2:])
+    assert _word(p, 2) == 1234
+    assert _word(p, 3) == 500
+    assert _word(p, 4) == 600
+    assert p[5 * 32 + 12:6 * 32] == bytes.fromhex(C[2:])
+    assert _word(p, 6) == DEADLINE
+    with pytest.raises(DexError):
+        build_v2_remove_liquidity_calldata(A, B, 0, 0, 0, C, DEADLINE)
+
+
+def test_v3_decrease_liquidity_layout():
+    cd = build_v3_decrease_liquidity_calldata(42, 1000, 900, 800, DEADLINE)
+    assert cd.startswith("0x0c49ccbe")
+    p = _payload(cd)
+    assert len(p) == 5 * 32
+    assert _word(p, 0) == 42
+    assert _word(p, 1) == 1000
+    assert _word(p, 2) == 900
+    assert _word(p, 3) == 800
+    assert _word(p, 4) == DEADLINE
+    with pytest.raises(DexError):
+        build_v3_decrease_liquidity_calldata(0, 1000, 0, 0, DEADLINE)
+
+
+def test_v3_collect_layout_defaults_to_max():
+    cd = build_v3_collect_calldata(42, C)
+    assert cd.startswith("0xfc6f7865")
+    p = _payload(cd)
+    assert len(p) == 4 * 32
+    assert _word(p, 0) == 42
+    assert p[32 + 12:64] == bytes.fromhex(C[2:])
+    assert _word(p, 2) == 2 ** 128 - 1  # type(uint128).max — claim all
+    assert _word(p, 3) == 2 ** 128 - 1
+
+
+def test_v3_multicall_nests_decrease_and_collect():
+    dec = build_v3_decrease_liquidity_calldata(42, 1000, 900, 800, DEADLINE)
+    col = build_v3_collect_calldata(42, C)
+    cd = build_v3_multicall_calldata([dec, col])
+    assert cd.startswith("0xac9650d8")
+    assert cd.count("0c49ccbe") == 1  # the inner calls ride along verbatim
+    assert cd.count("fc6f7865") == 1
+    with pytest.raises(DexError):
+        build_v3_multicall_calldata([])
+
+
+def test_v3_remove_and_collect_combines_both():
+    cd = build_v3_remove_and_collect_calldata(42, 1000, 900, 800, C,
+                                              DEADLINE)
+    assert cd.startswith("0xac9650d8")
+    assert cd.count("0c49ccbe") == 1
+    assert cd.count("fc6f7865") == 1
+
+
+def _v4_pool_args():
+    return dict(currency0=A, currency1=B, fee=3000, tick_spacing=60,
+                hooks="0x0000000000000000000000000000000000000000")
+
+
+def test_v4_pool_key_layout_and_id():
+    key = build_v4_pool_key(**_v4_pool_args())
+    assert len(key) == 5 * 32
+    assert key[12:32] == bytes.fromhex(A[2:])
+    assert key[32 + 12:64] == bytes.fromhex(B[2:])
+    assert int.from_bytes(key[64:96], "big") == 3000
+    assert int.from_bytes(key[96:128], "big", signed=True) == 60
+    assert key[128 + 12:160] == bytes(20)
+    pool_id = v4_pool_id(**_v4_pool_args())
+    assert pool_id.startswith("0x") and len(pool_id) == 66
+    # currency sort guard
+    with pytest.raises(DexError):
+        build_v4_pool_key(currency0=B, currency1=A, fee=3000,
+                          tick_spacing=60,
+                          hooks="0x0000000000000000000000000000000000000000")
+    # tick alignment guard lives on the mint path (5 not divisible by 60)
+    with pytest.raises(DexError):
+        build_v4_mint_params(tick_lower=5, tick_upper=120, liquidity=1,
+                             amount0_max=1, amount1_max=1, owner=C,
+                             **_v4_pool_args())
+    # native currency refused
+    with pytest.raises(DexError):
+        build_v4_pool_key(currency0=V4_NATIVE_CURRENCY, currency1=B,
+                          fee=3000, tick_spacing=60,
+                          hooks="0x" + "00" * 20)
+
+
+def test_v4_actions_match_official_constants():
+    assert V4_ACTIONS["INCREASE_LIQUIDITY"] == 0x00
+    assert V4_ACTIONS["DECREASE_LIQUIDITY"] == 0x01
+    assert V4_ACTIONS["MINT_POSITION"] == 0x02
+    assert V4_ACTIONS["BURN_POSITION"] == 0x03
+    assert V4_ACTIONS["SETTLE_PAIR"] == 0x0D
+    assert V4_ACTIONS["TAKE_PAIR"] == 0x11
+    assert V4_ACTIONS["CLOSE_CURRENCY"] == 0x12
+    assert V4_ACTIONS["SWEEP"] == 0x14
+
+
+def _unlock_actions(p: bytes):
+    """From a modifyLiquidities payload, return (actions_bytes,
+    params_list_of_bytes). Asserts the trailing deadline."""
+    unlock_off = _word(p, 0)
+    assert _word(p, 1) == DEADLINE
+    u = p[unlock_off:]
+    act_off = _word(u, 0)
+    par_off = _word(u, 1)
+    act_len = _word(u, act_off // 32)
+    actions = u[act_off + 32:act_off + 32 + act_len]
+    arr = u[par_off:]  # bytes[] encoding: length word, then offset heads
+    data = arr[32:]    # element offsets are relative to here
+    n = _word(arr, 0)
+    params = []
+    for i in range(n):
+        off = int.from_bytes(data[i * 32:(i + 1) * 32], "big")
+        ln = int.from_bytes(data[off:off + 32], "big")
+        params.append(data[off + 32:off + 32 + ln])
+    return actions, params
+
+
+def test_v4_modify_liquidities_layout():
+    mint = build_v4_mint_params(tick_lower=-120, tick_upper=120,
+                                liquidity=1000, amount0_max=900,
+                                amount1_max=800, owner=C, **_v4_pool_args())
+    settle = build_v4_settle_pair_params(A, B)
+    cd = build_v4_modify_liquidities_calldata(
+        bytes([V4_ACTIONS["MINT_POSITION"], V4_ACTIONS["SETTLE_PAIR"]]),
+        [mint, settle], DEADLINE)
+    assert cd.startswith("0xdd46508f")
+    p = _payload(cd)
+    actions, params = _unlock_actions(p)
+    assert actions == bytes([0x02, 0x0D])
+    assert len(params) == 2
+    assert params[1] == settle  # settle pair is static: (c0, c1)
+    # mint params: pool key first (5 words), then ticks
+    assert params[0][5 * 32:6 * 32] == (-120).to_bytes(32, "big",
+                                                      signed=True)
+    assert params[0][6 * 32:7 * 32] == (120).to_bytes(32, "big")
+    with pytest.raises(DexError):
+        build_v4_modify_liquidities_calldata(b"", [], DEADLINE)
+    with pytest.raises(DexError):
+        build_v4_modify_liquidities_calldata(b"\x99", [mint], DEADLINE)
+    with pytest.raises(DexError):
+        build_v4_modify_liquidities_calldata(b"\x02", [mint, settle],
+                                             DEADLINE)
+
+
+def test_v4_mint_params_layout():
+    m = build_v4_mint_params(tick_lower=-120, tick_upper=120,
+                             liquidity=1000, amount0_max=900,
+                             amount1_max=800, owner=C, **_v4_pool_args())
+    # head: poolKey(5w) tickL tickU liq a0Max a1Max owner hookData(offset)
+    assert int.from_bytes(m[5 * 32:6 * 32], "big", signed=True) == -120
+    assert int.from_bytes(m[6 * 32:7 * 32], "big", signed=True) == 120
+    assert int.from_bytes(m[7 * 32:8 * 32], "big") == 1000
+    assert int.from_bytes(m[8 * 32:9 * 32], "big") == 900
+    assert int.from_bytes(m[9 * 32:10 * 32], "big") == 800
+    assert m[10 * 32 + 12:11 * 32] == bytes.fromhex(C[2:])
+    assert int.from_bytes(m[11 * 32:12 * 32], "big") == 12 * 32  # hookData off
+
+
+def test_v4_decrease_params_claim_zero_is_allowed():
+    d = build_v4_decrease_params(7, 0, 0, 0)  # zero-liquidity = fee claim
+    assert int.from_bytes(d[0:32], "big") == 7
+    assert int.from_bytes(d[32:64], "big") == 0
+    with pytest.raises(DexError):
+        build_v4_decrease_params(7, -1, 0, 0)
+
+
+def test_v4_lp_add_remove_claim_action_bytes():
+    add = build_v4_lp_add_calldata(tick_lower=-120, tick_upper=120,
+                                   liquidity=1000, amount0_max=900,
+                                   amount1_max=800, recipient=C,
+                                   deadline=DEADLINE, **_v4_pool_args())
+    actions, params = _unlock_actions(_payload(add))
+    assert actions == bytes([0x02, 0x0D])  # MINT_POSITION, SETTLE_PAIR
+    assert len(params) == 2
+
+    rem = build_v4_lp_remove_calldata(7, 1000, 900, 800, A, B, C, DEADLINE)
+    actions, params = _unlock_actions(_payload(rem))
+    assert actions == bytes([0x01, 0x11])  # DECREASE, TAKE_PAIR
+    assert len(params) == 2
+
+    rem_burn = build_v4_lp_remove_calldata(7, 1000, 900, 800, A, B, C,
+                                           DEADLINE, burn_nft=True)
+    actions, params = _unlock_actions(_payload(rem_burn))
+    assert actions == bytes([0x01, 0x11, 0x03])  # + BURN_POSITION
+    assert len(params) == 3
+
+    claim = build_v4_lp_claim_calldata(7, A, B, C, DEADLINE)
+    actions, params = _unlock_actions(_payload(claim))
+    assert actions == bytes([0x01, 0x11])  # zero-liquidity DECREASE + TAKE
+    assert len(params) == 2
+    assert int.from_bytes(params[0][32:64], "big") == 0  # liquidity == 0
+
+    with pytest.raises(DexError):
+        build_v4_lp_remove_calldata(7, 0, 0, 0, A, B, C, DEADLINE)
+
+
+def test_permit2_builders():
+    al = build_permit2_allowance_calldata(A, B, C)
+    assert al.startswith("0x927da105")
+    p = _payload(al)
+    assert len(p) == 3 * 32
+    assert p[12:32] == bytes.fromhex(A[2:])
+    ap = build_permit2_approve_calldata(B, C, 1000, DEADLINE)
+    assert ap.startswith("0x87517c45")
+    p = _payload(ap)
+    assert len(p) == 4 * 32
+    assert _word(p, 2) == 1000
+    assert _word(p, 3) == DEADLINE
+    with pytest.raises(DexError):
+        build_permit2_approve_calldata(B, C, 0, DEADLINE)
+    # allowance decode round-trip
+    ret = "0x" + (1000).to_bytes(32, "big").hex() \
+        + DEADLINE.to_bytes(32, "big").hex() \
+        + (5).to_bytes(32, "big").hex()
+    assert decode_permit2_allowance(ret) == (1000, DEADLINE, 5)
+
+
+def test_owner_of_and_read_helpers():
+    cd = build_erc721_owner_of_calldata(42)
+    assert cd.startswith("0x6352211e")
+    p = _payload(cd)
+    assert _word(p, 0) == 42
+    ret = "0x" + bytes(12).hex() + C[2:]
+    assert decode_erc721_owner_of(ret) == C.lower()
+    assert decode_address_return(ret) == C.lower()
+    assert build_posm_pool_manager_calldata() == "0xdc4c90d3"
+    pid = v4_pool_id(**_v4_pool_args())
+    sc = build_pool_manager_get_slot0_calldata(pid)
+    assert sc.startswith("0xc815641c")
+    sq = "0x" + (2 ** 160).to_bytes(32, "big").hex()
+    assert decode_slot0_sqrt_price_x96(sq) == 2 ** 160
+    zero = "0x" + bytes(32).hex()
+    assert decode_slot0_sqrt_price_x96(zero) == 0
 
 
 # --------------------------------------------------------------------------
@@ -672,3 +958,206 @@ def test_rt_dex_venues(tmp_path):
     assert 8453 in out["known_venues"]["matcha"]["chain_ids"]
     assert 4663 in out["known_venues"]["matcha"]["chain_ids"]
     assert 46630 not in out["known_venues"]["matcha"]["chain_ids"]
+
+
+# ---------------------------------------------------------------------------
+# LP add v4 / LP remove / LP claim intent validation + queue flow
+# ---------------------------------------------------------------------------
+
+POSM = "0x3333333333333333333333333333333333333333"
+PERMIT2 = "0x4444444444444444444444444444444444444444"
+PAIR = "0x5555555555555555555555555555555555555555"
+NPM = "0x6666666666666666666666666666666666666666"
+HOOKLESS = "0x0000000000000000000000000000000000000000"
+
+
+def _v4_add_params(**over):
+    p = {"intent": "dex_lp_add", "chain": "evm-8453", "protocol": "v4",
+         "position_manager": POSM, "permit2": PERMIT2,
+         "token_a": A, "token_b": B,
+         "amount_a_wei": 10**18, "amount_b_wei": 2 * 10**18,
+         "liquidity": 10**15, "fee": 3000, "tick_spacing": 60,
+         "hooks": HOOKLESS, "tick_lower": -600, "tick_upper": 600,
+         "purpose": "test"}
+    p.update(over)
+    return p
+
+
+def _remove_params(**over):
+    p = {"intent": "dex_lp_remove", "chain": "evm-8453", "protocol": "v3",
+         "router": NPM, "token_a": A, "token_b": B, "token_id": 7,
+         "liquidity": 10**15, "amount_a_min_wei": 1, "amount_b_min_wei": 2,
+         "purpose": "test"}
+    p.update(over)
+    return p
+
+
+def _claim_params(**over):
+    p = {"intent": "dex_lp_claim", "chain": "evm-8453", "protocol": "v3",
+         "router": NPM, "token_a": A, "token_b": B, "token_id": 7,
+         "purpose": "test"}
+    p.update(over)
+    return p
+
+
+def test_validate_lp_add_v4_happy(tmp_path, monkeypatch):
+    _base_chain(monkeypatch)
+    d = _daemon(tmp_path)
+    intent = d._validate_dex_lp_add(_v4_add_params())
+    assert intent["protocol"] == "v4"
+    assert intent["position_manager"] == POSM
+    assert intent["liquidity"] == 10**15
+    assert intent["chain_id"] == 8453
+
+
+def test_validate_lp_add_v4_rejects_router(tmp_path, monkeypatch):
+    _base_chain(monkeypatch)
+    d = _daemon(tmp_path)
+    with pytest.raises(Exception, match="v2/v3-only"):
+        d._validate_dex_lp_add(_v4_add_params(router=NPM))
+
+
+def test_validate_lp_add_v4_rejects_hooked_pool(tmp_path, monkeypatch):
+    _base_chain(monkeypatch)
+    d = _daemon(tmp_path)
+    with pytest.raises(Exception, match="hook"):
+        d._validate_dex_lp_add(_v4_add_params(
+            hooks="0x7777777777777777777777777777777777777777"))
+
+
+def test_validate_lp_add_v4_rejects_misaligned_ticks(tmp_path, monkeypatch):
+    _base_chain(monkeypatch)
+    d = _daemon(tmp_path)
+    with pytest.raises(Exception, match="align"):
+        d._validate_dex_lp_add(_v4_add_params(tick_lower=-601))
+
+
+def test_validate_lp_add_v4_rejects_min_fields(tmp_path, monkeypatch):
+    _base_chain(monkeypatch)
+    d = _daemon(tmp_path)
+    with pytest.raises(Exception, match="v2/v3-only"):
+        d._validate_dex_lp_add(_v4_add_params(amount_a_min_wei=5))
+
+
+def test_validate_lp_add_v4_rejects_bad_fee(tmp_path, monkeypatch):
+    _base_chain(monkeypatch)
+    d = _daemon(tmp_path)
+    with pytest.raises(Exception, match="uint24"):
+        d._validate_dex_lp_add(_v4_add_params(fee=2**24))
+
+
+def test_validate_lp_add_v4_rejects_native(tmp_path, monkeypatch):
+    _base_chain(monkeypatch)
+    d = _daemon(tmp_path)
+    with pytest.raises(Exception, match="wrap to WETH"):
+        d._validate_dex_lp_add(_v4_add_params(token_a=HOOKLESS))
+
+
+def test_validate_lp_add_v4_rejects_unknown_field(tmp_path, monkeypatch):
+    _base_chain(monkeypatch)
+    d = _daemon(tmp_path)
+    with pytest.raises(Exception, match="schema violation"):
+        d._validate_dex_lp_add(_v4_add_params(evil_calldata="0xdead"))
+
+
+def test_validate_lp_remove_v2_happy(tmp_path, monkeypatch):
+    _base_chain(monkeypatch)
+    d = _daemon(tmp_path)
+    intent = d._validate_dex_lp_remove(
+        _remove_params(protocol="v2", router="0x8888888888888888888888888888888888888888",
+                       pair=PAIR, token_id=None))
+    assert intent["pair"] == PAIR
+    assert intent["token_id"] is None
+
+
+def test_validate_lp_remove_v2_requires_pair(tmp_path, monkeypatch):
+    _base_chain(monkeypatch)
+    d = _daemon(tmp_path)
+    with pytest.raises(Exception, match="pair"):
+        d._validate_dex_lp_remove(
+            _remove_params(protocol="v2",
+                           router="0x8888888888888888888888888888888888888888",
+                           pair=None, token_id=None))
+
+
+def test_validate_lp_remove_v3_requires_token_id(tmp_path, monkeypatch):
+    _base_chain(monkeypatch)
+    d = _daemon(tmp_path)
+    with pytest.raises(Exception, match="token_id"):
+        d._validate_dex_lp_remove(_remove_params(token_id=None))
+
+
+def test_validate_lp_remove_v4_happy(tmp_path, monkeypatch):
+    _base_chain(monkeypatch)
+    d = _daemon(tmp_path)
+    intent = d._validate_dex_lp_remove(
+        _remove_params(protocol="v4", position_manager=POSM, router=None,
+                       burn_nft=True))
+    assert intent["position_manager"] == POSM
+    assert intent["burn_nft"] is True
+
+
+def test_validate_lp_remove_rejects_burn_on_v3(tmp_path, monkeypatch):
+    _base_chain(monkeypatch)
+    d = _daemon(tmp_path)
+    with pytest.raises(Exception, match="v4-only"):
+        d._validate_dex_lp_remove(_remove_params(burn_nft=True))
+
+
+def test_validate_lp_remove_rejects_unknown_field(tmp_path, monkeypatch):
+    _base_chain(monkeypatch)
+    d = _daemon(tmp_path)
+    with pytest.raises(Exception, match="schema violation"):
+        d._validate_dex_lp_remove(_remove_params(opaque="0x1234"))
+
+
+def test_validate_lp_claim_v3_happy(tmp_path, monkeypatch):
+    _base_chain(monkeypatch)
+    d = _daemon(tmp_path)
+    intent = d._validate_dex_lp_claim(_claim_params())
+    assert intent["protocol"] == "v3"
+    assert intent["token_id"] == 7
+
+
+def test_validate_lp_claim_rejects_v2(tmp_path, monkeypatch):
+    _base_chain(monkeypatch)
+    d = _daemon(tmp_path)
+    with pytest.raises(Exception, match="dex_lp_remove"):
+        d._validate_dex_lp_claim(_claim_params(protocol="v2"))
+
+
+def test_validate_lp_claim_v4_happy(tmp_path, monkeypatch):
+    _base_chain(monkeypatch)
+    d = _daemon(tmp_path)
+    intent = d._validate_dex_lp_claim(
+        _claim_params(protocol="v4", position_manager=POSM, router=None))
+    assert intent["position_manager"] == POSM
+
+
+def test_velocity_entries_remove_claim_empty(tmp_path, monkeypatch):
+    _base_chain(monkeypatch)
+    d = _daemon(tmp_path)
+    assert d._velocity_entries(_remove_params()) == []
+    assert d._velocity_entries(_claim_params()) == []
+
+
+def test_velocity_entries_lp_add_v4_uses_max_spends(tmp_path, monkeypatch):
+    _base_chain(monkeypatch)
+    d = _daemon(tmp_path)
+    entries = d._velocity_entries(_v4_add_params())
+    assert entries == [("evm-8453", A.lower(), 10**18),
+                       ("evm-8453", B.lower(), 2 * 10**18)]
+
+
+def test_rt_lp_remove_always_queues(tmp_path, monkeypatch):
+    _base_chain(monkeypatch)
+    d = _daemon(tmp_path)
+    out = d.rt_dex_lp_remove(_remove_params(), "muse-test")
+    assert out["decision"] == "queued"
+
+
+def test_rt_lp_claim_always_queues(tmp_path, monkeypatch):
+    _base_chain(monkeypatch)
+    d = _daemon(tmp_path)
+    out = d.rt_dex_lp_claim(_claim_params(), "muse-test")
+    assert out["decision"] == "queued"

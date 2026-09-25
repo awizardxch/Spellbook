@@ -59,7 +59,7 @@ REQUEST_ROUTES = {
     "coin_combine", "coin_split", "coin_autocombine",
     "bulk_send", "multi_send",
     "message_sign",
-    "dex_swap", "dex_lp_add", "dex_venues",
+    "dex_swap", "dex_lp_add", "dex_lp_remove", "dex_lp_claim", "dex_venues",
 }
 APPROVE_ROUTES = {
     "queue_approve", "queue_reject", "publish_directory_entry",
@@ -125,7 +125,17 @@ SWAP_FIELDS = {"intent", "chain", "venue", "sell_token", "buy_token",
 LP_ADD_FIELDS = {"intent", "chain", "protocol", "router", "token_a", "token_b",
                  "amount_a_wei", "amount_b_wei", "amount_a_min_wei",
                  "amount_b_min_wei", "fee", "tick_lower", "tick_upper",
-                 "purpose", "deadline_sec"}
+                 "purpose", "deadline_sec",
+                 # v4-only: PositionManager + Permit2 + pool key + liquidity
+                 "position_manager", "permit2", "tick_spacing", "hooks",
+                 "liquidity"}
+LP_REMOVE_FIELDS = {"intent", "chain", "protocol", "router",
+                    "position_manager", "pair", "token_a", "token_b",
+                    "token_id", "liquidity", "amount_a_min_wei",
+                    "amount_b_min_wei", "burn_nft", "purpose", "deadline_sec"}
+LP_CLAIM_FIELDS = {"intent", "chain", "protocol", "router",
+                   "position_manager", "token_a", "token_b", "token_id",
+                   "purpose", "deadline_sec"}
 
 # EVM gas-price headroom, in basis points over the node's quoted price.
 # Signing is legacy type-0 (see evm.py): on EIP-1559 chains the node reads
@@ -752,6 +762,10 @@ class Daemon:
             return self._execute_evm_swap(params)
         if intent == "dex_lp_add":
             return self._execute_evm_lp_add(params)
+        if intent == "dex_lp_remove":
+            return self._execute_evm_lp_remove(params)
+        if intent == "dex_lp_claim":
+            return self._execute_evm_lp_claim(params)
         entry = (self.evm_cfg.get("chains") or {}).get(chain) or {}
         if not entry.get("enabled") or not entry.get("rpc_url"):
             return {"submitted": False,
@@ -977,6 +991,9 @@ class Daemon:
             raise evm.EvmError(
                 "LP deadline too close — calldata would revert on-chain")
         protocol = params["protocol"]
+        if protocol == "v4":
+            return self._execute_evm_lp_add_v4(
+                params, info, rpc, priv, sender, call_deadline)
         tok_a, tok_b = params["token_a"], params["token_b"]
         amt_a, amt_b = params["amount_a_wei"], params["amount_b_wei"]
         if protocol == "v2":
@@ -1013,7 +1030,200 @@ class Daemon:
             out["approve_tx_hashes"] = approve_txs
         return out
 
-    def _sage_rpc_ready(self) -> bool:
+    def _execute_evm_lp_add_v4(self, params: dict, info, rpc, priv: bytes,
+                               sender: str, call_deadline: int) -> dict:
+        """Execute an approved v4 dex_lp_add intent.
+
+        Two-stage Permit2 approvals (token -> Permit2, then Permit2 ->
+        PositionManager), both exact-amount and only where short, then
+        modifyLiquidities([MINT_POSITION, SETTLE_PAIR]). Pre-flight reads
+        prove the address is a PositionManager and the pool is
+        initialized — read-only, fail closed.
+        """
+        posm = params["position_manager"]
+        permit2 = params["permit2"]
+        c0, c1 = params["token_a"], params["token_b"]  # sorted at validation
+        pool_manager = dex_mod.decode_address_return(rpc.eth_call(
+            posm, dex_mod.build_posm_pool_manager_calldata(), sender))
+        pool_id = dex_mod.v4_pool_id(c0, c1, params["fee"],
+                                     params["tick_spacing"], params["hooks"])
+        sqrt_price = dex_mod.decode_slot0_sqrt_price_x96(rpc.eth_call(
+            pool_manager,
+            dex_mod.build_pool_manager_get_slot0_calldata(pool_id), sender))
+        if sqrt_price == 0:
+            raise evm.EvmError("v4 pool is not initialized — mint would "
+                               "revert on-chain, refusing")
+        data = dex_mod.build_v4_lp_add_calldata(
+            c0, c1, params["fee"], params["tick_spacing"], params["hooks"],
+            params["tick_lower"], params["tick_upper"], params["liquidity"],
+            params["amount_a_wei"], params["amount_b_wei"], sender,
+            call_deadline)
+        nonce = rpc.nonce(sender)
+        gas_price = _evm_gas_price(rpc)
+        approve_txs = []
+        for tok, max_amt in ((c0, params["amount_a_wei"]),
+                             (c1, params["amount_b_wei"])):
+            ah, nonce = self._evm_ensure_allowance(
+                rpc, priv, info["chain_id"], sender, nonce, tok, permit2,
+                max_amt, gas_price)
+            if ah:
+                approve_txs.append(ah)
+            ph, nonce = self._evm_ensure_permit2_allowance(
+                rpc, priv, info["chain_id"], sender, nonce, tok, permit2,
+                posm, max_amt, call_deadline, gas_price)
+            if ph:
+                approve_txs.append(ph)
+        tx_hash, _, block = self._evm_send_call(
+            rpc, priv, info["chain_id"], sender, nonce, posm, 0, data,
+            gas_price, "lp_add_v4")
+        out = {"submitted": True, "tx_hash": tx_hash, "block": block,
+               "from": sender, "pool_manager": pool_manager,
+               "pool_id": pool_id}
+        if approve_txs:
+            out["approve_tx_hashes"] = approve_txs
+        return out
+
+    def _evm_ensure_permit2_allowance(self, rpc, priv: bytes, chain_id: int,
+                                      sender: str, nonce: int, token: str,
+                                      permit2: str, spender: str,
+                                      amount_wei: int, expiration: int,
+                                      gas_price_wei: int) -> tuple:
+        """Permit2 stage-2 approval, exact amount, expiry = intent deadline.
+
+        Skips when the on-chain (amount, expiration) already covers the
+        spend. Permit2.approve replaces the allowance — never unlimited.
+        Returns (approve_tx_hash | None, next_nonce).
+        """
+        raw = rpc.eth_call(
+            permit2,
+            dex_mod.build_permit2_allowance_calldata(sender, token, spender),
+            sender)
+        amt, exp, _pnonce = dex_mod.decode_permit2_allowance(raw)
+        if amt >= amount_wei and exp >= expiration:
+            return None, nonce
+        data = dex_mod.build_permit2_approve_calldata(
+            token, spender, amount_wei, expiration)
+        tx_hash, next_nonce, _block = self._evm_send_call(
+            rpc, priv, chain_id, sender, nonce, permit2, 0, data,
+            gas_price_wei, "permit2_approve")
+        return tx_hash, next_nonce
+
+    def _evm_assert_position_owner(self, rpc, nft_contract: str,
+                                   token_id: int, sender: str) -> None:
+        """Fail closed unless this wallet owns the v3/v4 position NFT."""
+        owner = dex_mod.decode_erc721_owner_of(rpc.eth_call(
+            nft_contract, dex_mod.build_erc721_owner_of_calldata(token_id),
+            sender))
+        if owner.lower() != sender.lower():
+            raise evm.EvmError(
+                f"position NFT {token_id} is not owned by this wallet — "
+                "refusing")
+
+    def _execute_evm_lp_remove(self, params: dict) -> dict:
+        """Execute an approved dex_lp_remove intent.
+
+        v2: verify the pair contract's token0/token1 match, approve the
+        exact LP-token burn amount to the router, then removeLiquidity.
+        v3: assert NFT ownership, then multicall(decrease, collect).
+        v4: assert NFT ownership, then
+        modifyLiquidities([DECREASE, TAKE] [+ BURN on full exits]).
+        """
+        info, rpc, priv, sender = self._evm_dex_guards(params)
+        dl = params.get("deadline_sec")
+        if dl is not None and time.time() > dl:
+            raise evm.EvmError("LP intent expired — refusing")
+        call_deadline = dl or int(time.time()) + 600
+        if call_deadline <= time.time() + 60:
+            raise evm.EvmError(
+                "LP deadline too close — calldata would revert on-chain")
+        protocol = params["protocol"]
+        tok_a, tok_b = params["token_a"], params["token_b"]
+        nonce = rpc.nonce(sender)
+        gas_price = _evm_gas_price(rpc)
+        approve_txs = []
+        if protocol == "v2":
+            pair = params["pair"]
+            pt0 = dex_mod.decode_address_return(rpc.eth_call(
+                pair, dex_mod.build_v2_pair_token0_calldata(), sender))
+            pt1 = dex_mod.decode_address_return(rpc.eth_call(
+                pair, dex_mod.build_v2_pair_token1_calldata(), sender))
+            s0, s1 = sorted([tok_a.lower(), tok_b.lower()])
+            if pt0.lower() != s0 or pt1.lower() != s1:
+                raise evm.EvmError(
+                    "pair token0/token1 do not match token_a/token_b — "
+                    "refusing to approve a stranger token")
+            data = dex_mod.build_v2_remove_liquidity_calldata(
+                tok_a, tok_b, params["liquidity"],
+                params["amount_a_min_wei"], params["amount_b_min_wei"],
+                sender, call_deadline)
+            ah, nonce = self._evm_ensure_allowance(
+                rpc, priv, info["chain_id"], sender, nonce, pair,
+                params["router"], params["liquidity"], gas_price)
+            if ah:
+                approve_txs.append(ah)
+            to, what = params["router"], "lp_remove_v2"
+        elif protocol == "v3":
+            self._evm_assert_position_owner(rpc, params["router"],
+                                            params["token_id"], sender)
+            data = dex_mod.build_v3_remove_and_collect_calldata(
+                params["token_id"], params["liquidity"],
+                params["amount_a_min_wei"], params["amount_b_min_wei"],
+                sender, call_deadline)
+            to, what = params["router"], "lp_remove_v3"
+        else:  # v4
+            self._evm_assert_position_owner(rpc, params["position_manager"],
+                                            params["token_id"], sender)
+            data = dex_mod.build_v4_lp_remove_calldata(
+                params["token_id"], params["liquidity"],
+                params["amount_a_min_wei"], params["amount_b_min_wei"],
+                tok_a, tok_b, sender, call_deadline,
+                burn_nft=params["burn_nft"])
+            to, what = params["position_manager"], "lp_remove_v4"
+        tx_hash, _, block = self._evm_send_call(
+            rpc, priv, info["chain_id"], sender, nonce, to, 0, data,
+            gas_price, what)
+        out = {"submitted": True, "tx_hash": tx_hash, "block": block,
+               "from": sender}
+        if approve_txs:
+            out["approve_tx_hashes"] = approve_txs
+        return out
+
+    def _execute_evm_lp_claim(self, params: dict) -> dict:
+        """Execute an approved dex_lp_claim intent.
+
+        v3: assert NFT ownership, then collect (max uint128 = everything
+        owed). v4: assert NFT ownership, then a zero-liquidity decrease
+        (the documented fee-credit path) + take pair.
+        """
+        info, rpc, priv, sender = self._evm_dex_guards(params)
+        dl = params.get("deadline_sec")
+        if dl is not None and time.time() > dl:
+            raise evm.EvmError("LP intent expired — refusing")
+        protocol = params["protocol"]
+        nonce = rpc.nonce(sender)
+        gas_price = _evm_gas_price(rpc)
+        if protocol == "v3":
+            self._evm_assert_position_owner(rpc, params["router"],
+                                            params["token_id"], sender)
+            data = dex_mod.build_v3_collect_calldata(params["token_id"],
+                                                     sender)
+            to, what = params["router"], "lp_claim_v3"
+        else:  # v4
+            self._evm_assert_position_owner(rpc, params["position_manager"],
+                                            params["token_id"], sender)
+            call_deadline = dl or int(time.time()) + 600
+            if call_deadline <= time.time() + 60:
+                raise evm.EvmError(
+                    "LP deadline too close — calldata would revert on-chain")
+            data = dex_mod.build_v4_lp_claim_calldata(
+                params["token_id"], params["token_a"], params["token_b"],
+                sender, call_deadline)
+            to, what = params["position_manager"], "lp_claim_v4"
+        tx_hash, _, block = self._evm_send_call(
+            rpc, priv, info["chain_id"], sender, nonce, to, 0, data,
+            gas_price, what)
+        return {"submitted": True, "tx_hash": tx_hash, "block": block,
+                "from": sender}
         """True if something answers on the Sage RPC port (TCP only)."""
         port = int(self.chia_cfg.get("rpc_port", 9257))
         try:
@@ -3292,18 +3502,30 @@ class Daemon:
         if chain not in evm.CHAINS:
             raise evm.EvmError(f"unknown EVM chain: {chain!r}")
         protocol = p.get("protocol")
-        if protocol not in ("v2", "v3"):
+        if protocol not in ("v2", "v3", "v4"):
             raise evm.EvmError(
-                f"protocol must be 'v2' or 'v3', got {protocol!r}")
-        router = p.get("router", "")
-        if not evm.is_address(router):
-            raise evm.EvmError(f"bad router address: {router!r}")
+                f"protocol must be 'v2', 'v3' or 'v4', got {protocol!r}")
         tok_a, tok_b = p.get("token_a", ""), p.get("token_b", "")
         for tok, what in ((tok_a, "token_a"), (tok_b, "token_b")):
             if not evm.is_address(tok):
                 raise evm.EvmError(f"bad {what} address: {tok!r}")
         if tok_a.lower() == tok_b.lower():
             raise evm.EvmError("token_a == token_b — refusing")
+        fee, tl, tu = p.get("fee"), p.get("tick_lower"), p.get("tick_upper")
+        dl = p.get("deadline_sec")
+        if dl is not None and (not isinstance(dl, int) or dl <= 0):
+            raise evm.EvmError("deadline_sec must be a positive unix timestamp")
+        if protocol == "v4":
+            return self._validate_dex_lp_add_v4(
+                p, chain, tok_a, tok_b, fee, tl, tu, dl)
+        # v2/v3: router path, v4-only fields refused
+        router = p.get("router", "")
+        if not evm.is_address(router):
+            raise evm.EvmError(f"bad router address: {router!r}")
+        for k in ("position_manager", "permit2", "tick_spacing", "hooks",
+                  "liquidity"):
+            if p.get(k) is not None:
+                raise evm.EvmError(f"{k} is a v4-only field")
         for k in ("amount_a_wei", "amount_b_wei"):
             v = p.get(k)
             if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
@@ -3315,7 +3537,6 @@ class Daemon:
         if p["amount_a_min_wei"] > p["amount_a_wei"] or \
                 p["amount_b_min_wei"] > p["amount_b_wei"]:
             raise evm.EvmError("min amounts exceed desired amounts — refusing")
-        fee, tl, tu = p.get("fee"), p.get("tick_lower"), p.get("tick_upper")
         if protocol == "v3":
             if fee not in (100, 500, 3000, 10000):
                 raise evm.EvmError("v3 fee must be one of 100/500/3000/10000")
@@ -3323,9 +3544,6 @@ class Daemon:
                 raise evm.EvmError("tick_lower must be < tick_upper")
         elif fee is not None or tl is not None or tu is not None:
             raise evm.EvmError("fee/ticks are v3-only fields")
-        dl = p.get("deadline_sec")
-        if dl is not None and (not isinstance(dl, int) or dl <= 0):
-            raise evm.EvmError("deadline_sec must be a positive unix timestamp")
         return {"intent": "dex_lp_add", "chain": chain,
                 "protocol": protocol, "router": router,
                 "token_a": tok_a, "token_b": tok_b,
@@ -3334,6 +3552,78 @@ class Daemon:
                 "amount_a_min_wei": p["amount_a_min_wei"],
                 "amount_b_min_wei": p["amount_b_min_wei"],
                 "fee": fee, "tick_lower": tl, "tick_upper": tu,
+                "purpose": p.get("purpose", ""), "deadline_sec": dl,
+                "chain_id": evm.CHAINS[chain]["chain_id"]}
+
+    def _validate_dex_lp_add_v4(self, p: dict, chain: str, tok_a: str,
+                                tok_b: str, fee, tl, tu, dl) -> dict:
+        """v4 branch of dex_lp_add validation.
+
+        amount_a_wei/amount_b_wei are the HARD MAXIMUM spends per token
+        (mint's amount0Max/amount1Max); ``liquidity`` is the position
+        liquidity to mint, computed off-chain by the agent. Approvals go
+        through Permit2 in two exact-amount stages.
+        """
+        posm = p.get("position_manager", "")
+        if not evm.is_address(posm):
+            raise evm.EvmError(f"bad position_manager address: {posm!r}")
+        permit2 = p.get("permit2", "")
+        if not evm.is_address(permit2):
+            raise evm.EvmError(f"bad permit2 address: {permit2!r}")
+        if p.get("router") is not None:
+            raise evm.EvmError("router is v2/v3-only — v4 uses "
+                               "position_manager")
+        for k in ("amount_a_min_wei", "amount_b_min_wei"):
+            if p.get(k) not in (None, 0):
+                raise evm.EvmError(f"{k} is v2/v3-only — v4 bounds are the "
+                                   "max spends amount_a_wei/amount_b_wei")
+        for k in ("amount_a_wei", "amount_b_wei"):
+            v = p.get(k)
+            if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
+                raise evm.EvmError(f"v4 {k} (max spend) must be a positive "
+                                   "int in base units")
+        liq = p.get("liquidity")
+        if isinstance(liq, bool) or not isinstance(liq, int) or liq <= 0:
+            raise evm.EvmError("v4 liquidity must be a positive int "
+                               "(position liquidity units)")
+        if isinstance(fee, bool) or not isinstance(fee, int) or \
+                fee < 0 or fee >= 2 ** 24:
+            raise evm.EvmError("v4 fee must be a uint24 "
+                               "(0x800000 = dynamic-fee hook)")
+        ts = p.get("tick_spacing")
+        if isinstance(ts, bool) or not isinstance(ts, int) or ts == 0 or \
+                abs(ts) >= 2 ** 23:
+            raise evm.EvmError("v4 tick_spacing must be a non-zero int24")
+        hooks = p.get("hooks", "")
+        if not evm.is_address(hooks):
+            raise evm.EvmError(f"bad hooks address: {hooks!r}")
+        if hooks.lower() != dex_mod.V4_NATIVE_CURRENCY:
+            # First release: hookless pools only. A hook contract is
+            # arbitrary code that runs inside the pool lifecycle — allow it
+            # only after a reviewed per-hook allowlist exists.
+            raise evm.EvmError("v4 hooked pools are not supported in this "
+                               "release — hooks must be the zero address")
+        if not isinstance(tl, int) or not isinstance(tu, int) or tl >= tu:
+            raise evm.EvmError("v4 tick_lower must be < tick_upper")
+        if tl % ts != 0 or tu % ts != 0:
+            raise evm.EvmError("v4 ticks must align with tick_spacing")
+        if tok_a.lower() >= tok_b.lower():
+            raise evm.EvmError("v4 requires token_a < token_b (sort order)")
+        if tok_a.lower() == dex_mod.V4_NATIVE_CURRENCY or \
+                tok_b.lower() == dex_mod.V4_NATIVE_CURRENCY:
+            raise evm.EvmError("v4 native-currency positions are not "
+                               "supported yet — wrap to WETH first")
+        if tok_a.lower() == dex_mod.V4_NATIVE_CURRENCY or \
+                tok_b.lower() == dex_mod.V4_NATIVE_CURRENCY:
+            raise evm.EvmError("v4 native-currency positions are not "
+                               "supported yet — wrap to WETH first")
+        return {"intent": "dex_lp_add", "chain": chain, "protocol": "v4",
+                "position_manager": posm, "permit2": permit2,
+                "token_a": tok_a, "token_b": tok_b,
+                "amount_a_wei": p["amount_a_wei"],
+                "amount_b_wei": p["amount_b_wei"],
+                "liquidity": liq, "fee": fee, "tick_spacing": ts,
+                "hooks": hooks, "tick_lower": tl, "tick_upper": tu,
                 "purpose": p.get("purpose", ""), "deadline_sec": dl,
                 "chain_id": evm.CHAINS[chain]["chain_id"]}
 
@@ -3353,6 +3643,172 @@ class Daemon:
                    (intent["chain"], intent["token_b"].lower(),
                     intent["amount_b_wei"])]
         return self._run_fund_intent(intent, muse_id, entries, "dex_lp_add")
+
+    def _validate_dex_lp_remove(self, p: dict) -> dict:
+        """Schema + bounds validation for a dex_lp_remove intent.
+
+        v2 burns LP (pair) tokens via the router; v3 decreases via the NPM
+        multicall(decrease, collect); v4 decreases via PositionManager
+        modifyLiquidities (burn_nft retires the NFT on full exits).
+        """
+        fields = set(p)
+        if not fields.issubset(LP_REMOVE_FIELDS) or "intent" not in p:
+            raise evm.EvmError(
+                "schema violation: unknown dex_lp_remove fields rejected")
+        if p.get("intent") != "dex_lp_remove":
+            raise evm.EvmError("schema violation: intent != dex_lp_remove")
+        chain = p.get("chain")
+        if chain not in evm.CHAINS:
+            raise evm.EvmError(f"unknown EVM chain: {chain!r}")
+        protocol = p.get("protocol")
+        if protocol not in ("v2", "v3", "v4"):
+            raise evm.EvmError(
+                f"protocol must be 'v2', 'v3' or 'v4', got {protocol!r}")
+        tok_a, tok_b = p.get("token_a", ""), p.get("token_b", "")
+        for tok, what in ((tok_a, "token_a"), (tok_b, "token_b")):
+            if not evm.is_address(tok):
+                raise evm.EvmError(f"bad {what} address: {tok!r}")
+        if tok_a.lower() == tok_b.lower():
+            raise evm.EvmError("token_a == token_b — refusing")
+        liq = p.get("liquidity")
+        if isinstance(liq, bool) or not isinstance(liq, int) or liq <= 0:
+            raise evm.EvmError("liquidity must be a positive int (LP tokens "
+                               "for v2, liquidity units for v3/v4)")
+        for k in ("amount_a_min_wei", "amount_b_min_wei"):
+            v = p.get(k)
+            if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                raise evm.EvmError(f"{k} must be a non-negative int")
+        dl = p.get("deadline_sec")
+        if dl is not None and (not isinstance(dl, int) or dl <= 0):
+            raise evm.EvmError("deadline_sec must be a positive unix timestamp")
+        burn = p.get("burn_nft", False)
+        if not isinstance(burn, bool):
+            raise evm.EvmError("burn_nft must be a bool")
+        out = {"intent": "dex_lp_remove", "chain": chain, "protocol": protocol,
+               "token_a": tok_a, "token_b": tok_b, "liquidity": liq,
+               "amount_a_min_wei": p["amount_a_min_wei"],
+               "amount_b_min_wei": p["amount_b_min_wei"],
+               "burn_nft": burn, "purpose": p.get("purpose", ""),
+               "deadline_sec": dl,
+               "chain_id": evm.CHAINS[chain]["chain_id"]}
+        if protocol == "v4":
+            posm = p.get("position_manager", "")
+            if not evm.is_address(posm):
+                raise evm.EvmError(
+                    f"bad position_manager address: {posm!r}")
+            if p.get("router") is not None:
+                raise evm.EvmError("router is v2/v3-only — v4 uses "
+                                   "position_manager")
+            if p.get("pair") is not None:
+                raise evm.EvmError("pair is v2-only")
+            if p.get("token_id") is None:
+                raise evm.EvmError("v4 remove needs the position token_id")
+            out["position_manager"] = posm
+        else:
+            router = p.get("router", "")
+            if not evm.is_address(router):
+                raise evm.EvmError(f"bad router address: {router!r}")
+            if p.get("position_manager") is not None:
+                raise evm.EvmError("position_manager is v4-only")
+            out["router"] = router
+            if protocol == "v2":
+                pair = p.get("pair", "")
+                if not evm.is_address(pair):
+                    raise evm.EvmError(
+                        f"bad pair (LP token) address: {pair!r}")
+                if p.get("token_id") is not None:
+                    raise evm.EvmError("token_id is v3/v4-only")
+                out["pair"] = pair
+            else:  # v3
+                if p.get("pair") is not None:
+                    raise evm.EvmError("pair is v2-only")
+                if p.get("token_id") is None:
+                    raise evm.EvmError("v3 remove needs the position token_id")
+            if burn:
+                raise evm.EvmError("burn_nft is v4-only")
+        tid = p.get("token_id")
+        if tid is not None and (isinstance(tid, bool) or
+                                not isinstance(tid, int) or tid <= 0):
+            raise evm.EvmError("token_id must be a positive int")
+        out["token_id"] = tid
+        if protocol in ("v3", "v4") and tok_a.lower() >= tok_b.lower():
+            raise evm.EvmError("v3/v4 require token_a < token_b (sort order)")
+        return out
+
+    def _validate_dex_lp_claim(self, p: dict) -> dict:
+        """Schema + bounds validation for a dex_lp_claim intent.
+
+        v3 collects via the NPM; v4 claims via a zero-liquidity decrease +
+        take. v2 has no separate claim — fees live in the LP token, so v2
+        is refused with a pointer at remove.
+        """
+        fields = set(p)
+        if not fields.issubset(LP_CLAIM_FIELDS) or "intent" not in p:
+            raise evm.EvmError(
+                "schema violation: unknown dex_lp_claim fields rejected")
+        if p.get("intent") != "dex_lp_claim":
+            raise evm.EvmError("schema violation: intent != dex_lp_claim")
+        chain = p.get("chain")
+        if chain not in evm.CHAINS:
+            raise evm.EvmError(f"unknown EVM chain: {chain!r}")
+        protocol = p.get("protocol")
+        if protocol == "v2":
+            raise evm.EvmError(
+                "v2 has no separate fee claim — fees are embedded in the "
+                "LP token; use dex_lp_remove to realize them")
+        if protocol not in ("v3", "v4"):
+            raise evm.EvmError(
+                f"protocol must be 'v3' or 'v4', got {protocol!r}")
+        tok_a, tok_b = p.get("token_a", ""), p.get("token_b", "")
+        for tok, what in ((tok_a, "token_a"), (tok_b, "token_b")):
+            if not evm.is_address(tok):
+                raise evm.EvmError(f"bad {what} address: {tok!r}")
+        if tok_a.lower() == tok_b.lower():
+            raise evm.EvmError("token_a == token_b — refusing")
+        if tok_a.lower() >= tok_b.lower():
+            raise evm.EvmError("claim requires token_a < token_b (sort order)")
+        tid = p.get("token_id")
+        if isinstance(tid, bool) or not isinstance(tid, int) or tid <= 0:
+            raise evm.EvmError("token_id must be a positive int")
+        dl = p.get("deadline_sec")
+        if dl is not None and (not isinstance(dl, int) or dl <= 0):
+            raise evm.EvmError("deadline_sec must be a positive unix timestamp")
+        out = {"intent": "dex_lp_claim", "chain": chain, "protocol": protocol,
+               "token_a": tok_a, "token_b": tok_b, "token_id": tid,
+               "purpose": p.get("purpose", ""), "deadline_sec": dl,
+               "chain_id": evm.CHAINS[chain]["chain_id"]}
+        if protocol == "v4":
+            posm = p.get("position_manager", "")
+            if not evm.is_address(posm):
+                raise evm.EvmError(
+                    f"bad position_manager address: {posm!r}")
+            if p.get("router") is not None:
+                raise evm.EvmError("router is v3-only — v4 uses "
+                                   "position_manager")
+            out["position_manager"] = posm
+        else:
+            router = p.get("router", "")
+            if not evm.is_address(router):
+                raise evm.EvmError(f"bad router address: {router!r}")
+            if p.get("position_manager") is not None:
+                raise evm.EvmError("position_manager is v4-only")
+            out["router"] = router
+        return out
+
+    def rt_dex_lp_remove(self, p: dict, muse_id: str) -> dict:
+        """Queue path for an LP-remove intent. Removing realizes value and
+        (v4) can burn the NFT — it always needs human approval, never
+        auto-executes, so it is force-queued rather than policy-evaluated."""
+        intent = self._validate_dex_lp_remove(p)
+        return self._run_fund_intent(intent, muse_id, [], "dex_lp_remove",
+                                     force_queue=True)
+
+    def rt_dex_lp_claim(self, p: dict, muse_id: str) -> dict:
+        """Queue path for an LP fee-claim intent. Claims move tokens into
+        the wallet — force-queued for human approval like removes."""
+        intent = self._validate_dex_lp_claim(p)
+        return self._run_fund_intent(intent, muse_id, [], "dex_lp_claim",
+                                     force_queue=True)
 
     def rt_dex_venues(self, p: dict, muse_id: str) -> dict:
         """Read-only: the user's recommended swap venues (SPEC §10 v2).
@@ -3479,8 +3935,14 @@ class Daemon:
             a = "native" if asset == dex_mod.NATIVE_SENTINEL else asset.lower()
             return [(chain, a, params["sell_amount_wei"])]
         if intent == "dex_lp_add":
+            # v2/v3: exact desired amounts; v4: hard max spends. Either
+            # way the approved bounds are what counts toward velocity.
             return [(chain, params["token_a"].lower(), params["amount_a_wei"]),
                     (chain, params["token_b"].lower(), params["amount_b_wei"])]
+        if intent in ("dex_lp_remove", "dex_lp_claim"):
+            # These receive value rather than spend it; the human approval
+            # is the control, so nothing counts toward velocity.
+            return []
         fee = params.get("fee_mojos", 0)
         if intent == "option_mint":
             leg = params.get("underlying") or {}
@@ -3526,15 +3988,24 @@ class Daemon:
             self._record_velocity(chain, asset, amount)
 
     def _run_fund_intent(self, params: dict, muse_id: str, entries: list,
-                         kind: str) -> dict:
+                         kind: str, force_queue: bool = False) -> dict:
         """Shared queue/approve/deny/execute path for fund-moving intents.
 
         Mirrors rt_request_spend's ledger discipline: queued/denied lines,
         the pre-execution "executing" line, unknown-fate handling that
         consumes velocity fail-closed, and per-leg velocity on success.
+
+        force_queue=True skips policy evaluation and always queues: for
+        contract actions that receive value rather than spend it (LP
+        remove/claim) the human approval is the control, not velocity —
+        and an empty entry list must never silently auto-approve.
         """
         canon = json.dumps(params, sort_keys=True).encode()
-        verdict, reason = self._decide_fund_intent(entries)
+        if force_queue:
+            verdict, reason = ("queued",
+                               "contract action — human approval required")
+        else:
+            verdict, reason = self._decide_fund_intent(entries)
         if verdict == "queued":
             qid = str(self.next_qid); self.next_qid += 1
             self.queue[qid] = {"params": params, "muse_id": muse_id,
@@ -4593,17 +5064,53 @@ class Daemon:
                     "kind": "dex_lp_add",
                     "protocol": p.get("protocol"),
                     "router": p.get("router"),
+                    "position_manager": p.get("position_manager"),
+                    "permit2": p.get("permit2"),
                     "token_a": p.get("token_a"),
                     "token_b": p.get("token_b"),
                     "amount_a_wei": p.get("amount_a_wei"),
                     "amount_b_wei": p.get("amount_b_wei"),
                     "amount_a_min_wei": p.get("amount_a_min_wei"),
                     "amount_b_min_wei": p.get("amount_b_min_wei"),
+                    "liquidity": p.get("liquidity"),
                     "fee": p.get("fee"),
+                    "tick_spacing": p.get("tick_spacing"),
+                    "hooks": p.get("hooks"),
                     "tick_lower": p.get("tick_lower"),
                     "tick_upper": p.get("tick_upper"),
                     "deadline_sec": p.get("deadline_sec"),
                     "destination": None, "asset": "dex_lp_add", "amount": None,
+                })
+            elif intent == "dex_lp_remove":
+                entry.update({
+                    "kind": "dex_lp_remove",
+                    "protocol": p.get("protocol"),
+                    "router": p.get("router"),
+                    "position_manager": p.get("position_manager"),
+                    "pair": p.get("pair"),
+                    "token_a": p.get("token_a"),
+                    "token_b": p.get("token_b"),
+                    "token_id": p.get("token_id"),
+                    "liquidity": p.get("liquidity"),
+                    "amount_a_min_wei": p.get("amount_a_min_wei"),
+                    "amount_b_min_wei": p.get("amount_b_min_wei"),
+                    "burn_nft": p.get("burn_nft"),
+                    "deadline_sec": p.get("deadline_sec"),
+                    "destination": None, "asset": "dex_lp_remove",
+                    "amount": None,
+                })
+            elif intent == "dex_lp_claim":
+                entry.update({
+                    "kind": "dex_lp_claim",
+                    "protocol": p.get("protocol"),
+                    "router": p.get("router"),
+                    "position_manager": p.get("position_manager"),
+                    "token_a": p.get("token_a"),
+                    "token_b": p.get("token_b"),
+                    "token_id": p.get("token_id"),
+                    "deadline_sec": p.get("deadline_sec"),
+                    "destination": None, "asset": "dex_lp_claim",
+                    "amount": None,
                 })
             elif intent == "offer_cancel":
                 entry.update({

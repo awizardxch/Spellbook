@@ -330,6 +330,26 @@ def cmd_dex_lp_add(a, client: AgentClient):
         amount_a_min_wei=a.amount_a_min_wei,
         amount_b_min_wei=a.amount_b_min_wei, fee=a.fee,
         tick_lower=a.tick_lower, tick_upper=a.tick_upper,
+        position_manager=a.position_manager, permit2=a.permit2,
+        tick_spacing=a.tick_spacing, hooks=a.hooks, liquidity=a.liquidity,
+        purpose=a.purpose or "", deadline_sec=a.deadline_sec))
+
+
+def cmd_dex_lp_remove(a, client: AgentClient):
+    _show(client.dex_lp_remove(
+        chain=a.chain, protocol=a.protocol, router=a.router,
+        position_manager=a.position_manager, pair=a.pair,
+        token_a=a.token_a, token_b=a.token_b, token_id=a.token_id,
+        liquidity=a.liquidity, amount_a_min_wei=a.amount_a_min_wei,
+        amount_b_min_wei=a.amount_b_min_wei, burn_nft=a.burn_nft,
+        purpose=a.purpose or "", deadline_sec=a.deadline_sec))
+
+
+def cmd_dex_lp_claim(a, client: AgentClient):
+    _show(client.dex_lp_claim(
+        chain=a.chain, protocol=a.protocol, router=a.router,
+        position_manager=a.position_manager,
+        token_a=a.token_a, token_b=a.token_b, token_id=a.token_id,
         purpose=a.purpose or "", deadline_sec=a.deadline_sec))
 
 
@@ -661,26 +681,82 @@ def main(argv=None):
     dsw.add_argument("--purpose", default="")
 
     dlp = sub.add_parser("dex-lp-add",
-                         help="request a bounded LP add (v2/v3); calldata "
+                         help="request a bounded LP add (v2/v3/v4); calldata "
                               "is built daemon-side from the approved bounds")
     dlp.add_argument("--chain", required=True)
-    dlp.add_argument("--protocol", required=True, choices=["v2", "v3"])
-    dlp.add_argument("--router", required=True,
-                     help="v2 router or v3 NonfungiblePositionManager")
+    dlp.add_argument("--protocol", required=True,
+                     choices=["v2", "v3", "v4"])
+    dlp.add_argument("--router", default=None,
+                     help="v2 router or v3 NonfungiblePositionManager "
+                          "(v2/v3 only)")
+    dlp.add_argument("--position-manager", default=None,
+                     help="v4 PositionManager address (v4 only)")
+    dlp.add_argument("--permit2", default=None,
+                     help="Permit2 address (v4 only)")
     dlp.add_argument("--token-a", required=True)
     dlp.add_argument("--token-b", required=True)
-    dlp.add_argument("--amount-a-wei", type=int, required=True)
+    dlp.add_argument("--amount-a-wei", type=int, required=True,
+                     help="exact spend (v2/v3) or hard max spend (v4)")
     dlp.add_argument("--amount-b-wei", type=int, required=True)
-    dlp.add_argument("--amount-a-min-wei", type=int, default=0)
+    dlp.add_argument("--amount-a-min-wei", type=int, default=0,
+                     help="v2/v3 minimum-receive; not used for v4")
     dlp.add_argument("--amount-b-min-wei", type=int, default=0)
     dlp.add_argument("--fee", type=int, default=None,
-                     help="v3 fee tier: 100/500/3000/10000")
+                     help="v3 fee tier (100/500/3000/10000) or v4 uint24 "
+                          "(0x800000 = dynamic)")
     dlp.add_argument("--tick-lower", type=int, default=None)
     dlp.add_argument("--tick-upper", type=int, default=None)
+    dlp.add_argument("--tick-spacing", type=int, default=None,
+                     help="v4 tick spacing")
+    dlp.add_argument("--hooks", default=None,
+                     help="v4 hook contract address (zero = no hook)")
+    dlp.add_argument("--liquidity", type=int, default=None,
+                     help="v4 position liquidity to mint (agent-computed)")
     dlp.add_argument("--deadline-sec", type=int, default=None,
                      help="ABSOLUTE unix timestamp (not seconds-from-now); "
                      "execution refuses past it")
     dlp.add_argument("--purpose", default="")
+
+    dlr = sub.add_parser("dex-lp-remove",
+                         help="request an LP removal (v2/v3/v4); always "
+                              "queued for human approval")
+    dlr.add_argument("--chain", required=True)
+    dlr.add_argument("--protocol", required=True,
+                     choices=["v2", "v3", "v4"])
+    dlr.add_argument("--router", default=None,
+                     help="v2 router or v3 NonfungiblePositionManager")
+    dlr.add_argument("--position-manager", default=None,
+                     help="v4 PositionManager address")
+    dlr.add_argument("--pair", default=None,
+                     help="v2 LP (pair) token address")
+    dlr.add_argument("--token-a", required=True)
+    dlr.add_argument("--token-b", required=True)
+    dlr.add_argument("--token-id", type=int, default=None,
+                     help="v3/v4 position NFT id")
+    dlr.add_argument("--liquidity", type=int, required=True,
+                     help="LP tokens to burn (v2) or liquidity units (v3/v4)")
+    dlr.add_argument("--amount-a-min-wei", type=int, default=0)
+    dlr.add_argument("--amount-b-min-wei", type=int, default=0)
+    dlr.add_argument("--burn-nft", action="store_true",
+                     help="v4: burn the position NFT on full exits")
+    dlr.add_argument("--deadline-sec", type=int, default=None)
+    dlr.add_argument("--purpose", default="")
+
+    dlc = sub.add_parser("dex-lp-claim",
+                         help="request an LP fee claim (v3 collect / v4 "
+                              "zero-liquidity decrease + take); always queued")
+    dlc.add_argument("--chain", required=True)
+    dlc.add_argument("--protocol", required=True, choices=["v3", "v4"])
+    dlc.add_argument("--router", default=None,
+                     help="v3 NonfungiblePositionManager")
+    dlc.add_argument("--position-manager", default=None,
+                     help="v4 PositionManager address")
+    dlc.add_argument("--token-a", required=True)
+    dlc.add_argument("--token-b", required=True)
+    dlc.add_argument("--token-id", type=int, required=True,
+                     help="position NFT id")
+    dlc.add_argument("--deadline-sec", type=int, default=None)
+    dlc.add_argument("--purpose", default="")
 
     apv = sub.add_parser("approve")
     apv.add_argument("queue_id")
@@ -890,6 +966,8 @@ def main(argv=None):
             {"status": cmd_status, "queue": cmd_queue, "ledger": cmd_ledger,
              "addresses": cmd_addresses, "request-spend": cmd_request_spend,
              "dex-swap": cmd_dex_swap, "dex-lp-add": cmd_dex_lp_add,
+             "dex-lp-remove": cmd_dex_lp_remove,
+             "dex-lp-claim": cmd_dex_lp_claim,
              "dex-venues": cmd_dex_venues,
              "offer-make": cmd_offer_make, "offer-take": cmd_offer_take,
              "offer-cancel": cmd_offer_cancel, "chia-read": cmd_chia_read,
