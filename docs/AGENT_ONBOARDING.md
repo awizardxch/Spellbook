@@ -102,6 +102,36 @@ The rules that keep this safe:
 - Upgrades print no key material, ever. The paper backup prints once, on
   fresh install only.
 
+## 1c. Where everything lives (file locations)
+
+Everything the daemon owns sits in one config directory (default
+`/opt/spellbook`, chosen at install time). If you are a fresh session or
+a side chat, read `spellbook.json` there first — it is the source of
+truth for where *this* install keeps things. Never guess paths.
+
+- `spellbook.json` — `seed_path`, `std_seed_path`, per-chain RPC URLs,
+  `mainnet_submit_enabled`, and policy knobs.
+- `seed.key` — the 32-byte daemon seed, at `seed_path`. **One seed covers
+  the whole stack** (§4): mainnet and testnet derive *different keys*
+  from it (SPEC §2/P9), so the directory name is just a name. An install
+  first created during the testnet phase may live under a
+  `testnet`-named path and still sign mainnet fine — do not mistake the
+  path for the network.
+- `std_seed.key` — the 64-byte BIP-39 standard-recovery seed
+  (`std_seed_path`); the live keys on fresh installs.
+- `spellbook.sock` — the daemon's Unix socket. The CLI finds it via
+  `SPELLBOOK_SOCKET`.
+- `request.token` / `approve.token` — client auth. Request queues
+  intents; approve authorizes exactly one execution attempt. The CLI
+  reads them via `SPELLBOOK_REQUEST_TOKEN` / the approve-token path —
+  neither ever goes through the dashboard, which is read-only.
+- `queue.json`, `ledger.jsonl`, `policy.json`, `velocity.jsonl` —
+  daemon state. Read them freely; never hand-edit them.
+
+The daemon is on-demand: if the socket is missing, start it with
+`spellbookd --socket <dir>/spellbook.sock --config <dir>` and stop it
+when you are done.
+
 ## 2. The Chia relay API
 
 The relay is a network relay, not a custodian: it holds persistent WSS
