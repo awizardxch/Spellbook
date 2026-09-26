@@ -510,6 +510,24 @@ mTLS cert, or submit transactions.
   deadline_sec?}` → bounded fee-claim intent (v3/v4, §10). v2 is refused:
   v2 fees live in the LP-token value, so there is no separate claim —
   use `dex_lp_remove`. Always queued like removes.
+- `POST /v1/contract_deploy {intent, chain, bytecode, constructor_args?,
+  constructor_abi?, value_wei?, gas_limit?, purpose?}` → contract
+  deployment intent (§10). **Always queued for human approval.**
+  On approval the daemon rebuilds the init code (bytecode + ABI-encoded
+  constructor args), signs a contract-creation tx with the daemon's EVM
+  key for the chain, broadcasts, waits for the receipt, and returns
+  `{submitted, tx_hash, block, contract_address}` — the address
+  cross-checked against `CREATE(sender, nonce)` before it is reported.
+- `POST /v1/contract_call {intent, chain, contract, method, method_abi,
+  args?, value_wei?, gas_limit?, purpose?}` → contract method call
+  intent (§10). **Always queued for human approval.** On approval the
+  daemon rebuilds the calldata from the queued decoded fields, signs,
+  broadcasts, waits for the receipt, and returns `{submitted, tx_hash,
+  block, logs}`.
+- `POST /v1/contract_call_view {intent, chain, contract, method,
+  method_abi, args?}` → read-only `eth_call` of a view/pure method
+  (§10). No queue, no approval, nothing signed — like the other read
+  routes. Returns the decoded result.
 - `GET /v1/queue` → pending human approvals with full decoded intent
 - `POST /v1/queue/{id}/approve` and `/reject` → approve-token only
 - `GET /v1/status` → balances, caps, velocity windows, queue depth
@@ -665,6 +683,65 @@ tooling (approve token), showing
   approval" design is removed with the two-token split (S7). The daemon's job
   remains bounding *autonomous* agent spends.
 
+**Contract interaction — deploy / call / read-only call (added 2026-09-25,
+§10 v3)**
+- Three intents complete the on-chain settlement layer for agent-driven
+  contract workflows (the motivating use case: Nightspire Market HTLC
+  escrows — deploy escrow contracts, then lock/claim/refund through them,
+  each step human-approved).
+- `contract_deploy` — deploys `bytecode` (+ ABI-encoded `constructor_args`
+  against `constructor_abi`) to an EVM chain as a contract-creation tx
+  (`to` empty). `contract_call` — calls `method` on `contract` with
+  `args` encoded against `method_abi`, optional `value_wei` (default 0).
+  `contract_call_view` — read-only `eth_call` of a view/pure method; no
+  queue, no approval, no ledger entry, nothing signed.
+- **Always queued (deploy + call):** arbitrary bytecode/calldata is a
+  capability — a 0-value call can e.g. approve a token spender — so
+  value-threshold policy auto-approval is the wrong control. The human
+  reviewing chain + contract/"NEW CONTRACT" + method + decoded args +
+  value + purpose is the control (same precedent as `message_sign` and
+  `dex_lp_remove`). One approval = one execution attempt; no auto-retry.
+- **Queue holds decoded fields, never raw calldata/init code.** The ABI
+  fragments (`method_abi`, `constructor_abi`) are caller-supplied; the
+  daemon never fetches ABIs from external sources. Request time
+  trial-encodes the args and refuses mismatches *before* the human spends
+  an approval; execution re-encodes from the queued fields and the signed
+  tx's to/data/value/chain_id are re-checked against them before
+  broadcast (explicit checks, fail-closed under `python -O`).
+- **Bytecode is opaque:** the daemon does not analyze bytecode semantics.
+  The human approves on `purpose` + the calling agent's trustworthiness.
+  The queue shows bytecode length + sha256 for reference alongside the
+  decoded constructor args — never just a hash in place of intent.
+- **stateMutability gates confusion:** `contract_call` refuses view/pure
+  methods ("use contract_call_view"); `contract_call_view` refuses
+  non-view/pure methods. Undeclared stateMutability is accepted (ABI
+  fragments vary).
+- **Gas:** omit `gas_limit` to estimate from the node at execution
+  (fail-closed — the recommended path); an explicit limit (≤ 15M) is used
+  verbatim. Never unbounded, never hardcoded.
+- **Deploy address verification:** the receipt's `contractAddress` is
+  cross-checked against `keccak(RLP([sender, nonce]))[12:]` (CREATE) —
+  a mismatch refuses to report an unverified address.
+- **Velocity:** `contract_deploy` moves no asset (gas only) and counts
+  nothing; `contract_call` records its `value_wei` leg (when nonzero) so
+  the 24h accounting stays honest. `contract_call_view` moves nothing.
+- **View results** are ABI-decoded against the method's `outputs` and
+  returned as JSON values (single-output convenience: also under
+  `value`).
+- **Mainnet gate:** like every EVM submission, deploy/call on a mainnet
+  chain need the separately-authorized `mainnet_submit_enabled` flag
+  (§10.14-17). Reads (`contract_call_view`) need only a configured RPC.
+- Supported ABI types: `address`, `bool`, `uint<M>`, `int<M>`,
+  `bytes<M>`, `bytes`, `string`, and (nested) static/dynamic arrays.
+  Tuples/structs and fixed-point are refused fail-closed. No new
+  dependency: `spellbook/abi.py` hand-rolls the codec and the test suite
+  cross-checks it against eth-abi (test-only oracle).
+- The spec above describes only what Spellbook adds: strict schemas,
+  daemon-built calldata, forced human approval, and one-attempt
+  execution. Protocol semantics (what the deployed contract *does*) are
+  the contract author's — Spellbook defers to them and never
+  paraphrases them.
+
 **Key export — owner only, human-local (D10, S3)**
 - Export is **never an API call the agent can make**. It is a local command
   the human runs as the daemon user: `spellbook export --scope muse-root |
@@ -705,8 +782,14 @@ tooling (approve token), showing
 - Chia: build with `auto_submit: false`, verify the summary against the
   approved intent, then sign and submit.
 - EVM: simulate/estimate, verify recipient/amount/chain id against the decoded
-  intent, then sign. No contract calls in v1 (schema can't express them —
-  deliberate); the decoder gates their future.
+  intent, then sign. For contract deploys: the daemon rebuilds the init code
+  from the queued bytecode + ABI-encoded constructor args; the signed
+  creation tx's `to` (empty)/init code/value/chain id are re-checked before
+  broadcast, and the receipt's `contractAddress` is cross-checked against
+  `CREATE(sender, nonce)`. For contract calls: calldata is rebuilt from the
+  queued decoded method + args, and the signed tx's to/calldata/value/chain
+  id are re-checked. No raw caller-supplied calldata or init code is ever
+  signed.
 
 ## 5. EVM operation spec — the primary deliverable (D13)
 

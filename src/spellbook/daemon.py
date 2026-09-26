@@ -44,6 +44,7 @@ from spellbook.policy import evaluate
 from spellbook.seed import load_seed
 from spellbook import tokens as token_auth
 from spellbook import dex as dex_mod
+from spellbook import abi as abi_mod
 
 REQUEST_ROUTES = {
     "request_spend", "queue_read", "status", "addresses", "doctor",
@@ -60,6 +61,7 @@ REQUEST_ROUTES = {
     "bulk_send", "multi_send",
     "message_sign",
     "dex_swap", "dex_lp_add", "dex_lp_remove", "dex_lp_claim", "dex_venues",
+    "contract_deploy", "contract_call", "contract_call_view",
 }
 APPROVE_ROUTES = {
     "queue_approve", "queue_reject", "publish_directory_entry",
@@ -136,6 +138,20 @@ LP_REMOVE_FIELDS = {"intent", "chain", "protocol", "router",
 LP_CLAIM_FIELDS = {"intent", "chain", "protocol", "router",
                    "position_manager", "token_a", "token_b", "token_id",
                    "purpose", "deadline_sec"}
+
+# Contract-interaction intents (SPEC §10 v3). The queue holds DECODED
+# fields — never raw calldata or init code. Calldata is always built at
+# execution time from these fields via spellbook.abi, and the signed tx
+# is re-checked against them before broadcast. method_abi / constructor_abi
+# are caller-supplied ABI fragments; the daemon never fetches ABIs from
+# external sources. No fee_mojos: EVM value moves as value_wei only.
+CONTRACT_DEPLOY_FIELDS = {"intent", "chain", "bytecode", "constructor_args",
+                          "constructor_abi", "value_wei", "gas_limit",
+                          "purpose"}
+CONTRACT_CALL_FIELDS = {"intent", "chain", "contract", "method", "method_abi",
+                        "args", "value_wei", "gas_limit", "purpose"}
+CONTRACT_CALL_VIEW_FIELDS = {"intent", "chain", "contract", "method",
+                             "method_abi", "args"}
 
 # EVM gas-price headroom, in basis points over the node's quoted price.
 # Signing is legacy type-0 (see evm.py): on EIP-1559 chains the node reads
@@ -766,6 +782,10 @@ class Daemon:
             return self._execute_evm_lp_remove(params)
         if intent == "dex_lp_claim":
             return self._execute_evm_lp_claim(params)
+        if intent == "contract_deploy":
+            return self._execute_contract_deploy(params)
+        if intent == "contract_call":
+            return self._execute_contract_call(params)
         entry = (self.evm_cfg.get("chains") or {}).get(chain) or {}
         if not entry.get("enabled") or not entry.get("rpc_url"):
             return {"submitted": False,
@@ -840,16 +860,21 @@ class Daemon:
 
     def _evm_send_call(self, rpc, priv: bytes, chain_id: int, sender: str,
                        nonce: int, to: str, value_wei: int, data_hex: str,
-                       gas_price_wei: int, what: str) -> tuple:
+                       gas_price_wei: int, what: str,
+                       gas_limit: int | None = None) -> tuple:
         """Estimate, sign, verify, broadcast one contract call; wait for the
-        receipt and require success. Returns (tx_hash, next_nonce).
+        receipt and require success. Returns (tx_hash, next_nonce, block).
 
-        The signed tx's fields are re-checked against the plan (explicit
-        checks, not assert — fail-closed under python -O). A revert or a
-        missing receipt raises; a broadcast with no receipt in time raises
-        BroadcastUnknown (never a plain failure — no blind retries).
+        gas_limit: when None the node estimates (fail-closed — the DEX
+        default, and the recommended path); an explicit limit is used
+        verbatim. The signed tx's fields are re-checked against the plan
+        (explicit checks, not assert — fail-closed under python -O). A
+        revert or a missing receipt raises; a broadcast with no receipt in
+        time raises BroadcastUnknown (never a plain failure — no blind
+        retries).
         """
-        gas_limit = rpc.estimate_gas_call(sender, to, value_wei, data_hex)
+        if gas_limit is None:
+            gas_limit = rpc.estimate_gas_call(sender, to, value_wei, data_hex)
         signed = evm.sign_legacy_call(priv, chain_id, nonce, to, value_wei,
                                       data_hex, gas_price_wei, gas_limit)
         for name, got, want in (
@@ -1224,6 +1249,88 @@ class Daemon:
             gas_price, what)
         return {"submitted": True, "tx_hash": tx_hash, "block": block,
                 "from": sender}
+
+    # ------------------------------------------------------------ contract execution
+    def _execute_contract_deploy(self, params: dict) -> dict:
+        """Execute an approved contract_deploy intent (SPEC §10 v3).
+
+        One approval = one execution attempt. Init code is rebuilt from
+        the queued decoded fields (never trusted from the wire), the gas
+        limit comes from the node unless the human approved an explicit
+        one, and the receipt's contractAddress is cross-checked against
+        the CREATE address derived from (sender, nonce) before reporting.
+        Returns {submitted, tx_hash, block, contract_address, from}.
+        """
+        info, rpc, priv, sender = self._evm_dex_guards(params)
+        try:
+            data_hex = abi_mod.encode_constructor(
+                params["bytecode"], params.get("constructor_abi"),
+                params.get("constructor_args") or [])
+        except abi_mod.AbiError as e:
+            raise evm.EvmError(f"approved deploy no longer encodes: {e}")
+        value_wei = params.get("value_wei", 0)
+        gas_limit = params.get("gas_limit")
+        if gas_limit is None:
+            gas_limit = rpc.estimate_gas_deploy(sender, value_wei, data_hex)
+        gas_price = _evm_gas_price(rpc)
+        nonce = rpc.nonce(sender)
+        signed = evm.sign_legacy_deploy(priv, info["chain_id"], nonce,
+                                        value_wei, data_hex, gas_price,
+                                        gas_limit)
+        # The approved intent, re-checked against the signed tx's fields.
+        # Explicit checks, not assert: fail-closed even under `python -O`.
+        for name, got, want in (
+                ("from", signed["from"].lower(), sender.lower()),
+                ("to", signed["to"], None),
+                ("data", signed["data"].lower(), data_hex.lower()),
+                ("value_wei", signed["value_wei"], value_wei),
+                ("chain_id", signed["chain_id"], info["chain_id"])):
+            if got != want:
+                raise evm.EvmError(
+                    f"deploy: signed tx {name} mismatch ({got!r} != "
+                    f"{want!r}) — approved intent violated, refusing to "
+                    "broadcast")
+        tx_hash = rpc.send_raw_tx(signed["raw_hex"])
+        rcpt = rpc.wait_receipt(tx_hash)
+        if int(rcpt.get("status", "0x0"), 16) != 1:
+            raise evm.EvmError(f"deploy tx {tx_hash} reverted on-chain")
+        contract_address = rcpt.get("contractAddress")
+        expected = evm.contract_address_from_deploy(sender, nonce)
+        if not contract_address or contract_address.lower() != expected.lower():
+            raise evm.EvmError(
+                f"deploy receipt contractAddress {contract_address!r} does "
+                f"not match the CREATE address {expected} — refusing to "
+                "report an unverified address")
+        return {"submitted": True, "tx_hash": tx_hash,
+                "block": int(rcpt.get("blockNumber", "0x0"), 16),
+                "contract_address": contract_address, "from": sender}
+
+    def _execute_contract_call(self, params: dict) -> dict:
+        """Execute an approved contract_call intent (SPEC §10 v3).
+
+        One approval = one execution attempt. Calldata is rebuilt from
+        the queued decoded fields; _evm_send_call re-checks the signed
+        tx's to/data/value against them before broadcast. Returns
+        {submitted, tx_hash, block, logs, from}.
+        """
+        info, rpc, priv, sender = self._evm_dex_guards(params)
+        try:
+            data_hex = abi_mod.encode_function_call(params["method_abi"],
+                                                    params.get("args") or [])
+        except abi_mod.AbiError as e:
+            raise evm.EvmError(f"approved call no longer encodes: {e}")
+        value_wei = params.get("value_wei", 0)
+        gas_price = _evm_gas_price(rpc)
+        nonce = rpc.nonce(sender)
+        tx_hash, _, block = self._evm_send_call(
+            rpc, priv, info["chain_id"], sender, nonce,
+            params["contract"], value_wei, data_hex, gas_price,
+            f"contract_call:{params.get('method', '?')}",
+            gas_limit=params.get("gas_limit"))
+        rcpt = rpc.receipt(tx_hash)
+        logs = rcpt.get("logs", []) if isinstance(rcpt, dict) else []
+        return {"submitted": True, "tx_hash": tx_hash, "block": block,
+                "logs": logs, "from": sender}
         """True if something answers on the Sage RPC port (TCP only)."""
         port = int(self.chia_cfg.get("rpc_port", 9257))
         try:
@@ -3835,6 +3942,209 @@ class Daemon:
                      "daemon-user-owned) and restart the daemon"),
         }
 
+    # ------------------------------------------------------------ contract intents
+    def _validate_contract_deploy(self, p: dict) -> dict:
+        """Schema + value validation for a contract_deploy intent.
+
+        Returns the normalized intent or raises evm.EvmError (fail
+        closed). A trial ABI-encode of the constructor args runs here so
+        malformed args are refused BEFORE the human spends an approval on
+        a deploy that could never execute; execution re-encodes from the
+        stored decoded fields.
+        """
+        fields = set(p)
+        if not fields.issubset(CONTRACT_DEPLOY_FIELDS) or "intent" not in p:
+            raise evm.EvmError(
+                "schema violation: unknown contract_deploy fields rejected")
+        if p.get("intent") != "contract_deploy":
+            raise evm.EvmError("schema violation: intent != contract_deploy")
+        chain = p.get("chain")
+        if chain not in evm.CHAINS:
+            raise evm.EvmError(f"unknown EVM chain: {chain!r}")
+        bytecode = p.get("bytecode", "")
+        if not (isinstance(bytecode, str) and bytecode.startswith("0x")):
+            raise evm.EvmError("bytecode must be 0x-prefixed hex")
+        try:
+            code = bytes.fromhex(bytecode[2:])
+        except ValueError:
+            raise evm.EvmError("bytecode is not valid hex")
+        if not code:
+            raise evm.EvmError("bytecode is empty — nothing to deploy")
+        if len(code) > 49152:
+            raise evm.EvmError(
+                f"init bytecode {len(code)} bytes exceeds the EIP-3860 "
+                "init-code limit (49152) — refusing")
+        args = p.get("constructor_args") or []
+        if not isinstance(args, list):
+            raise evm.EvmError("constructor_args must be a list")
+        ctor_abi = p.get("constructor_abi")
+        try:
+            abi_mod.encode_constructor(bytecode, ctor_abi, args)
+        except abi_mod.AbiError as e:
+            raise evm.EvmError(f"constructor args do not match ABI: {e}")
+        value_wei = p.get("value_wei", 0)
+        if not isinstance(value_wei, int) or isinstance(value_wei, bool) \
+                or value_wei < 0:
+            raise evm.EvmError("value_wei must be a non-negative integer")
+        gas_limit = p.get("gas_limit")
+        if gas_limit is not None and (
+                not isinstance(gas_limit, int) or isinstance(gas_limit, bool)
+                or not 0 < gas_limit <= 15_000_000):
+            raise evm.EvmError(
+                "gas_limit must be a positive integer (<= 15M); omit it to "
+                "estimate from the node at execution")
+        purpose = p.get("purpose", "")
+        if not isinstance(purpose, str):
+            raise evm.EvmError("purpose must be a string")
+        intent = {"intent": "contract_deploy", "chain": chain,
+                  "bytecode": bytecode, "constructor_args": args,
+                  "value_wei": value_wei, "purpose": purpose}
+        if ctor_abi is not None:
+            intent["constructor_abi"] = ctor_abi
+        if gas_limit is not None:
+            intent["gas_limit"] = gas_limit
+        return intent
+
+    def _validate_contract_call(self, p: dict, *, view: bool) -> dict:
+        """Shared schema + value validation for contract_call / _view.
+
+        view=True: stateMutability must be view/pure (when declared).
+        view=False: stateMutability must NOT be view/pure (when declared)
+        — a read-only method sent as a transaction is caller confusion,
+        refused fail-closed. Trial-encodes the args against the ABI.
+        """
+        want = "contract_call_view" if view else "contract_call"
+        allowed = CONTRACT_CALL_VIEW_FIELDS if view else CONTRACT_CALL_FIELDS
+        fields = set(p)
+        if not fields.issubset(allowed) or "intent" not in p:
+            raise evm.EvmError(
+                f"schema violation: unknown {want} fields rejected")
+        if p.get("intent") != want:
+            raise evm.EvmError(f"schema violation: intent != {want}")
+        chain = p.get("chain")
+        if chain not in evm.CHAINS:
+            raise evm.EvmError(f"unknown EVM chain: {chain!r}")
+        contract = p.get("contract", "")
+        if not evm.is_address(contract):
+            raise evm.EvmError(f"bad contract address: {contract!r}")
+        method_abi = p.get("method_abi")
+        if not isinstance(method_abi, dict):
+            raise evm.EvmError("method_abi must be an ABI JSON object")
+        method = p.get("method", "")
+        if method_abi.get("name") != method:
+            raise evm.EvmError(
+                "method does not match method_abi name "
+                f"({method!r} != {method_abi.get('name')!r})")
+        mut = method_abi.get("stateMutability")
+        if mut in ("view", "pure"):
+            if not view:
+                raise evm.EvmError(
+                    f"method {method!r} is {mut} — use contract_call_view, "
+                    "not a transaction")
+        elif not view and mut is not None:
+            pass  # state-changing (or undeclared) — fine for contract_call
+        elif view and mut is not None:
+            raise evm.EvmError(
+                f"method {method!r} is {mut}, not view/pure — "
+                "contract_call_view is read-only")
+        args = p.get("args") or []
+        if not isinstance(args, list):
+            raise evm.EvmError("args must be a list")
+        try:
+            abi_mod.encode_function_call(method_abi, args)
+        except abi_mod.AbiError as e:
+            raise evm.EvmError(f"args do not match method ABI: {e}")
+        intent = {"intent": want, "chain": chain, "contract": contract,
+                  "method": method, "method_abi": method_abi, "args": args}
+        if not view:
+            value_wei = p.get("value_wei", 0)
+            if not isinstance(value_wei, int) or isinstance(value_wei, bool) \
+                    or value_wei < 0:
+                raise evm.EvmError(
+                    "value_wei must be a non-negative integer")
+            gas_limit = p.get("gas_limit")
+            if gas_limit is not None and (
+                    not isinstance(gas_limit, int)
+                    or isinstance(gas_limit, bool)
+                    or not 0 < gas_limit <= 15_000_000):
+                raise evm.EvmError(
+                    "gas_limit must be a positive integer (<= 15M); omit "
+                    "it to estimate from the node at execution")
+            purpose = p.get("purpose", "")
+            if not isinstance(purpose, str):
+                raise evm.EvmError("purpose must be a string")
+            intent.update({"value_wei": value_wei, "purpose": purpose})
+            if gas_limit is not None:
+                intent["gas_limit"] = gas_limit
+        return intent
+
+    def rt_contract_deploy(self, p: dict, muse_id: str) -> dict:
+        """Queue a contract deployment for human approval (SPEC §10 v3).
+
+        force_queue: arbitrary init code is a capability — a deploy can
+        do anything the key can do, so value-threshold policy
+        auto-approval is the wrong control. The human reviewing purpose
+        + chain + constructor args is the control (same precedent as
+        message_sign and dex_lp_remove). A deploy moves no asset, so no
+        velocity leg is recorded.
+        """
+        intent = self._validate_contract_deploy(p)
+        return self._run_fund_intent(intent, muse_id, [], "contract_deploy",
+                                     force_queue=True)
+
+    def rt_contract_call(self, p: dict, muse_id: str) -> dict:
+        """Queue a contract method call for human approval (SPEC §10 v3).
+
+        force_queue for the same reason as contract_deploy: arbitrary
+        calldata is a capability even at value 0 (a 0-value call can e.g.
+        approve a token spender). The value leg, when nonzero, is still
+        recorded to velocity on execution so the 24h accounting stays
+        honest.
+        """
+        intent = self._validate_contract_call(p, view=False)
+        value_wei = intent.get("value_wei", 0)
+        entries = [(intent["chain"], "native", value_wei)] if value_wei else []
+        return self._run_fund_intent(intent, muse_id, entries,
+                                     "contract_call", force_queue=True)
+
+    def rt_contract_call_view(self, p: dict, muse_id: str) -> dict:
+        """Read-only contract call (SPEC §10 v3). No queue, no approval,
+        no ledger entry — like the other read routes (status, addresses).
+        Nothing is signed; the daemon only needs a configured RPC."""
+        intent = self._validate_contract_call(p, view=True)
+        chain = intent["chain"]
+        entry = (self.evm_cfg.get("chains") or {}).get(chain) or {}
+        if not entry.get("enabled") or not entry.get("rpc_url"):
+            return {"ok": False,
+                    "error": f"chain submission not configured for {chain}"}
+        info = evm.CHAINS[chain]
+        rpc = evm.Rpc(entry["rpc_url"])
+        try:
+            if rpc.chain_id() != info["chain_id"]:
+                return {"ok": False, "error":
+                        f"RPC reports a different chain id than {chain} "
+                        "— aborting"}
+            data_hex = abi_mod.encode_function_call(intent["method_abi"],
+                                                    intent["args"])
+            from_addr = None
+            if self._signing_seed() is not None:
+                _, from_addr = self._evm_key(chain)
+            raw = rpc.eth_call(intent["contract"], data_hex, from_addr)
+        except evm.EvmError as e:
+            return {"ok": False, "error": str(e)}
+        outputs = [o.get("type") for o in
+                   intent["method_abi"].get("outputs", [])]
+        try:
+            result = abi_mod.decode_abi(outputs, raw)
+        except abi_mod.AbiError as e:
+            return {"ok": False,
+                    "error": f"return data does not match ABI outputs: {e}"}
+        out = {"ok": True, "chain": chain, "contract": intent["contract"],
+               "method": intent["method"], "result": result}
+        if len(result) == 1:
+            out["value"] = result[0]
+        return out
+
     # ------------------------------------------------------------ offer intents
     def _chia_offer_guards(self, params: dict, chain: str) -> None:
         """Fail-fast checks shared by every offer intent.
@@ -3943,6 +4253,13 @@ class Daemon:
             # These receive value rather than spend it; the human approval
             # is the control, so nothing counts toward velocity.
             return []
+        if intent == "contract_deploy":
+            # A deploy moves no asset (gas only, like every tx); the human
+            # approval is the control, so nothing counts toward velocity.
+            return []
+        if intent == "contract_call":
+            value = params.get("value_wei", 0)
+            return [(chain, "native", value)] if value else []
         fee = params.get("fee_mojos", 0)
         if intent == "option_mint":
             leg = params.get("underlying") or {}
@@ -5120,6 +5437,39 @@ class Daemon:
                     "destination": None, "asset": "dex_lp_claim",
                     "amount": None,
                 })
+            elif intent == "contract_deploy":
+                # The human approves a NEW CONTRACT: chain, purpose, the
+                # decoded constructor args, and the value. Bytecode is
+                # opaque — the daemon never claims to verify its semantics —
+                # so the queue shows its length and sha256 for reference,
+                # never just a hash in place of the decoded intent.
+                code = bytes.fromhex(p["bytecode"][2:])
+                entry.update({
+                    "kind": "contract_deploy",
+                    "new_contract": True,
+                    "bytecode_len": len(code),
+                    "bytecode_sha256": hashlib.sha256(code).hexdigest(),
+                    "constructor_args": p.get("constructor_args"),
+                    "value_wei": p.get("value_wei", 0),
+                    "gas_limit": p.get("gas_limit"),
+                    "destination": None, "asset": "contract_deploy",
+                    "amount": p.get("value_wei", 0),
+                })
+            elif intent == "contract_call":
+                # The human approves the DECODED call — contract, method,
+                # args, value — never raw calldata. The daemon rebuilds
+                # the calldata from these fields at execution.
+                entry.update({
+                    "kind": "contract_call",
+                    "contract": p.get("contract"),
+                    "method": p.get("method"),
+                    "args": p.get("args"),
+                    "value_wei": p.get("value_wei", 0),
+                    "gas_limit": p.get("gas_limit"),
+                    "destination": p.get("contract"),
+                    "asset": "contract_call",
+                    "amount": p.get("value_wei", 0),
+                })
             elif intent == "offer_cancel":
                 entry.update({
                     "kind": "offer_cancel",
@@ -5195,9 +5545,17 @@ class Daemon:
         self._record_velocity_entries(params)
         if ex["submitted"]:
             self.ledger.append(muse_id, canon, ex["tx_hash"], "approved-by-human")
-            return {"ok": True, "queue_id": qid,
-                    "tx_hash": ex["tx_hash"],
-                    "block": ex.get("block", ex.get("tx_height", ex.get("slot")))}
+            out = {"ok": True, "queue_id": qid,
+                   "tx_hash": ex["tx_hash"],
+                   "block": ex.get("block", ex.get("tx_height", ex.get("slot")))}
+            # Contract executions carry their verified results — surface
+            # them so the approver (and the agent) get the address/logs,
+            # not just the hash.
+            if ex.get("contract_address"):
+                out["contract_address"] = ex["contract_address"]
+            if ex.get("logs") is not None:
+                out["logs"] = ex["logs"]
+            return out
         self.ledger.append(muse_id, canon, ex.get("offer_id"),
                            "approved-by-human")
         out = {"ok": True, "queue_id": qid, "note": ex.get("note", "")}
@@ -5205,6 +5563,10 @@ class Daemon:
             out["offer_id"] = ex["offer_id"]
         if ex.get("offer"):
             out["offer"] = ex["offer"]
+        if ex.get("signature"):
+            out["signature"] = ex["signature"]
+        if ex.get("signed_by"):
+            out["signed_by"] = ex["signed_by"]
         return out
 
     def rt_queue_reject(self, p: dict, muse_id: str) -> dict:

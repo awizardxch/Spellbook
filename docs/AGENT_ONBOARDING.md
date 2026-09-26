@@ -804,3 +804,90 @@ Agent rules:
    of the message is still yours to vouch for.
 3. **One signature per approval.** Like spends: one approval = one
    signature, no standing permission.
+
+## 11. Contract interaction — deploy, call, read (EVM)
+
+Your agent can deploy contracts and call their methods through the
+daemon. These are the `contract_deploy`, `contract_call`, and
+`contract_call_view` intents — the on-chain half of agent-driven
+contract workflows (e.g. deploying an HTLC escrow and then locking /
+claiming / refunding through it). The design carries the same signing
+philosophy as §10: **the daemon never signs caller-supplied raw bytes**
+— it builds the init code and calldata itself from decoded fields,
+re-checks them against the queued intent at execution, and signs only
+what it built.
+
+**`contract_deploy` / `contract_call` always queue for a human.**
+Arbitrary bytecode/calldata is a capability even at zero value — a
+0-value call can approve a token spender — so amount policies can never
+auto-approve these. One approval = one execution attempt.
+
+**`contract_call_view` is read-only** (`eth_call` of a view/pure
+method): no queue, no approval, nothing signed, like the other read
+routes. The `stateMutability` gate keeps the two straight: sending a
+view method as `contract_call` (or a state-changing method as
+`contract_call_view`) is refused as caller confusion.
+
+```bash
+# Deploy — bytecode + ABI-encoded constructor args (JSON array)
+spellbook contract-deploy --chain evm-46630 \
+  --bytecode "$(cat out/HTLCEscrow.sol/HTLCEscrow.json | jq -r .bytecode.object)" \
+  --constructor-abi '{"inputs":[{"name":"t","type":"uint256"}]}' \
+  --constructor-args '[3600]' --purpose "HTLC escrow for the demo flow"
+
+# State-changing call — decoded args, human approves the meaning
+spellbook contract-call --chain evm-46630 \
+  --contract 0xEscrowAddress \
+  --method lock \
+  --method-abi '{"name":"lock","stateMutability":"payable","inputs":[{"name":"hashlock","type":"bytes32"},{"name":"timelock","type":"uint256"}]}' \
+  --args '["0x…hashlock…", 7200]' --value-wei 5000 \
+  --purpose "lock 5000 wei behind the hashlock"
+
+# Read-only call — returns the decoded result immediately
+spellbook contract-call-view --chain evm-46630 \
+  --contract 0xEscrowAddress --method getLock \
+  --method-abi '{"name":"getLock","stateMutability":"view","inputs":[],"outputs":[{"name":"amount","type":"uint256"}]}'
+```
+
+```python
+from spellbook.client import AgentClient
+c = AgentClient("/run/spellbook/spellbook.sock", open("/path/to/request.token").read().strip())
+
+# Deploy — returns the verified contract address after human approval
+r = c.contract_deploy(chain="evm-46630", bytecode="0x6080…",
+                      constructor_args=[3600], purpose="HTLC escrow deploy")
+r["queue_id"]  # human approves, then: {"submitted": True, "tx_hash": …,
+               # "block": …, "contract_address": "0x…"} — the address is
+               # cross-checked against CREATE(sender, nonce) first
+
+# Call — returns tx_hash, block, and receipt logs after approval
+r = c.contract_call(chain="evm-46630", contract="0x…", method="lock",
+                    method_abi={…}, args=["0x…", 7200], value_wei=5000,
+                    purpose="lock funds")
+
+# Read — no approval; decoded outputs come straight back
+r = c.contract_call_view(chain="evm-46630", contract="0x…",
+                         method="getLock", method_abi={…})
+r["result"]  # e.g. [5000]
+```
+
+Agent rules:
+1. **Show the human the decoded call.** The queue displays chain +
+   contract (or "NEW CONTRACT") + method + decoded args + value +
+   purpose — never raw calldata. For deploys, bytecode is opaque to the
+   daemon (it doesn't analyze semantics): the human approves on your
+   `purpose` and on trusting you, so write it plainly and name what the
+   contract *is*.
+2. **Pass the ABI, not the bytes.** The daemon rebuilds init code and
+   calldata from your decoded fields; request-time validation
+   trial-encodes them and refuses mismatches before a human ever sees
+   the item. If your args don't match the ABI, you get a validation
+   error, not a queue item.
+3. **Mind the value leg.** `contract_call`'s `value_wei` counts toward
+   the 24h velocity accounting (deploy gas/value is the same
+   discipline as every other EVM submission — mainnet needs the
+   separately-authorized `mainnet_submit_enabled` flag). Views move
+   nothing and count nothing.
+4. **One approval = one attempt.** Like spends: a failed or
+   unknown-fate deployment/call is never retried — reconcile from the
+   chain and ask the human again with new context.

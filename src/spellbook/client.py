@@ -219,6 +219,58 @@ class AgentClient(_BaseClient):
                   "purpose": purpose, "deadline_sec": deadline_sec}
         return self._call("dex_lp_claim", params)
 
+    def contract_deploy(self, *, chain: str, bytecode: str,
+                        constructor_args: list | None = None,
+                        constructor_abi=None, value_wei: int = 0,
+                        gas_limit: int | None = None,
+                        purpose: str = "") -> dict:
+        """Request a contract deployment (SPEC §10 v3). Always queued for
+        human approval — arbitrary init code is a capability. The daemon
+        validates the bytecode and trial-encodes constructor args at
+        request time; on approval it rebuilds the init code from the
+        queued fields, signs with the daemon's EVM key for the chain,
+        broadcasts, and returns the contract address (cross-checked
+        against the CREATE address).
+        """
+        params = {"intent": "contract_deploy", "chain": chain,
+                  "bytecode": bytecode,
+                  "constructor_args": constructor_args or [],
+                  "value_wei": value_wei, "purpose": purpose}
+        if constructor_abi is not None:
+            params["constructor_abi"] = constructor_abi
+        if gas_limit is not None:
+            params["gas_limit"] = gas_limit
+        return self._call("contract_deploy", params)
+
+    def contract_call(self, *, chain: str, contract: str, method: str,
+                      method_abi: dict, args: list | None = None,
+                      value_wei: int = 0, gas_limit: int | None = None,
+                      purpose: str = "") -> dict:
+        """Request a contract method call (SPEC §10 v3). Always queued for
+        human approval — arbitrary calldata is a capability even at value
+        0. The daemon trial-encodes args against method_abi at request
+        time; on approval it rebuilds the calldata, signs, broadcasts,
+        waits for the receipt, and returns tx_hash + logs.
+        """
+        params = {"intent": "contract_call", "chain": chain,
+                  "contract": contract, "method": method,
+                  "method_abi": method_abi, "args": args or [],
+                  "value_wei": value_wei, "purpose": purpose}
+        if gas_limit is not None:
+            params["gas_limit"] = gas_limit
+        return self._call("contract_call", params)
+
+    def contract_call_view(self, *, chain: str, contract: str, method: str,
+                           method_abi: dict,
+                           args: list | None = None) -> dict:
+        """Read-only contract call (SPEC §10 v3). No queue, no approval —
+        eth_call only, nothing is signed. Returns the decoded result.
+        """
+        return self._call("contract_call_view",
+                          {"intent": "contract_call_view", "chain": chain,
+                           "contract": contract, "method": method,
+                           "method_abi": method_abi, "args": args or []})
+
     def status(self) -> dict:
         return self._call("status")
 
