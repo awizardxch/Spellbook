@@ -803,7 +803,14 @@ tooling (approve token), showing
   self-reported, like the Chia address).
 - The daemon signs EIP-1559 transactions via a local signer against a
   configurable chain RPC endpoint. Default town chain: Robinhood Chain
-  (chain id 4663; testnet 46630 for Phase 1).
+  (chain id 4663; testnet 46630 for Phase 1). Supported EVM chains
+  (naming `evm-<chain_id>`, added 2026-09-25): Ethereum (`evm-1`),
+  Ethereum Sepolia (`evm-11155111`), Robinhood Chain (`evm-4663`),
+  Robinhood testnet (`evm-46630`), Base (`evm-8453`), Base Sepolia
+  (`evm-84532`). Mainnet chains stay behind the separately-authorized
+  `mainnet_submit_enabled` gate (§10.14-17); listing a chain makes it
+  addressable, it does not authorize submissions. Each chain still needs
+  its own `rpc_url` + `enabled` in the daemon config to be used.
 - Same policy engine as Chia (§4), caps denominated per chain.
 - The existing Bankr/X Privy wallet remains the EVM treasury; the derived key
   is the muse's self-custodied operational wallet.

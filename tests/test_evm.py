@@ -178,3 +178,23 @@ def test_sign_legacy_transfer_still_empty_data():
     assert s["data"] == "0x"
     with pytest.raises(evm.EvmError):
         evm.sign_legacy_transfer(PRIV, 46630, 0, to, 0, 10 ** 10)
+
+
+def test_chains_registry_covers_all_supported_networks():
+    """The full EVM chain set (EIP-712 v2 chain list, 2026-09-25): naming
+    follows evm-<chain_id>, testnet flags gate mainnet submission."""
+    expect = {
+        "evm-1": (1, False),
+        "evm-11155111": (11155111, True),
+        "evm-4663": (4663, False),
+        "evm-46630": (46630, True),
+        "evm-8453": (8453, False),
+        "evm-84532": (84532, True),
+    }
+    assert set(evm.CHAINS) == set(expect)
+    for name, (chain_id, testnet) in expect.items():
+        info = evm.CHAINS[name]
+        assert info["chain_id"] == chain_id, name
+        assert info["testnet"] is testnet, name
+        assert name == f"evm-{chain_id}", name
+        assert info["name"], name

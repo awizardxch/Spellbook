@@ -32,7 +32,10 @@ BLS12_381_R = BLS_R
 _FIELD_P = 0x1A0111EA397FE69A4B1BA7B6434BACD764774B84F38512BF6730D2A0F6B0F6241EABFFFE
 _FIELD_P = (_FIELD_P << 96) | 0xB153FFFFB9FEFFFFFFFFAAAB
 
-CHAINS = ("evm-4663", "evm-46630", "chia-mainnet", "chia-testnet")
+# EVM entries must cover every chain in evm.CHAINS: the info string is
+# parameterized by chain name, so each chain gets its own derived key.
+CHAINS = ("evm-1", "evm-11155111", "evm-4663", "evm-46630", "evm-8453",
+          "evm-84532", "chia-mainnet", "chia-testnet")
 
 
 def info_string(chain: str, label: str) -> str:

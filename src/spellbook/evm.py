@@ -38,10 +38,22 @@ from spellbook import __version__
 
 # chain name -> parameters. Only chains listed here can ever submit.
 CHAINS = {
+    # Naming convention: "evm-<chain_id>". Mainnet entries (testnet: False)
+    # stay behind the daemon's separately-authorized mainnet_submit_enabled
+    # gate (see daemon._evm_dex_guards) — listing a chain makes it
+    # addressable, it does not authorize submissions.
+    "evm-1": {"chain_id": 1, "testnet": False,
+              "name": "Ethereum"},
+    "evm-11155111": {"chain_id": 11155111, "testnet": True,
+                     "name": "Ethereum Sepolia"},
     "evm-4663": {"chain_id": 4663, "testnet": False,
                  "name": "Robinhood Chain"},
     "evm-46630": {"chain_id": 46630, "testnet": True,
                   "name": "Robinhood Chain testnet"},
+    "evm-8453": {"chain_id": 8453, "testnet": False,
+                 "name": "Base"},
+    "evm-84532": {"chain_id": 84532, "testnet": True,
+                  "name": "Base Sepolia"},
 }
 
 TRANSFER_GAS_LIMIT = 21_000
