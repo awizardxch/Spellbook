@@ -35,6 +35,31 @@ const TIMEOUT_MS = 8000;
 /** Hard cap on ?depth= — matches MAX_WATCH_ADDRESSES in lib/auth. */
 const MAX_DEPTH = 100;
 
+/**
+ * Browser User-Agent sent on every outbound fetch. Some RPCs (notably
+ * Robinhood Chain's Cloudflare front) 403 requests that carry no UA,
+ * which used to make token-balance lookups silently fail and the
+ * dashboard render only the native balance row.
+ */
+const BROWSER_UA =
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+/** Normalize the HeadersInit a caller passed into a plain record. */
+function asHeaderRecord(
+  headers: HeadersInit | undefined
+): Record<string, string> {
+  if (!headers) return {};
+  if (headers instanceof Headers) {
+    const out: Record<string, string> = {};
+    headers.forEach((v, k) => {
+      out[k] = v;
+    });
+    return out;
+  }
+  if (Array.isArray(headers)) return Object.fromEntries(headers);
+  return headers as Record<string, string>;
+}
+
 export interface AddressHolding {
   /**
    * 1-based position in the agent's derivation order — address #1, #2, ….
@@ -112,7 +137,16 @@ async function fetchJson(
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { ...init, signal: ctrl.signal });
+    const res = await fetch(url, {
+      ...init,
+      headers: {
+        // Some RPCs (notably Robinhood Chain's Cloudflare front) 403
+        // requests with no User-Agent. Look like a browser everywhere.
+        "User-Agent": BROWSER_UA,
+        ...asHeaderRecord(init.headers),
+      },
+      signal: ctrl.signal,
+    });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return (await res.json()) as unknown;
   } finally {
