@@ -111,6 +111,8 @@ export interface TokenHolding {
   qty: string;
   /** USD value of qty at the current price, 2dp — null when unpriced */
   usd: string | null;
+  /** DexScreener chart URL for the token's most-liquid pair — null when none */
+  chartUrl: string | null;
 }
 
 /** One discovered NFT. Best-effort: recent inbound transfers only. */
@@ -710,6 +712,8 @@ interface DexPrice {
   price: string;
   symbol: string;
   name: string;
+  /** DexScreener chart URL for the most-liquid pair — null when none. */
+  chartUrl: string | null;
 }
 
 /**
@@ -751,7 +755,12 @@ async function dexTokenPrices(
   const live = addrs.filter((a) => {
     const peg = STABLE_PEGS[a];
     if (peg)
-      out.set(a, { price: peg.price, symbol: peg.symbol, name: peg.name });
+      out.set(a, {
+        price: peg.price,
+        symbol: peg.symbol,
+        name: peg.name,
+        chartUrl: null,
+      });
     return !peg;
   });
 
@@ -769,6 +778,7 @@ async function dexTokenPrices(
           liq: number;
           symbol: string;
           name: string;
+          chartUrl: string | null;
         } | null = null;
         for (const p of pairs as Record<string, unknown>[]) {
           const bt = p.baseToken as
@@ -785,6 +795,10 @@ async function dexTokenPrices(
             (p.liquidity as { usd?: unknown } | undefined)?.usd ?? 0
           );
           if (!best || liq > best.liq) {
+            const pairAddress =
+              typeof p.pairAddress === "string" ? p.pairAddress : "";
+            const chainSlug =
+              typeof p.chainId === "string" ? p.chainId : "";
             best = {
               price,
               liq,
@@ -792,6 +806,10 @@ async function dexTokenPrices(
                 typeof bt?.symbol === "string" ? bt.symbol : addr.slice(0, 6),
               name:
                 typeof bt?.name === "string" ? bt.name : "Unknown token",
+              chartUrl:
+                pairAddress && chainSlug
+                  ? `https://dexscreener.com/${chainSlug}/${pairAddress}`
+                  : null,
             };
           }
         }
@@ -807,6 +825,7 @@ async function dexTokenPrices(
         price: best.price,
         symbol: best.symbol,
         name: best.name,
+        chartUrl: best.chartUrl,
       });
   }
   return out;
@@ -1191,6 +1210,7 @@ export async function GET(req: Request): Promise<NextResponse> {
               decimals: meta.decimals,
               qty,
               usd: price ? usdValue(qty as string, price.price) : null,
+              chartUrl: price?.chartUrl ?? null,
             });
           });
           tokens = sortTokens(rows);
@@ -1217,6 +1237,7 @@ export async function GET(req: Request): Promise<NextResponse> {
               decimals,
               qty,
               usd: price ? usdValue(qty as string, price.price) : null,
+              chartUrl: price?.chartUrl ?? null,
             });
           });
           tokens = sortTokens(rows);
