@@ -713,10 +713,30 @@ interface DexPrice {
 }
 
 /**
- * Token USD prices via DexScreener (free, no key, up to 30 tokens per
- * call). Picks the highest-liquidity pair per token. Tokens DexScreener
- * doesn't know are simply absent — callers treat them as unpriced,
- * never an error. Never throws.
+ * Tokens DexScreener never prices as a base token (they only ever appear
+ * as quote tokens) get a hardcoded USD peg. USDG is Robinhood Chain's
+ * canonical USD stablecoin.
+ */
+const STABLE_PEGS: Record<
+  string,
+  { price: string; symbol: string; name: string }
+> = {
+  "0x5fc5360d0400a0fd4f2af552add042d716f1d168": {
+    price: "1.0",
+    symbol: "USDG",
+    name: "USDG Stablecoin",
+  },
+};
+
+/**
+ * Token USD prices via DexScreener (free, no key). One request per token:
+ * the batched `/tokens/{a,b,c}` endpoint caps the *response* at ~30 pairs,
+ * so high-pair-count tokens (WETH, MUSEBOOK) crowd low-pair-count tokens
+ * (PORCH, PLANK) out of a shared response entirely. Per-token requests each
+ * get their own pair budget. Picks the highest-liquidity pair per token
+ * (DexScreener's priceUsd already routes through intermediates, e.g.
+ * PORCH→MUSEBOOK→ETH). Tokens DexScreener doesn't know are simply absent —
+ * callers treat them as unpriced, never an error. Never throws.
  */
 async function dexTokenPrices(
   networkId: string,
@@ -725,47 +745,69 @@ async function dexTokenPrices(
   const out = new Map<string, DexPrice>();
   const slug = DEX_CHAIN[networkId];
   if (!slug || contracts.length === 0) return out;
-  try {
-    const addrs = Array.from(new Set(contracts.map((c) => c.toLowerCase())))
-      .slice(0, 30)
-      .join(",");
-    const json = (await fetchJson(
-      `https://api.dexscreener.com/latest/dex/tokens/${addrs}`,
-      { headers: { Accept: "application/json" } },
-      10000
-    )) as { pairs?: unknown };
-    const pairs = Array.isArray(json.pairs) ? json.pairs : [];
-    const best = new Map<
-      string,
-      { price: string; liq: number; symbol: string; name: string }
-    >();
-    for (const p of pairs as Record<string, unknown>[]) {
-      const bt = p.baseToken as
-        | { address?: unknown; symbol?: unknown; name?: unknown }
-        | undefined;
-      const addr =
-        typeof bt?.address === "string" ? bt.address.toLowerCase() : "";
-      const price = typeof p.priceUsd === "string" ? p.priceUsd : "";
-      if (!addr || !price || Number(price) <= 0) continue;
-      const liq = Number(
-        (p.liquidity as { usd?: unknown } | undefined)?.usd ?? 0
-      );
-      const cur = best.get(addr);
-      if (!cur || liq > cur.liq) {
-        best.set(addr, {
-          price,
-          liq,
-          symbol:
-            typeof bt?.symbol === "string" ? bt.symbol : addr.slice(0, 6),
-          name: typeof bt?.name === "string" ? bt.name : "Unknown token",
-        });
+  const addrs = Array.from(new Set(contracts.map((c) => c.toLowerCase())));
+
+  // Quote-only stables never get a DexScreener price — peg them directly.
+  const live = addrs.filter((a) => {
+    const peg = STABLE_PEGS[a];
+    if (peg)
+      out.set(a, { price: peg.price, symbol: peg.symbol, name: peg.name });
+    return !peg;
+  });
+
+  const results = await Promise.all(
+    live.map(async (addr) => {
+      try {
+        const json = (await fetchJson(
+          `https://api.dexscreener.com/latest/dex/tokens/${addr}`,
+          { headers: { Accept: "application/json" } },
+          10000
+        )) as { pairs?: unknown };
+        const pairs = Array.isArray(json.pairs) ? json.pairs : [];
+        let best: {
+          price: string;
+          liq: number;
+          symbol: string;
+          name: string;
+        } | null = null;
+        for (const p of pairs as Record<string, unknown>[]) {
+          const bt = p.baseToken as
+            | { address?: unknown; symbol?: unknown; name?: unknown }
+            | undefined;
+          const pa =
+            typeof bt?.address === "string" ? bt.address.toLowerCase() : "";
+          // Only pairs where our token is the base: quote-side pairs price
+          // the *other* token.
+          if (pa !== addr) continue;
+          const price = typeof p.priceUsd === "string" ? p.priceUsd : "";
+          if (!price || Number(price) <= 0) continue;
+          const liq = Number(
+            (p.liquidity as { usd?: unknown } | undefined)?.usd ?? 0
+          );
+          if (!best || liq > best.liq) {
+            best = {
+              price,
+              liq,
+              symbol:
+                typeof bt?.symbol === "string" ? bt.symbol : addr.slice(0, 6),
+              name:
+                typeof bt?.name === "string" ? bt.name : "Unknown token",
+            };
+          }
+        }
+        return { addr, best };
+      } catch {
+        return { addr, best: null };
       }
-    }
-    best.forEach((b, addr) => {
-      out.set(addr, { price: b.price, symbol: b.symbol, name: b.name });
-    });
-  } catch {
-    // pricing is best-effort
+    })
+  );
+  for (const { addr, best } of results) {
+    if (best)
+      out.set(addr, {
+        price: best.price,
+        symbol: best.symbol,
+        name: best.name,
+      });
   }
   return out;
 }
