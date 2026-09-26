@@ -401,3 +401,47 @@ def test_execute_unknown_chain_fails_closed(tmp_path, monkeypatch):
                             "message": "hi", "sign_type": "personal",
                             "address": ADDR})
     assert out["submitted"] is False and "not configured" in out["note"]
+
+
+# ------------------------------------------- fee_mojos schema parity
+# (2026-09-25: the client's _tx_params always sends fee_mojos=0, but
+# MESSAGE_SIGN_FIELDS rejected it — the CLI could not queue signatures.)
+
+def test_rt_message_sign_accepts_zero_fee_mojos(tmp_path, monkeypatch):
+    d, _ = _daemon_with_seed(tmp_path, monkeypatch)
+    r = _req(d, "evm-4663", "hi", "personal", fee_mojos=0)
+    assert r["ok"] is True and r["decision"] == "queued"
+
+
+def test_rt_message_sign_rejects_nonzero_fee_mojos(tmp_path, monkeypatch):
+    d, _ = _daemon_with_seed(tmp_path, monkeypatch)
+    for bad in (1, 1000, True, "0"):
+        r = _req(d, "evm-4663", "hi", "personal", fee_mojos=bad)
+        assert r["ok"] is False, bad
+        assert "fee_mojos" in r["error"], bad
+
+
+def test_client_message_sign_params_pass_daemon_validation(tmp_path,
+                                                           monkeypatch):
+    """End-to-end shape check: capture exactly what AgentClient.message_sign
+    (the CLI path) sends and run it through the daemon's validation."""
+    from spellbook.client import AgentClient
+
+    class _Probe(AgentClient):
+        def __init__(self):
+            super().__init__("/nonexistent.sock", "00" * 32)
+            self.seen = None
+
+        def _call(self, route, params=None, timeout=None):
+            self.seen = {"route": route, "params": params}
+            return {"ok": True}
+
+    probe = _Probe()
+    probe.message_sign(chain="evm-4663", message="hi", address="0xabc",
+                       sign_type="personal", purpose="test")
+    params = probe.seen["params"]
+    assert probe.seen["route"] == "message_sign"
+    assert params["fee_mojos"] == 0  # _tx_params always includes it
+    d, _ = _daemon_with_seed(tmp_path, monkeypatch)
+    out = d.rt_message_sign(params, "m")
+    assert out["ok"] is True and out["decision"] == "queued"

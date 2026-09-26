@@ -111,7 +111,7 @@ BULK_SEND_FIELDS = {"intent", "chain", "asset", "addresses", "amount_mojos",
 MULTI_SEND_FIELDS = {"intent", "chain", "payments", "fee_mojos", "purpose"}
 MESSAGE_SIGN_FIELDS = {"intent", "chain", "address", "public_key",
                        "message", "purpose", "sign_type",
-                       "human_approval_ref"}
+                       "human_approval_ref", "fee_mojos"}
 
 # DEX intents (SPEC §10 v2 — approved by Speechless 2026-09-23): bounded
 # swap / LP-add requests. The queue holds BOUNDS (tokens, exact sell
@@ -4691,6 +4691,14 @@ class Daemon:
             return {"ok": False,
                     "error": "schema violation: message_sign needs chain, "
                              "message, and address or public_key"}
+        # message_sign is off-chain: a fee is meaningless. The blessed
+        # client always sends fee_mojos=0 (via _tx_params), so the field is
+        # accepted — but any nonzero value means the caller misunderstands
+        # the intent shape, and it is refused rather than silently dropped.
+        if p.get("fee_mojos", 0) != 0:
+            return {"ok": False,
+                    "error": "schema violation: message_sign is off-chain, "
+                             "fee_mojos must be 0 if present"}
         chain = p["chain"]
         # Chain-family gating for sign_type (first layer; execution
         # re-checks membership): EVM signs personal (EIP-191) or typed_data
