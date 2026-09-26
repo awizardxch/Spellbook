@@ -752,6 +752,17 @@ sign; Spellbook is self-custody on your machine, so the signing policy
 is yours to set, and now it permits bounded swaps/LPs under the normal
 human-approval flow (the human still approves each trade's bounds).
 
+## 9b. Trading on the Forge (Chia)
+
+Swapping XCH/CATs through the Forge DEX (forge.awizard.dev, testnet11) is
+a different lane from §9's EVM DEX trading. The agent-facing spec —
+sequence, rules R1–R9, the `forge_swap` intent proposal, and the
+acceptance tests T1–T9 (exercised against the hosted responder on
+2026-09-26) — lives in [docs/FORGE_SWAP.md](FORGE_SWAP.md). Read it before
+writing any Forge trading code. The responder's own `docs/FORGE_AGENT_API.md`
+is authoritative for the API's semantics; the Spellbook doc states the
+agent's obligations and what the daemon must enforce.
+
 ## 10. Wallet message signatures (all chains)
 
 Your agent can ask the daemon to sign a message with a wallet key — for
