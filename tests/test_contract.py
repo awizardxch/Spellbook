@@ -290,7 +290,7 @@ def test_deploy_validation(tmp_path, monkeypatch):
     with pytest.raises(evm.EvmError):
         d._validate_contract_deploy(_deploy_params(fee_mojos=1))
     with pytest.raises(evm.EvmError):
-        d._validate_contract_deploy(_deploy_params(chain="evm-1"))
+        d._validate_contract_deploy(_deploy_params(chain="evm-99999"))
     with pytest.raises(evm.EvmError):
         d._validate_contract_deploy(_deploy_params(bytecode="6080"))
     with pytest.raises(evm.EvmError):
@@ -604,3 +604,15 @@ def test_cli_contract_commands_wire_params(capsys):
         purpose="")
     with pytest.raises(SystemExit):
         cli.cmd_contract_call(bad, probe)
+
+
+def test_base_sepolia_accepted_for_contract_intents(tmp_path, monkeypatch):
+    """The cross-chain HTLC flow needs evm-84532 (Base Sepolia): deploy,
+    call, and view intents must all validate on it."""
+    d = _daemon(tmp_path, monkeypatch)
+    dep = _deploy_params(chain="evm-84532")
+    assert d._validate_contract_deploy(dep)["chain"] == "evm-84532"
+    call = _call_params(chain="evm-84532")
+    assert d._validate_contract_call(call, view=False)["chain"] == "evm-84532"
+    view = _view_params(chain="evm-84532")
+    assert d._validate_contract_call(view, view=True)["chain"] == "evm-84532"

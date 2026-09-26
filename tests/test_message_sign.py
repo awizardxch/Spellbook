@@ -397,10 +397,23 @@ def test_execute_solana_identity_mismatch_refuses(tmp_path, monkeypatch):
 
 def test_execute_unknown_chain_fails_closed(tmp_path, monkeypatch):
     d, _ = _daemon_with_seed(tmp_path, monkeypatch)
-    out = d._execute_spend({"intent": "message_sign", "chain": "evm-1",
+    # evm-99999 is in no chain registry — the dispatch must fail closed
+    # with "not configured", never attempt a key derivation.
+    out = d._execute_spend({"intent": "message_sign", "chain": "evm-99999",
                             "message": "hi", "sign_type": "personal",
                             "address": ADDR})
     assert out["submitted"] is False and "not configured" in out["note"]
+
+
+def test_execute_message_sign_evm1_key_derives(tmp_path, monkeypatch):
+    """evm-1 is a supported chain (added 2026-09-25): key derivation works
+    and each chain name gets its own derived key (domain separation)."""
+    from spellbook import kdf
+    seed = bytes.fromhex("42" * 32)
+    scalar, _ = kdf.derive_scalar(seed, "evm-1", "default")
+    assert 0 < scalar < kdf.SECP256K1_N
+    other, _ = kdf.derive_scalar(seed, "evm-84532", "default")
+    assert other != scalar
 
 
 # ------------------------------------------- fee_mojos schema parity
