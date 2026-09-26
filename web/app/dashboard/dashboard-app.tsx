@@ -23,6 +23,8 @@ interface TokenHolding {
   qty: string;
   /** USD value at 2dp — null when unpriced */
   usd: string | null;
+  /** DexScreener chart URL for the token's most-liquid pair — null when none */
+  chartUrl: string | null;
 }
 
 interface NftHolding {
@@ -624,6 +626,31 @@ export default function DashboardApp({
                                             </span>
                                           )}
                                         </span>
+                                        {t.chartUrl && (
+                                          <a
+                                            href={t.chartUrl}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="dash-chart-link"
+                                            title={`Open ${t.symbol} chart (most liquid pool)`}
+                                            aria-label={`Open ${t.symbol} chart in a new tab`}
+                                          >
+                                            <svg
+                                              width="14"
+                                              height="14"
+                                              viewBox="0 0 24 24"
+                                              fill="none"
+                                              stroke="currentColor"
+                                              strokeWidth="2"
+                                              strokeLinecap="round"
+                                              strokeLinejoin="round"
+                                              aria-hidden="true"
+                                            >
+                                              <path d="M3 3v18h18" />
+                                              <path d="M7 15l4-6 4 3 5-8" />
+                                            </svg>
+                                          </a>
+                                        )}
                                       </li>
                                     ))}
                                     {h.total === null &&
