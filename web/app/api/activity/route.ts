@@ -31,6 +31,29 @@ export const dynamic = "force-dynamic";
 
 const TIMEOUT_MS = 8000;
 const MAX_DEPTH = 10;
+
+/**
+ * Browser User-Agent sent on every outbound fetch. Some RPCs (notably
+ * Robinhood Chain's Cloudflare front) 403 requests that carry no UA.
+ */
+const BROWSER_UA =
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+/** Normalize the HeadersInit a caller passed into a plain record. */
+function asHeaderRecord(
+  headers: HeadersInit | undefined
+): Record<string, string> {
+  if (!headers) return {};
+  if (headers instanceof Headers) {
+    const out: Record<string, string> = {};
+    headers.forEach((v, k) => {
+      out[k] = v;
+    });
+    return out;
+  }
+  if (Array.isArray(headers)) return Object.fromEntries(headers);
+  return headers as Record<string, string>;
+}
 const DEFAULT_DEPTH = 3;
 const MAX_LIMIT = 10;
 const DEFAULT_LIMIT = 5;
@@ -54,7 +77,16 @@ async function fetchJson(
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { ...init, signal: ctrl.signal });
+    const res = await fetch(url, {
+      ...init,
+      headers: {
+        // Some RPCs (notably Robinhood Chain's Cloudflare front) 403
+        // requests that carry no User-Agent. Look like a browser everywhere.
+        "User-Agent": BROWSER_UA,
+        ...asHeaderRecord(init.headers),
+      },
+      signal: ctrl.signal,
+    });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return (await res.json()) as unknown;
   } finally {
