@@ -19,6 +19,7 @@ dependencies = [
 test = [
     "pytest>=8.0.0",
     "eth-keys>=0.7.0",  # independent ECDSA cross-check in tests/test_evm.py
+    "eth-abi>=5.0.0",  # independent ABI cross-check in tests/test_contract.py
 ]
 
 [project.scripts]

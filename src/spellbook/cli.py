@@ -353,6 +353,45 @@ def cmd_dex_lp_claim(a, client: AgentClient):
         purpose=a.purpose or "", deadline_sec=a.deadline_sec))
 
 
+def _json_list_arg(spec: str | None, what: str) -> list:
+    if spec is None:
+        return []
+    try:
+        v = json.loads(spec)
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"bad {what} JSON: {e}")
+    if not isinstance(v, list):
+        raise SystemExit(f"bad {what}: expected a JSON array")
+    return v
+
+
+def cmd_contract_deploy(a, client: AgentClient):
+    _show(client.contract_deploy(
+        chain=a.chain, bytecode=a.bytecode,
+        constructor_args=_json_list_arg(a.constructor_args,
+                                       "--constructor-args"),
+        constructor_abi=_json_arg(a.constructor_abi, "--constructor-abi")
+        if a.constructor_abi else None,
+        value_wei=a.value_wei, gas_limit=a.gas_limit,
+        purpose=a.purpose or ""))
+
+
+def cmd_contract_call(a, client: AgentClient):
+    _show(client.contract_call(
+        chain=a.chain, contract=a.contract, method=a.method,
+        method_abi=_json_arg(a.method_abi, "--method-abi"),
+        args=_json_list_arg(a.args, "--args"),
+        value_wei=a.value_wei, gas_limit=a.gas_limit,
+        purpose=a.purpose or ""))
+
+
+def cmd_contract_call_view(a, client: AgentClient):
+    _show(client.contract_call_view(
+        chain=a.chain, contract=a.contract, method=a.method,
+        method_abi=_json_arg(a.method_abi, "--method-abi"),
+        args=_json_list_arg(a.args, "--args")))
+
+
 def cmd_approve(a, client: HumanClient):
     import sys
     print("executing — this can take up to ~2 minutes (firm quote, "
@@ -758,6 +797,52 @@ def main(argv=None):
     dlc.add_argument("--deadline-sec", type=int, default=None)
     dlc.add_argument("--purpose", default="")
 
+    cdep = sub.add_parser("contract-deploy",
+                          help="deploy EVM bytecode (init code + encoded "
+                               "constructor args); always queued for human "
+                               "approval")
+    cdep.add_argument("--chain", required=True)
+    cdep.add_argument("--bytecode", required=True,
+                      help="0x-prefixed init bytecode")
+    cdep.add_argument("--constructor-args", default=None,
+                      help="JSON array of constructor args")
+    cdep.add_argument("--constructor-abi", default=None,
+                      help="JSON ABI fragment or inputs list "
+                           "({\"inputs\": [...]})")
+    cdep.add_argument("--value-wei", type=int, default=0)
+    cdep.add_argument("--gas-limit", type=int, default=None,
+                      help="omit to estimate from the node at execution")
+    cdep.add_argument("--purpose", default="")
+
+    ccall = sub.add_parser("contract-call",
+                           help="call a contract method (state-changing); "
+                                "always queued for human approval")
+    ccall.add_argument("--chain", required=True)
+    ccall.add_argument("--contract", required=True,
+                       help="0x contract address")
+    ccall.add_argument("--method", required=True)
+    ccall.add_argument("--method-abi", required=True,
+                       help="JSON ABI fragment "
+                            "{\"name\":...,\"inputs\":[...],"
+                            "\"stateMutability\":...}")
+    ccall.add_argument("--args", default=None,
+                       help="JSON array of method args")
+    ccall.add_argument("--value-wei", type=int, default=0)
+    ccall.add_argument("--gas-limit", type=int, default=None,
+                       help="omit to estimate from the node at execution")
+    ccall.add_argument("--purpose", default="")
+
+    cview = sub.add_parser("contract-call-view",
+                           help="read-only eth_call of a view/pure method; "
+                                "no queue, no approval, nothing signed")
+    cview.add_argument("--chain", required=True)
+    cview.add_argument("--contract", required=True)
+    cview.add_argument("--method", required=True)
+    cview.add_argument("--method-abi", required=True,
+                       help="JSON ABI fragment with inputs/outputs")
+    cview.add_argument("--args", default=None,
+                       help="JSON array of method args")
+
     apv = sub.add_parser("approve")
     apv.add_argument("queue_id")
     rj = sub.add_parser("reject")
@@ -968,6 +1053,9 @@ def main(argv=None):
              "dex-swap": cmd_dex_swap, "dex-lp-add": cmd_dex_lp_add,
              "dex-lp-remove": cmd_dex_lp_remove,
              "dex-lp-claim": cmd_dex_lp_claim,
+             "contract-deploy": cmd_contract_deploy,
+             "contract-call": cmd_contract_call,
+             "contract-call-view": cmd_contract_call_view,
              "dex-venues": cmd_dex_venues,
              "offer-make": cmd_offer_make, "offer-take": cmd_offer_take,
              "offer-cancel": cmd_offer_cancel, "chia-read": cmd_chia_read,

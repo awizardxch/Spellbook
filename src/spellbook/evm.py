@@ -3,9 +3,12 @@
 Stdlib JSON-RPC (urllib) + coincurve signing. No new dependencies.
 
 Safety rails:
-- Only plain native transfers. The daemon's v1 schema already rejects
-  contract-call-shaped requests; this module has no calldata parameter at
-  all — there is no way to express anything but to/value.
+- Plain native transfers go through sign_legacy_transfer. Contract calls
+  and deployments go through sign_legacy_call / sign_legacy_deploy, which
+  the daemon only reaches from queued, human-approved intents (dex_* and
+  contract_*): the daemon never signs caller-supplied raw calldata or init
+  code outside those paths — calldata is always built from decoded,
+  schema-validated intent fields (spellbook.abi).
 - Mainnet submission is REFUSED unless the daemon config explicitly sets
   "mainnet_submit_enabled": true. That flag exists only for the
   separately-authorized §10.14-17 mainnet dust step.
@@ -160,6 +163,17 @@ class Rpc:
               "data": data_hex}
         return int(self.call("eth_estimateGas", [tx]), 16)
 
+    def estimate_gas_deploy(self, from_addr: str, value_wei: int,
+                            data_hex: str) -> int:
+        """eth_estimateGas for a contract deployment (no ``to`` field).
+
+        Same fail-closed discipline as estimate_gas_call.
+        """
+        if not (isinstance(data_hex, str) and data_hex.startswith("0x")):
+            raise EvmError("init code must be 0x-prefixed hex")
+        tx = {"from": from_addr, "value": hex(value_wei), "data": data_hex}
+        return int(self.call("eth_estimateGas", [tx]), 16)
+
     def eth_call(self, to: str, data_hex: str, from_addr: str | None = None,
                  block: str = "latest"):
         """Read-only contract call (allowance checks, etc.). Never signs."""
@@ -198,12 +212,30 @@ class Rpc:
 def _sign_legacy(privkey_bytes: bytes, chain_id: int, nonce: int, to: str,
                  value_wei: int, data: bytes, gas_price_wei: int,
                  gas_limit: int) -> dict:
-    """Core EIP-155 legacy signer. ``data`` empty = native transfer."""
-    if not is_address(to):
-        raise EvmError(f"bad destination address: {to!r}")
+    """Core EIP-155 legacy signer. ``data`` empty = native transfer.
+
+    ``to`` must be an address; contract creation goes through
+    sign_legacy_deploy, which passes an empty ``to`` per EIP-155.
+    """
+    return _sign_legacy_to(privkey_bytes, chain_id, nonce, to, value_wei,
+                           data, gas_price_wei, gas_limit)
+
+
+def _sign_legacy_to(privkey_bytes: bytes, chain_id: int, nonce: int,
+                    to: str | None, value_wei: int, data: bytes,
+                    gas_price_wei: int, gas_limit: int) -> dict:
+    """Core EIP-155 legacy signer. ``to=None`` = contract creation: the
+    RLP ``to`` field is empty and the result's \"to\" is None."""
+    if to is None:
+        to_bytes = b""
+        to_label = None
+    else:
+        if not is_address(to):
+            raise EvmError(f"bad destination address: {to!r}")
+        to_bytes = bytes.fromhex(to[2:])
+        to_label = to
     if value_wei < 0:
         raise EvmError("value must be non-negative")
-    to_bytes = bytes.fromhex(to[2:])
     unsigned = _rlp_list([_rlp_int(nonce), _rlp_int(gas_price_wei),
                           _rlp_int(gas_limit), _rlp_bytes(to_bytes),
                           _rlp_int(value_wei), _rlp_bytes(data),
@@ -225,9 +257,24 @@ def _sign_legacy(privkey_bytes: bytes, chain_id: int, nonce: int, to: str,
         raise EvmError("signature recovery mismatch — refusing to broadcast")
     return {"raw_hex": "0x" + signed.hex(),
             "tx_hash": "0x" + keccak256(signed).hex(),
-            "from": expected, "to": to, "value_wei": value_wei,
+            "from": expected, "to": to_label, "value_wei": value_wei,
             "data": "0x" + data.hex(),
             "nonce": nonce, "chain_id": chain_id}
+
+
+def contract_address_from_deploy(sender: str, nonce: int) -> str:
+    """The CREATE address for a deployment: keccak(RLP([sender, nonce]))[12:].
+
+    Used to cross-check the receipt's contractAddress — a mismatch means
+    the receipt is not for the tx we signed, and we refuse to report an
+    address we did not verify.
+    """
+    if not is_address(sender):
+        raise EvmError(f"bad sender address: {sender!r}")
+    if not isinstance(nonce, int) or nonce < 0:
+        raise EvmError(f"bad nonce: {nonce!r}")
+    return "0x" + keccak256(_rlp_list(
+        [_rlp_bytes(bytes.fromhex(sender[2:])), _rlp_int(nonce)]))[-20:].hex()
 
 
 def sign_legacy_transfer(privkey_bytes: bytes, chain_id: int, nonce: int,
@@ -263,5 +310,28 @@ def sign_legacy_call(privkey_bytes: bytes, chain_id: int, nonce: int,
         raise EvmError("calldata is not valid hex")
     if not data:
         raise EvmError("empty calldata — use sign_legacy_transfer")
-    return _sign_legacy(privkey_bytes, chain_id, nonce, to, value_wei, data,
-                        gas_price_wei, gas_limit)
+    return _sign_legacy_to(privkey_bytes, chain_id, nonce, to, value_wei,
+                           data, gas_price_wei, gas_limit)
+
+
+def sign_legacy_deploy(privkey_bytes: bytes, chain_id: int, nonce: int,
+                       value_wei: int, data_hex: str, gas_price_wei: int,
+                       gas_limit: int) -> dict:
+    """Sign an EIP-155 legacy contract-creation transaction.
+
+    Same ecrecover self-check as transfers. ``data_hex`` must be
+    0x-prefixed init code; the signed tx's ``to`` is None (empty RLP
+    field). The daemon only signs init code built from queued,
+    human-approved contract_deploy intents — never caller-supplied raw
+    bytes outside that path.
+    """
+    if not (isinstance(data_hex, str) and data_hex.startswith("0x")):
+        raise EvmError("init code must be 0x-prefixed hex")
+    try:
+        data = bytes.fromhex(data_hex[2:])
+    except ValueError:
+        raise EvmError("init code is not valid hex")
+    if not data:
+        raise EvmError("empty init code — nothing to deploy")
+    return _sign_legacy_to(privkey_bytes, chain_id, nonce, None, value_wei,
+                           data, gas_price_wei, gas_limit)
