@@ -450,6 +450,121 @@ export default function DashboardApp({
         </a>
         <div className="nav-links bar-scroll">
           <a href="/">Home</a>
+          <div className="dash-netsel dash-nav-netsel">
+            <button
+              type="button"
+              className="dash-netbtn"
+              aria-haspopup="listbox"
+              aria-expanded={netDropOpen}
+              aria-label={
+                selCfg
+                  ? `Select network, current: ${selCfg.networkLabel} ${selCfg.env}`
+                  : "Select network"
+              }
+              onClick={() => setNetDropOpen((v) => !v)}
+            >
+              {selCfg ? (
+                <>
+                  <span
+                    className="dash-dot"
+                    style={{ background: selCfg.color }}
+                  />
+                  <span className="dash-netbtn-label">
+                    {selCfg.networkLabel}
+                  </span>
+                  <span className={`dash-envtag dash-env-${selCfg.env}`}>
+                    {selCfg.env === "mainnet" ? "Mainnet" : "Testnet"}
+                  </span>
+                </>
+              ) : (
+                <span className="dash-netbtn-label">Network</span>
+              )}
+              <span className="dash-netbtn-chev" aria-hidden>
+                ▾
+              </span>
+            </button>
+            {netDropOpen && (
+              <>
+                <button
+                  type="button"
+                  className="dash-netdrop-backdrop"
+                  aria-label="Close network selector"
+                  onClick={() => setNetDropOpen(false)}
+                />
+                <ul
+                  className="dash-netdrop"
+                  role="listbox"
+                  aria-label="Select network"
+                >
+                  {CHAINS.map((cfg) => {
+                    const hs = holdingsFor(cfg.id);
+                    const on = enabled[cfg.id];
+                    const usdSum = hs.reduce(
+                      (s, h) =>
+                        s +
+                        (h.totalUsd != null ? Number(h.totalUsd) : 0),
+                      0
+                    );
+                    const priced = hs.some((h) => h.totalUsd != null);
+                    const active = activeId === cfg.id;
+                    return (
+                      <li
+                        key={cfg.id}
+                        className={`dash-netdroprow${
+                          active ? " active" : ""
+                        }`}
+                      >
+                        <button
+                          type="button"
+                          role="option"
+                          aria-selected={active}
+                          className="dash-netdroprow-main"
+                          title={`${cfg.networkLabel} ${cfg.env} — view holdings`}
+                          onClick={() => {
+                            if (!enabled[cfg.id]) toggle(cfg.id);
+                            setSelectedChain(cfg.id);
+                            setNetDropOpen(false);
+                          }}
+                        >
+                          <span
+                            className="dash-dot"
+                            style={{ background: cfg.color }}
+                          />
+                          <span className="dash-netdroprow-name">
+                            <span>{cfg.networkLabel}</span>
+                            <span className="dash-sub">
+                              {cfg.env === "mainnet" ? "Mainnet" : "Testnet"}
+                            </span>
+                          </span>
+                          <span className="dash-railbal">
+                            {holdings ? (
+                              priced ? (
+                                fmtUsd(String(usdSum))
+                              ) : (
+                                <span className="dash-muted">—</span>
+                              )
+                            ) : (
+                              <span className="dash-muted">…</span>
+                            )}
+                          </span>
+                        </button>
+                        <button
+                          role="switch"
+                          aria-checked={on}
+                          aria-label={`Toggle ${cfg.networkLabel} ${cfg.env}`}
+                          className={`dash-switch${on ? " on" : ""}`}
+                          type="button"
+                          onClick={() => toggle(cfg.id)}
+                        >
+                          <span className="dash-knob" />
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </>
+            )}
+          </div>
           <span className="dash-session">
             {role === "agent"
               ? `🧙 agent ${pubkey ? `${pubkey.slice(0, 4)}…${pubkey.slice(-4)}` : ""}`
@@ -496,7 +611,7 @@ export default function DashboardApp({
 
       {tab === "portfolio" && (
         <section className="dash-portfolio">
-          {/* left: network rail — selector + per-chain toggles */}
+          {/* left: network rail — click-to-select network list */}
           <div className="dash-panel dash-rail">
             <div className="dash-rail-head">
               <h2>Networks</h2>
@@ -558,22 +673,12 @@ export default function DashboardApp({
                         )}
                       </span>
                     </button>
-                    <button
-                      role="switch"
-                      aria-checked={on}
-                      aria-label={`Toggle ${cfg.networkLabel} ${cfg.env}`}
-                      className={`dash-switch${on ? " on" : ""}`}
-                      type="button"
-                      onClick={() => toggle(cfg.id)}
-                    >
-                      <span className="dash-knob" />
-                    </button>
                   </li>
                 );
               })}
             </ul>
             <p className="dash-note">
-              Toggling refilters holdings immediately. Strictly read-only —
+              Select a network to view its holdings. Strictly read-only —
               this page cannot approve, sign, or broadcast anything.
             </p>
           </div>
@@ -582,131 +687,6 @@ export default function DashboardApp({
           <div className="dash-panel dash-holdings">
             {selCfg ? (
               <>
-                <div className="dash-netbar">
-                  <div className="dash-netsel">
-                    <button
-                      type="button"
-                      className="dash-netbtn"
-                      aria-haspopup="listbox"
-                      aria-expanded={netDropOpen}
-                      aria-label={`Select network, current: ${selCfg.networkLabel} ${selCfg.env}`}
-                      onClick={() => setNetDropOpen((v) => !v)}
-                    >
-                      <span
-                        className="dash-dot"
-                        style={{ background: selCfg.color }}
-                      />
-                      <span className="dash-netbtn-label">
-                        {selCfg.networkLabel}
-                      </span>
-                      <span
-                        className={`dash-envtag dash-env-${selCfg.env}`}
-                      >
-                        {selCfg.env === "mainnet" ? "Mainnet" : "Testnet"}
-                      </span>
-                      <span className="dash-netbtn-chev" aria-hidden>
-                        ▾
-                      </span>
-                    </button>
-                    {netDropOpen && (
-                      <>
-                        <button
-                          type="button"
-                          className="dash-netdrop-backdrop"
-                          aria-label="Close network selector"
-                          onClick={() => setNetDropOpen(false)}
-                        />
-                        <ul
-                          className="dash-netdrop"
-                          role="listbox"
-                          aria-label="Select network"
-                        >
-                          {CHAINS.map((cfg) => {
-                            const hs = holdingsFor(cfg.id);
-                            const on = enabled[cfg.id];
-                            const usdSum = hs.reduce(
-                              (s, h) =>
-                                s +
-                                (h.totalUsd != null
-                                  ? Number(h.totalUsd)
-                                  : 0),
-                              0
-                            );
-                            const priced = hs.some(
-                              (h) => h.totalUsd != null
-                            );
-                            const active = activeId === cfg.id;
-                            return (
-                              <li
-                                key={cfg.id}
-                                className={`dash-netdroprow${
-                                  active ? " active" : ""
-                                }`}
-                              >
-                                <button
-                                  type="button"
-                                  role="option"
-                                  aria-selected={active}
-                                  className="dash-netdroprow-main"
-                                  title={`${cfg.networkLabel} ${cfg.env} — view holdings`}
-                                  onClick={() => {
-                                    if (!enabled[cfg.id])
-                                      toggle(cfg.id);
-                                    setSelectedChain(cfg.id);
-                                    setNetDropOpen(false);
-                                  }}
-                                >
-                                  <span
-                                    className="dash-dot"
-                                    style={{ background: cfg.color }}
-                                  />
-                                  <span className="dash-netdroprow-name">
-                                    <span>{cfg.networkLabel}</span>
-                                    <span className="dash-sub">
-                                      {cfg.env === "mainnet"
-                                        ? "Mainnet"
-                                        : "Testnet"}
-                                    </span>
-                                  </span>
-                                  <span className="dash-railbal">
-                                    {holdings ? (
-                                      priced ? (
-                                        fmtUsd(String(usdSum))
-                                      ) : (
-                                        <span className="dash-muted">
-                                          —
-                                        </span>
-                                      )
-                                    ) : (
-                                      <span className="dash-muted">
-                                        …
-                                      </span>
-                                    )}
-                                  </span>
-                                </button>
-                                <button
-                                  role="switch"
-                                  aria-checked={on}
-                                  aria-label={`Toggle ${cfg.networkLabel} ${cfg.env}`}
-                                  className={`dash-switch${
-                                    on ? " on" : ""
-                                  }`}
-                                  type="button"
-                                  onClick={() => toggle(cfg.id)}
-                                >
-                                  <span className="dash-knob" />
-                                </button>
-                              </li>
-                            );
-                          })}
-                        </ul>
-                      </>
-                    )}
-                  </div>
-                  <span className="dash-sub dash-netbar-detail">
-                    {selCfg.detail}
-                  </span>
-                </div>
                 <div className="dash-panel-head dash-headrow">
                   <div className="dash-actions dash-actions-row">
                     <div

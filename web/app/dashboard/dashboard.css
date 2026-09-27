@@ -1397,21 +1397,42 @@
   margin-right: 0;
 }
 
-/* ---------- holdings header: network quick-switch bar + one-row controls ---------- */
-/* Slim top bar above the holdings panel: network selector button + dropdown
- * carrying the per-network slider (toggle) selection. */
-.dash-netbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
-  position: relative;
-  z-index: 40;
-}
+/* ---------- network quick-switcher: button + dropdown with per-network sliders ---------- */
+/* The button now lives in the global top nav (next to the profile chip);
+ * the dropdown carries the per-network slider (toggle) selection. */
 
 .dash-netsel {
   position: relative;
+}
+
+/* In the top nav: keep the button compact and right-align the dropdown so it
+ * never overflows the viewport edge. */
+.dash-nav-netsel .dash-netdrop {
+  left: auto;
+  right: 0;
+}
+
+.dash-nav .dash-netbtn {
+  padding: 6px 10px;
+  font-size: 0.85rem;
+  gap: 8px;
+  border-radius: 10px;
+}
+
+.dash-nav .dash-netbtn-label {
+  max-width: 140px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 640px) {
+  .dash-nav .dash-netbtn .dash-envtag {
+    display: none;
+  }
+  .dash-nav .dash-netbtn-label {
+    max-width: 72px;
+  }
 }
 
 .dash-netbtn {
@@ -1441,12 +1462,6 @@
   color: var(--muted);
   font-size: 0.78rem;
   line-height: 1;
-}
-
-.dash-netbar-detail {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .dash-netdrop-backdrop {
@@ -1534,8 +1549,9 @@
   left: 18px;
 }
 
-/* Holdings header: the network title moved into the netbar; the controls
- * (Addresses stepper, Refresh, reporting chip, mode chip) share one row. */
+/* Network selection lives in the top-nav button; the holdings header
+ * keeps only the controls (Addresses stepper, Refresh, reporting chip,
+ * mode chip) in one row. */
 .dash-headrow {
   margin-bottom: 14px;
 }
@@ -1578,12 +1594,6 @@
   }
 
   .dash-rail .dash-note {
-    display: none;
-  }
-
-  /* holdings header: hide the detail line, keep the netbar + one-row
-   * controls usable (controls scroll horizontally instead of wrapping) */
-  .dash-netbar-detail {
     display: none;
   }
 
