@@ -793,11 +793,11 @@ export default function DashboardApp({
                                         background: cfg?.color ?? "#8b5cf6",
                                       }}
                                     />
-                                    {NATIVE_NAMES[h.unit] ?? h.unit}
+                                    {NATIVE_NAMES[h.unit] ?? h.unit}{" "}
+                                    <WalletBadge wallet={h.wallet} />
                                     <span className="dash-sub">
                                       {h.unit} · native
                                     </span>
-                                    <WalletBadge wallet={h.wallet} />
                                   </td>
                                   <td className="dash-num">
                                     {h.total}{" "}
@@ -820,9 +820,9 @@ export default function DashboardApp({
                                 <tr key={t.contract}>
                                   <td>
                                     <span className="dash-dot dash-dot-token" />
-                                    {t.name}
-                                    <span className="dash-sub">{t.symbol}</span>
+                                    {t.name}{" "}
                                     <WalletBadge wallet={h.wallet} />
+                                    <span className="dash-sub">{t.symbol}</span>
                                   </td>
                                   <td className="dash-num">
                                     {t.qty}{" "}
