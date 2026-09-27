@@ -188,7 +188,7 @@ def cmd_reveal(key_type, chain=None):
       wallet address on that chain — NOT the BIP-39 standard-derivation
       key (m/44'/60'/0'/0/0), which belongs to a different address.
     - chia-key: the KDF-derived BLS master secret for the given Chia
-      chain (default chia-testnet11).
+      chain (default chia-testnet).
 
     The chain matters: KDF mode derives a distinct key per chain label.
     """
@@ -211,7 +211,7 @@ def cmd_reveal(key_type, chain=None):
         print(f"0x{d['scalar_hex']}")
         print(f"address {d['address']} ({chain})", file=sys.stderr)
     elif key_type == "chia-key":
-        chain = chain or "chia-testnet11"
+        chain = chain or "chia-testnet"
         d = kdf.derive_labeled(seed32, chain, "default")
         print(d["scalar_hex"])
         print(f"chia master secret ({chain})", file=sys.stderr)
@@ -226,7 +226,7 @@ if __name__ == "__main__":
         print("  python3 recovery.py restore    - Restore from paper backup")
         print("  python3 recovery.py addresses  - Show addresses only (no keys)")
         print("  python3 recovery.py reveal <type> [--chain C] - Reveal one key (mnemonic|evm-key|chia-key);")
-        print("      evm-key/chia-key use the daemon's KDF derivation for chain C (default evm-4663 / chia-testnet11)")
+        print("      evm-key/chia-key use the daemon's KDF derivation for chain C (default evm-4663 / chia-testnet)")
         sys.exit(1)
     
     cmd = sys.argv[1]

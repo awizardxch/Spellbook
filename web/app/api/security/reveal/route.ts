@@ -74,7 +74,7 @@ export async function POST(req: NextRequest) {
         ? raw
         : DEFAULT_CHAIN[type as Exclude<RevealType, "mnemonic">];
     // Tight allowlist: evm-<chain_id> or the known Chia chain labels.
-    if (!/^(evm-\d+|chia|chia-testnet11)$/.test(chain)) {
+    if (!/^(evm-\d+|chia-mainnet|chia-testnet)$/.test(chain)) {
       return NextResponse.json({ error: "Invalid chain" }, { status: 400 });
     }
   }
