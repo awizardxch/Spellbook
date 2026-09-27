@@ -283,6 +283,8 @@ export default function DashboardApp({
   const [lpWallets, setLpWallets] = useState<LpWallet[] | null>(null);
   const [lpLoading, setLpLoading] = useState(false);
   const [lpError, setLpError] = useState<string | null>(null);
+  // LP rows expand in place to reveal the full position detail.
+  const [expandedLp, setExpandedLp] = useState<Set<string>>(new Set());
   const [activity, setActivity] = useState<ChainActivity[] | null>(null);
   const [activityLoading, setActivityLoading] = useState(false);
   const [activityError, setActivityError] = useState<string | null>(null);
@@ -964,59 +966,75 @@ export default function DashboardApp({
                                 const wQuote = hasDist
                                   ? (pQuote as number)
                                   : 0;
+                                const lpKey = `${p.owner}-${p.tokenId}`;
+                                const open = expandedLp.has(lpKey);
+                                const toggleLp = () => {
+                                  setExpandedLp((prev) => {
+                                    const next = new Set(prev);
+                                    if (next.has(lpKey)) next.delete(lpKey);
+                                    else next.add(lpKey);
+                                    return next;
+                                  });
+                                };
                                 return (
-                                  <tr key={`${p.owner}-${p.tokenId}`}>
-                                    <td>
-                                      <span className="dash-num">
-                                        {base.symbol}/{quote.symbol}
-                                      </span>{" "}
-                                      <WalletBadge wallet={w.wallet} />
-                                      <span className="dash-sub">
-                                        v4 · {p.feeLabel}
-                                        {" · "}Robinhood Chain
-                                      </span>
-                                    </td>
-                                    <td>
-                                      <span
-                                        className={
-                                          p.inRange
-                                            ? "dash-ok"
-                                            : "dash-warn"
-                                        }
-                                        title={
-                                          p.inRange
-                                            ? "Current price is inside this range"
-                                            : "Current price is outside this range — the position earns no fees"
-                                        }
-                                      >
-                                        ●{" "}
-                                        {p.inRange
-                                          ? "in range"
-                                          : "out of range"}
-                                      </span>
-                                      <span className="dash-sub">
-                                        {lo.head}
-                                        {lo.sub && (
-                                          <sub className="lp-sub">
-                                            {lo.sub}
-                                          </sub>
-                                        )}
-                                        {" → "}
-                                        {hi.head}
-                                        {hi.sub && (
-                                          <sub className="lp-sub">
-                                            {hi.sub}
-                                          </sub>
-                                        )}{" "}
-                                        {quote.symbol}
-                                      </span>
-                                      <span className="dash-sub">
-                                        ticks {p.tickLower} → {p.tickUpper}
-                                      </span>
-                                    </td>
-                                    <td>
-                                      {hasDist ? (
-                                        <>
+                                  <Fragment key={lpKey}>
+                                    <tr
+                                      className={`lp-row${
+                                        open ? " open" : ""
+                                      }`}
+                                      onClick={toggleLp}
+                                      title={
+                                        open
+                                          ? "Collapse position detail"
+                                          : "Expand position detail"
+                                      }
+                                    >
+                                      <td>
+                                        <span className="dash-num">
+                                          {base.symbol}/{quote.symbol}
+                                        </span>{" "}
+                                        <WalletBadge wallet={w.wallet} />
+                                        <span className="dash-sub">
+                                          v4 · {p.feeLabel}
+                                        </span>
+                                      </td>
+                                      <td>
+                                        <span
+                                          className={
+                                            p.inRange
+                                              ? "dash-ok"
+                                              : "dash-warn"
+                                          }
+                                          title={
+                                            p.inRange
+                                              ? "Current price is inside this range"
+                                              : "Current price is outside this range — the position earns no fees"
+                                          }
+                                        >
+                                          ●{" "}
+                                          {p.inRange
+                                            ? "in range"
+                                            : "out of range"}
+                                        </span>
+                                        <span className="dash-sub">
+                                          {lo.head}
+                                          {lo.sub && (
+                                            <sub className="lp-sub">
+                                              {lo.sub}
+                                            </sub>
+                                          )}
+                                          {" → "}
+                                          {hi.head}
+                                          {hi.sub && (
+                                            <sub className="lp-sub">
+                                              {hi.sub}
+                                            </sub>
+                                          )}{" "}
+                                          {quote.symbol}
+                                        </span>
+                                      </td>
+                                      <td>
+                                        {hasDist ? (
                                           <span
                                             className="lp-dist"
                                             title={`${wBase.toFixed(1)}% ${
@@ -1034,77 +1052,107 @@ export default function DashboardApp({
                                               style={{ width: `${wQuote}%` }}
                                             />
                                           </span>
-                                          <span className="dash-sub">
-                                            {wBase.toFixed(1)}% {base.symbol}{" "}
-                                            · {wQuote.toFixed(1)}%{" "}
-                                            {quote.symbol}
-                                          </span>
-                                        </>
-                                      ) : (
-                                        <span className="dash-sub">—</span>
-                                      )}
-                                    </td>
-                                    <td>
-                                      <span className="dash-num">
-                                        {p.valueUsd !== null
-                                          ? fmtUsd(p.valueUsd)
-                                          : "—"}
-                                      </span>
-                                      <span className="dash-sub">
-                                        {fmtAmt(p.amount0)} {p.token0.symbol}{" "}
-                                        + {fmtAmt(p.amount1)}{" "}
-                                        {p.token1.symbol}
-                                      </span>
-                                    </td>
-                                    <td>
-                                      <span className="dash-num">
-                                        {p.feesUsd !== null
-                                          ? fmtUsd(p.feesUsd)
-                                          : "—"}
-                                      </span>
-                                      <span className="dash-sub">
-                                        {fmtAmt(p.fees0)} {p.token0.symbol} +{" "}
-                                        {fmtAmt(p.fees1)} {p.token1.symbol}
-                                      </span>
-                                      <span className="dash-sub">
-                                        unclaimed
-                                      </span>
-                                    </td>
-                                    <td>
-                                      <span className="dash-num">
-                                        {p.apr !== null
-                                          ? `${p.apr.toFixed(2)}%`
-                                          : "—"}
-                                      </span>
-                                      <span
-                                        className="dash-sub"
-                                        title={
-                                          p.aprBasis
-                                            ? `Estimate — ${p.aprBasis}`
-                                            : undefined
-                                        }
-                                      >
-                                        {p.apr !== null ? (
-                                          <>
-                                            est.
-                                            {p.aprBasis
-                                              ? ` · ${p.aprBasis}`
-                                              : ""}
-                                          </>
                                         ) : (
-                                          p.aprBasis ?? "—"
+                                          <span className="dash-sub">—</span>
                                         )}
-                                      </span>
-                                    </td>
-                                    <td>
-                                      <span className="dash-num">
-                                        {fmtDate(p.created)}
-                                      </span>
-                                      <span className="dash-sub">
-                                        token #{p.tokenId}
-                                      </span>
-                                    </td>
-                                  </tr>
+                                      </td>
+                                      <td>
+                                        <span className="dash-num">
+                                          {p.valueUsd !== null
+                                            ? fmtUsd(p.valueUsd)
+                                            : "—"}
+                                        </span>
+                                      </td>
+                                      <td>
+                                        <span className="dash-num">
+                                          {p.feesUsd !== null
+                                            ? fmtUsd(p.feesUsd)
+                                            : "—"}
+                                        </span>
+                                      </td>
+                                      <td>
+                                        <span className="dash-num">
+                                          {p.apr !== null
+                                            ? `${p.apr.toFixed(2)}%`
+                                            : "—"}
+                                        </span>
+                                      </td>
+                                      <td>
+                                        <span className="dash-num">
+                                          {fmtDate(p.created)}
+                                        </span>
+                                      </td>
+                                    </tr>
+                                    {open && (
+                                      <tr className="lp-detail">
+                                        <td colSpan={7}>
+                                          <div className="lp-detail-grid">
+                                            <div>
+                                              <span className="lp-detail-label">
+                                                Position
+                                              </span>
+                                              <span className="dash-num">
+                                                {p.valueUsd !== null
+                                                  ? fmtUsd(p.valueUsd)
+                                                  : "—"}
+                                              </span>
+                                              <span className="dash-sub">
+                                                {fmtAmt(p.amount0)}{" "}
+                                                {p.token0.symbol} +{" "}
+                                                {fmtAmt(p.amount1)}{" "}
+                                                {p.token1.symbol}
+                                              </span>
+                                              {hasDist && (
+                                                <span className="dash-sub">
+                                                  {wBase.toFixed(1)}%{" "}
+                                                  {base.symbol} ·{" "}
+                                                  {wQuote.toFixed(1)}%{" "}
+                                                  {quote.symbol}
+                                                </span>
+                                              )}
+                                            </div>
+                                            <div>
+                                              <span className="lp-detail-label">
+                                                Fees earned (unclaimed)
+                                              </span>
+                                              <span className="dash-num">
+                                                {p.feesUsd !== null
+                                                  ? fmtUsd(p.feesUsd)
+                                                  : "—"}
+                                              </span>
+                                              <span className="dash-sub">
+                                                {fmtAmt(p.fees0)}{" "}
+                                                {p.token0.symbol} +{" "}
+                                                {fmtAmt(p.fees1)}{" "}
+                                                {p.token1.symbol}
+                                              </span>
+                                            </div>
+                                            <div>
+                                              <span className="lp-detail-label">
+                                                Range
+                                              </span>
+                                              <span className="dash-sub">
+                                                ticks {p.tickLower} →{" "}
+                                                {p.tickUpper}
+                                              </span>
+                                              <span className="dash-sub">
+                                                token #{p.tokenId} · Robinhood
+                                                Chain
+                                              </span>
+                                              {p.aprBasis && (
+                                                <span
+                                                  className="dash-sub"
+                                                  title={`Estimate — ${p.aprBasis}`}
+                                                >
+                                                  APR est. · {p.aprBasis}
+                                                </span>
+                                              )}
+                                            </div>
+                                          </div>
+                                        </td>
+                                      </tr>
+                                    )}
+                                  </Fragment>
                                 );
                               })}
                             </Fragment>
