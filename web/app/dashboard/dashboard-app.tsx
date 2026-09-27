@@ -966,6 +966,20 @@ export default function DashboardApp({
                                 const wQuote = hasDist
                                   ? (pQuote as number)
                                   : 0;
+                                // Amounts follow token0/token1; display them
+                                // in base/quote order to match the pool name.
+                                const baseAmt = p.token0.isNative
+                                  ? p.amount1
+                                  : p.amount0;
+                                const quoteAmt = p.token0.isNative
+                                  ? p.amount0
+                                  : p.amount1;
+                                const baseFees = p.token0.isNative
+                                  ? p.fees1
+                                  : p.fees0;
+                                const quoteFees = p.token0.isNative
+                                  ? p.fees0
+                                  : p.fees1;
                                 const lpKey = `${p.owner}-${p.tokenId}`;
                                 const open = expandedLp.has(lpKey);
                                 const toggleLp = () => {
@@ -1035,23 +1049,30 @@ export default function DashboardApp({
                                       </td>
                                       <td>
                                         {hasDist ? (
-                                          <span
-                                            className="lp-dist"
-                                            title={`${wBase.toFixed(1)}% ${
-                                              base.symbol
-                                            } · ${wQuote.toFixed(1)}% ${
-                                              quote.symbol
-                                            }`}
-                                          >
+                                          <>
                                             <span
-                                              className="lp-dist-a"
-                                              style={{ width: `${wBase}%` }}
-                                            />
-                                            <span
-                                              className="lp-dist-b"
-                                              style={{ width: `${wQuote}%` }}
-                                            />
-                                          </span>
+                                              className="lp-dist"
+                                              title={`${wBase.toFixed(1)}% ${
+                                                base.symbol
+                                              } · ${wQuote.toFixed(1)}% ${
+                                                quote.symbol
+                                              }`}
+                                            >
+                                              <span
+                                                className="lp-dist-a"
+                                                style={{ width: `${wBase}%` }}
+                                              />
+                                              <span
+                                                className="lp-dist-b"
+                                                style={{ width: `${wQuote}%` }}
+                                              />
+                                            </span>
+                                            <span className="dash-sub">
+                                              {wBase.toFixed(1)}% {base.symbol}{" "}
+                                              · {wQuote.toFixed(1)}%{" "}
+                                              {quote.symbol}
+                                            </span>
+                                          </>
                                         ) : (
                                           <span className="dash-sub">—</span>
                                         )}
@@ -1097,10 +1118,10 @@ export default function DashboardApp({
                                                   : "—"}
                                               </span>
                                               <span className="dash-sub">
-                                                {fmtAmt(p.amount0)}{" "}
-                                                {p.token0.symbol} +{" "}
-                                                {fmtAmt(p.amount1)}{" "}
-                                                {p.token1.symbol}
+                                                {fmtAmt(baseAmt)}{" "}
+                                                {base.symbol} +{" "}
+                                                {fmtAmt(quoteAmt)}{" "}
+                                                {quote.symbol}
                                               </span>
                                               {hasDist && (
                                                 <span className="dash-sub">
@@ -1121,10 +1142,10 @@ export default function DashboardApp({
                                                   : "—"}
                                               </span>
                                               <span className="dash-sub">
-                                                {fmtAmt(p.fees0)}{" "}
-                                                {p.token0.symbol} +{" "}
-                                                {fmtAmt(p.fees1)}{" "}
-                                                {p.token1.symbol}
+                                                {fmtAmt(baseFees)}{" "}
+                                                {base.symbol} +{" "}
+                                                {fmtAmt(quoteFees)}{" "}
+                                                {quote.symbol}
                                               </span>
                                             </div>
                                             <div>
