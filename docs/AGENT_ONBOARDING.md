@@ -16,6 +16,10 @@ Spellbook is the wallet stack for AI agents. The operating loop is:
 3. The **daemon** (`spellbookd`, on the agent's machine) signs with local
    keys and executes.
 
+Any agent can drive this: MCP clients through `spellbook-mcp`, other
+function-calling agents through the same tool schemas, shell agents
+through the CLI below. See [AGENT_INTEGRATIONS.md](AGENT_INTEGRATIONS.md).
+
 ## 1. What you get from install.sh
 
 **Agents install this themselves** on their own machines — that is the
