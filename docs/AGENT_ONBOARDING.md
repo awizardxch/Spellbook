@@ -673,11 +673,25 @@ holds a single asset.
      non-zero). ERC-20 funding goes through **two exact-amount Permit2
      stages**: token → Permit2, then Permit2 → PositionManager (expiry =
      the intent deadline), skipping stages the on-chain allowance
-     already covers. `dex-lp-remove` →
+     already covers. **Increasing an existing position** uses
+     `[INCREASE_LIQUIDITY, SETTLE_PAIR]` via
+     `dex.build_v4_lp_increase_calldata()` — specify the tokenId, liquidity
+     delta, and amount0Max/amount1Max (slippage bounds); the contract
+     calculates the required token amounts from the current price. The
+     increase maintains the position's current token ratio — for an
+     in-range position, both tokens are always required (no single-sided
+     increases). `dex-lp-remove` →
      `[DECREASE_LIQUIDITY, TAKE_PAIR]` (+ `BURN_POSITION` when
      `burn-nft` retires the NFT on full exits). `dex-lp-claim` → a
      **zero-liquidity** `DECREASE_LIQUIDITY` (the documented fee-credit
      path) + `TAKE_PAIR`.
+   - **Robinhood Chain Permit2:** The canonical Permit2 address differs
+     by chain. On Robinhood Chain (4663) use
+     `0x000000000022D473030F116dDEE9F6B43aC78BA3`, **not** the Ethereum
+     mainnet `0x000000000022D473030F64655049CB8E2943346F`. Using the wrong
+     address results in no-op approval transactions (status=1 but no code
+     at the address) followed by `INCREASE_LIQUIDITY`/`MINT_POSITION`
+     reverts when the PositionManager cannot pull tokens via Permit2.
    - **Spellbook's guardrails on top:** remove/claim always queue for
      human approval (never auto-execute, never count toward velocity —
      they receive value, not spend it). Execution pre-flights are

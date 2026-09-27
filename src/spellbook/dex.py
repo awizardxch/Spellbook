@@ -1385,6 +1385,43 @@ def build_v4_decrease_params(token_id: int, liquidity: int,
         [_enc_bytes(bytes(hook_data))])
 
 
+def build_v4_increase_params(token_id: int, liquidity: int,
+                             amount0_max: int, amount1_max: int,
+                             hook_data: bytes = b"") -> bytes:
+    """INCREASE_LIQUIDITY params: (tokenId, liquidity, amount0Max,
+    amount1Max, hookData). Adds ``liquidity`` to an existing position;
+    amount0Max/amount1Max bound the spend (slippage protection)."""
+    _require_positive_int(token_id, "token_id")
+    _require_positive_int(liquidity, "liquidity")
+    for n, w in ((amount0_max, "amount0 max"), (amount1_max, "amount1 max")):
+        if not isinstance(n, int) or n < 0 or n >= 2 ** 128:
+            raise DexError(f"v4 {w} must be a uint128")
+    return _head_tail(
+        [_u256(token_id), _u128(liquidity), _u128(amount0_max),
+         _u128(amount1_max), None],
+        [_enc_bytes(bytes(hook_data))])
+
+
+def build_v4_lp_increase_calldata(currency0: str, currency1: str,
+                                 token_id: int, liquidity: int,
+                                 amount0_max: int, amount1_max: int,
+                                 deadline: int,
+                                 allow_native: bool = False) -> str:
+    """One-tx v4 increase: [INCREASE_LIQUIDITY, SETTLE_PAIR]. ``liquidity``
+    is the delta to add; amount0Max/amount1Max bound the spend. With a
+    native currency0, the caller must send msg.value covering the native
+    leg — keep its max tight, because any unspent native stays in the
+    PositionManager.
+    """
+    increase = build_v4_increase_params(token_id, liquidity, amount0_max,
+                                        amount1_max)
+    settle = build_v4_settle_pair_params(currency0, currency1,
+                                         allow_native=allow_native)
+    return build_v4_modify_liquidities_calldata(
+        bytes([V4_ACTIONS["INCREASE_LIQUIDITY"], V4_ACTIONS["SETTLE_PAIR"]]),
+        [increase, settle], deadline)
+
+
 def build_v4_settle_pair_params(currency0: str, currency1: str,
                                   allow_native: bool = False) -> bytes:
     """SETTLE_PAIR params: (currency0, currency1) — pays the full open

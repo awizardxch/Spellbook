@@ -637,6 +637,74 @@ NEXT STEPS (all opt-in):
 
 note: the default config is a signer, not a policy engine (S4).
 EOF
+
+# ---------------------------------------------------------------- backup verification
+# The user MUST prove they wrote down the recovery phrase before we finish.
+# We ask for 3 random words from the SET 1 mnemonic (the primary recovery path).
+# This is not skippable — without the paper backup, a VM wipe = permanent loss.
+if [ "$UPGRADE" != "1" ]; then
+cat <<'EOF'
+
+================================================================
+BACKUP VERIFICATION — REQUIRED
+================================================================
+You were shown TWO sets of 24 words above (SET 1: standard recovery,
+SET 2: daemon seed). SET 1 is the primary recovery path.
+
+To prove you've written them down, enter 3 words from SET 1 when asked.
+Get them from your PAPER copy — not by scrolling up.
+(If you didn't write them down, do it NOW before continuing.)
+EOF
+  # Pick 3 random positions (1-indexed)
+  POS1=$((RANDOM % 24 + 1))
+  POS2=$((RANDOM % 24 + 1))
+  while [ "$POS2" = "$POS1" ]; do POS2=$((RANDOM % 24 + 1)); done
+  POS3=$((RANDOM % 24 + 1))
+  while [ "$POS3" = "$POS1" ] || [ "$POS3" = "$POS2" ]; do POS3=$((RANDOM % 24 + 1)); done
+
+  # Get the expected words from the SET 1 mnemonic
+  # (STD_MNEMONIC is set earlier in the script from the standard-recovery wallet)
+  WORD1=$(echo "$STD_MNEMONIC" | cut -d' ' -f"$POS1")
+  WORD2=$(echo "$STD_MNEMONIC" | cut -d' ' -f"$POS2")
+  WORD3=$(echo "$STD_MNEMONIC" | cut -d' ' -f"$POS3")
+
+  for attempt in 1 2 3; do
+    echo ""
+    echo "Enter word #$POS1 from SET 1 (from your paper backup):"
+    read -r INPUT1
+    echo "Enter word #$POS2 from SET 1:"
+    read -r INPUT2
+    echo "Enter word #$POS3 from SET 1:"
+    read -r INPUT3
+
+    # Normalize: lowercase, trim whitespace
+    INPUT1=$(echo "$INPUT1" | tr '[:upper:]' '[:lower:]' | xargs)
+    INPUT2=$(echo "$INPUT2" | tr '[:upper:]' '[:lower:]' | xargs)
+    INPUT3=$(echo "$INPUT3" | tr '[:upper:]' '[:lower:]' | xargs)
+
+    if [ "$INPUT1" = "$WORD1" ] && [ "$INPUT2" = "$WORD2" ] && [ "$INPUT3" = "$WORD3" ]; then
+      echo ""
+      echo "✓ Backup verified. Installation complete."
+      echo "  Remember: two copies, two places. Test your backup with:"
+      echo "    python3 -m spellbook.recovery backup"
+      break
+    else
+      if [ "$attempt" = "3" ]; then
+        echo ""
+        echo "✗ Verification failed 3 times."
+        echo "  Your wallet is installed, but WITHOUT a verified backup."
+        echo "  If the VM is wiped before you back up, your funds are LOST."
+        echo "  Run this NOW to see your recovery phrase:"
+        echo "    python3 -m spellbook.recovery backup"
+        echo "  Then verify with: spellbook verify-backup"
+      else
+        echo ""
+        echo "✗ Words don't match. Check your paper backup and try again."
+        echo "  (Attempt $attempt of 3)"
+      fi
+    fi
+  done
+fi
 if [ "${AS_AGENT:-0}" = "1" ]; then
 cat <<EOF
 
