@@ -1,0 +1,1472 @@
+/* Spellbook dashboard — forge-style glow treatment.
+ *
+ * Verified live on forge.awizard.dev:
+ * - No cursor-following spotlight; the cursor is the native system arrow.
+ *   Pointer movement over the empty background does send pulses along the
+ *   grid (grid-energy.tsx, shared by every page) -- never over a card.
+ * - Main panels: constant soft electric-cyan halo (always on).
+ * - Cards: dim border by default; on :hover the Forge's glow -- cyan border,
+ *   ember + cyan halo, 0.2s -- shared with every page (globals.css).
+ * - Header: thin cyan glow band + cyan text-shadow on the wordmark -- now
+ *   shared by every page (.nav and .brand-name in globals.css).
+ * - Glow color is cyan (#00d5ff–#22d3ee) only; ember/violet stay as accents.
+ */
+
+/* ---------- demo login gate hero ---------- */
+.dash-hero {
+  text-align: center;
+  padding: 64px 12px 36px;
+}
+
+.dash-hero h1 {
+  font-family: var(--serif);
+  font-size: clamp(2.2rem, 5vw, 3.4rem);
+  line-height: 1.12;
+  margin: 0 0 18px;
+  letter-spacing: 0.3px;
+}
+
+.dash-wordmark {
+  color: #22d3ee;
+  text-shadow: 0 0 12px rgba(0, 213, 255, 0.6);
+}
+
+.dash-hero .lede {
+  max-width: 620px;
+  margin: 0 auto;
+  color: var(--muted);
+  font-size: 1rem;
+}
+
+.dash-grid2 {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 18px;
+}
+
+/* header glow band and wordmark: shared by every page's .nav, in globals.css */
+
+.dash-session {
+  font-size: 0.82rem;
+  color: var(--muted);
+  border: 1px solid var(--card-border);
+  border-radius: 999px;
+  padding: 4px 12px;
+}
+
+/* ---------- main panels: constant cyan halo (glow-shell) ---------- */
+.dash-panel {
+  background: rgba(8, 8, 16, 0.92);
+  border: 1px solid rgba(34, 211, 238, 0.18);
+  border-radius: 18px;
+  padding: 26px 24px;
+  margin-top: 22px;
+  box-shadow: 0 0 24px rgba(0, 213, 255, 0.35);
+}
+
+.dash-panel h2 {
+  font-family: var(--serif);
+  margin: 0 0 6px;
+  font-size: 1.5rem;
+  letter-spacing: 0.3px;
+}
+
+.dash-panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+
+.dash-panel-head p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+  max-width: 560px;
+}
+
+.dash-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.dash-netcount {
+  background: rgba(34, 211, 238, 0.08);
+  border: 1px solid rgba(34, 211, 238, 0.35);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 10px 16px;
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.dash-refresh {
+  padding: 10px 18px;
+}
+
+.dash-refresh:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* ---------- cards: dim border; Forge hover glow (globals.css) ---------- */
+.dash-card {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 16px;
+  padding: 22px 20px;
+  position: relative;
+}
+
+.dash-card .icon {
+  font-size: 1.6rem;
+  display: block;
+  margin-bottom: 8px;
+}
+
+.dash-card h3 {
+  margin: 0 0 8px;
+  font-size: 1.05rem;
+}
+
+.dash-card p {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.dash-card .btn {
+  cursor: pointer;
+  font-family: inherit;
+}
+
+/* hover glow: shared with every page's containers, in globals.css */
+
+/* ---------- tabs ---------- */
+.dash-tabs {
+  display: flex;
+  gap: 6px;
+  margin-top: 18px;
+  /* the second circuit rail (data-circuit-rail="tabs"), as on the Forge */
+  border-bottom: 1px solid rgba(34, 211, 238, 0.2);
+}
+
+.dash-tab {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 0.95rem;
+  font-weight: 600;
+  padding: 12px 18px;
+  cursor: pointer;
+  font-family: inherit;
+  border-bottom: 2px solid transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dash-tab:hover {
+  color: var(--text);
+}
+
+.dash-tab.active {
+  color: var(--text);
+  border-bottom-color: #22d3ee;
+  text-shadow: 0 0 10px rgba(0, 213, 255, 0.45);
+}
+
+.dash-badge {
+  font-size: 0.68rem;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--ember);
+  border: 1px solid rgba(255, 157, 92, 0.4);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.dash-badge.live {
+  color: #34d399;
+  border-color: rgba(52, 211, 153, 0.5);
+}
+
+/* compact inline stat chips — share the header row with the controls */
+.dash-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border: 1px solid var(--card-border);
+  border-radius: 999px;
+  font-size: 0.78rem;
+  color: var(--muted);
+  white-space: nowrap;
+  background: rgba(139, 92, 246, 0.06);
+}
+
+.dash-chip .dash-mainnet,
+.dash-chip .dash-testnet {
+  font-size: 0.72rem;
+}
+
+.dash-chip .dash-modesep {
+  font-size: 0.8rem;
+}
+
+/* ---------- portfolio ---------- */
+
+.dash-testnet {
+  color: #22d3ee;
+  text-shadow: 0 0 12px rgba(0, 213, 255, 0.5);
+  font-size: 1.3rem;
+}
+
+.dash-mainnet {
+  color: #fbbf24;
+  text-shadow: 0 0 12px rgba(251, 191, 36, 0.5);
+  font-size: 1.3rem;
+}
+
+.dash-modesep {
+  color: var(--faint);
+  font-size: 1.1rem;
+}
+
+.dash-tablewrap {
+  overflow-x: auto;
+}
+
+.dash-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.dash-table th {
+  text-align: left;
+  color: var(--faint);
+  font-weight: 600;
+  font-size: 0.74rem;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--card-border);
+}
+
+.dash-table td {
+  padding: 14px 8px;
+  border-bottom: 1px solid rgba(139, 92, 246, 0.1);
+  color: var(--muted);
+  vertical-align: middle;
+}
+
+.dash-table tr:last-child td {
+  border-bottom: none;
+}
+
+.dash-num {
+  font-family: var(--mono);
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.dash-unit {
+  color: var(--faint);
+  font-size: 0.8rem;
+}
+
+.dash-muted {
+  color: var(--faint);
+}
+
+.dash-sub {
+  display: block;
+  font-size: 0.76rem;
+  color: var(--faint);
+}
+
+/* ---------- labeled wallets ---------- */
+/* One header row per wallet in the portfolio table; the badge also marks
+ * each row group in the Networks and Activity tabs. Bankr gets a gold
+ * treatment so it never reads as a Spellbook wallet. */
+.dash-walletrow td {
+  background: rgba(34, 211, 238, 0.05);
+  padding: 12px 8px 8px;
+  border-bottom: 1px solid rgba(34, 211, 238, 0.16);
+}
+
+.dash-wallet {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: #22d3ee;
+  border: 1px solid rgba(34, 211, 238, 0.5);
+  background: rgba(34, 211, 238, 0.08);
+  border-radius: 999px;
+  padding: 3px 12px;
+  margin-right: 10px;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.dash-wallet-bankr {
+  color: #fbbf24;
+  border-color: rgba(251, 191, 36, 0.55);
+  background: rgba(251, 191, 36, 0.08);
+  text-shadow: 0 0 10px rgba(251, 191, 36, 0.4);
+}
+
+.dash-walletnote {
+  font-size: 0.76rem;
+  color: var(--faint);
+  vertical-align: middle;
+}
+
+/* per-wallet balance lines in the Networks tab */
+.dash-netbal {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+}
+
+.dash-netwal {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.dash-netbalv {
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.dash-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  margin-right: 8px;
+  box-shadow: 0 0 8px currentColor;
+}
+
+.dash-dot-lg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.dash-ok {
+  color: var(--good);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.dash-warn {
+  color: var(--ember);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.dash-copy {
+  background: none;
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.8rem;
+  padding: 2px 8px;
+  margin-left: 6px;
+}
+
+.dash-copy:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+/* Multi-address: expandable per-address rows + depth stepper. */
+
+.dash-addr-toggle {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.dash-addr-toggle:hover {
+  color: var(--text);
+}
+
+.dash-chev {
+  color: var(--accent);
+  font-size: 0.8rem;
+}
+
+.dash-subrow td {
+  background: rgba(139, 92, 246, 0.04);
+  padding-top: 10px;
+  padding-bottom: 10px;
+  font-size: 0.84rem;
+}
+
+.dash-subrow td:first-child {
+  padding-left: 16px;
+}
+
+.dash-idx {
+  font-family: var(--mono);
+  color: var(--faint);
+  margin-right: 8px;
+}
+
+.dash-depth {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  padding: 4px 6px;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.dash-depth-label {
+  color: var(--faint);
+  margin-right: 2px;
+}
+
+.dash-depth-num {
+  font-family: var(--mono);
+  color: var(--text);
+  min-width: 2.2em;
+  text-align: center;
+}
+
+.dash-depth-btn {
+  background: none;
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.9rem;
+  line-height: 1;
+  padding: 2px 9px;
+}
+
+.dash-depth-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.dash-depth-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.dash-error {
+  color: var(--ember);
+  font-size: 0.9rem;
+  margin: 0 0 16px;
+}
+
+.dash-note {
+  color: var(--faint);
+  font-size: 0.82rem;
+  margin: 18px 0 0;
+}
+
+.dash-linkbtn {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent-soft);
+  cursor: pointer;
+  font-size: inherit;
+  font-family: inherit;
+  text-decoration: underline;
+}
+
+/* ---------- networks: vertical column ---------- */
+.dash-netlist {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dash-netrow {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 18px;
+}
+
+.dash-netrow.off {
+  opacity: 0.55;
+}
+
+.dash-netinfo {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The network name block doubles as a select button — reset button chrome. */
+button.dash-netinfo {
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 8px;
+}
+
+button.dash-netinfo:hover strong {
+  color: #22d3ee;
+}
+
+.dash-netinfo strong {
+  display: block;
+  font-size: 0.98rem;
+}
+
+.dash-netbal {
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.dash-switch {
+  width: 46px;
+  height: 26px;
+  border-radius: 999px;
+  border: 1px solid var(--card-border);
+  background: rgba(139, 92, 246, 0.12);
+  cursor: pointer;
+  position: relative;
+  flex: none;
+  padding: 0;
+}
+
+.dash-switch .dash-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.dash-switch.on {
+  background: rgba(34, 211, 238, 0.25);
+  border-color: #22d3ee;
+  box-shadow: 0 0 12px rgba(34, 211, 238, 0.4);
+}
+
+.dash-switch.on .dash-knob {
+  left: 22px;
+  background: #22d3ee;
+  box-shadow: 0 0 10px rgba(34, 211, 238, 0.8);
+}
+
+/* Per-network mainnet / testnet toggle pairs */
+.dash-netenvs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: none;
+}
+
+.dash-netenv {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  border-radius: 8px;
+  padding: 2px 4px;
+  margin: -2px -4px;
+}
+
+.dash-netenv:hover {
+  background: rgba(139, 92, 246, 0.08);
+}
+
+.dash-netenv.sel {
+  background: rgba(139, 92, 246, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(139, 92, 246, 0.4);
+}
+
+.dash-netenv.off {
+  opacity: 0.55;
+}
+
+.dash-envtag {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--card-border);
+  min-width: 74px;
+  text-align: center;
+  flex: none;
+}
+
+.dash-env-mainnet {
+  color: #fbbf24;
+  border-color: rgba(251, 191, 36, 0.45);
+  background: rgba(251, 191, 36, 0.08);
+}
+
+.dash-env-testnet {
+  color: #22d3ee;
+  border-color: rgba(34, 211, 238, 0.45);
+  background: rgba(34, 211, 238, 0.08);
+}
+
+/* ---------- activity (live, on-chain) ---------- */
+.dash-agroup {
+  padding: 16px 18px;
+  margin-bottom: 14px;
+}
+
+.dash-agroup-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.dash-anet {
+  font-weight: 700;
+  color: var(--text);
+}
+
+.dash-envtag {
+  font-size: 0.68rem;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  border: 1px solid;
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.dash-envtag.e-mainnet {
+  color: #fbbf24;
+  border-color: rgba(251, 191, 36, 0.45);
+  background: rgba(251, 191, 36, 0.08);
+}
+
+.dash-envtag.e-testnet {
+  color: #22d3ee;
+  border-color: rgba(34, 211, 238, 0.45);
+  background: rgba(34, 211, 238, 0.08);
+}
+
+.dash-coverage {
+  color: var(--faint);
+  font-size: 0.78rem;
+}
+
+.dash-aaddr {
+  margin-bottom: 10px;
+}
+
+.dash-aaddr:last-child {
+  margin-bottom: 0;
+}
+
+.dash-addrline {
+  background: none;
+  border: none;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  cursor: pointer;
+  padding: 4px 0;
+}
+
+.dash-addrline:hover {
+  color: var(--text);
+}
+
+.dash-alist {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.dash-arow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 2px;
+  border-bottom: 1px solid rgba(139, 92, 246, 0.1);
+  font-size: 0.88rem;
+}
+
+.dash-arow:last-child {
+  border-bottom: none;
+}
+
+.dash-dir {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.8rem;
+  flex: none;
+}
+
+.dash-dir.d-in {
+  color: #34d399;
+  border: 1px solid rgba(52, 211, 153, 0.5);
+  background: rgba(52, 211, 153, 0.08);
+}
+
+.dash-dir.d-out {
+  color: #ff9d5c;
+  border: 1px solid rgba(255, 157, 92, 0.5);
+  background: rgba(255, 157, 92, 0.08);
+}
+
+.dash-aamount {
+  font-family: var(--mono);
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.dash-acp {
+  flex: 1;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dash-awhen {
+  color: var(--faint);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.dash-ax {
+  color: var(--accent-soft);
+  text-decoration: none;
+  font-size: 0.85rem;
+}
+
+.dash-ax:hover {
+  color: var(--text);
+}
+
+.dash-aerror {
+  color: var(--ember);
+  font-size: 0.82rem;
+  margin: 4px 0;
+}
+
+.dash-amuted {
+  color: var(--faint);
+  font-size: 0.84rem;
+  margin: 4px 0 8px;
+}
+
+/* ---------- responsive: phones ---------- */
+@media (max-width: 760px) {
+  .dash-grid2 {
+    grid-template-columns: 1fr;
+  }
+
+  .dash-panel {
+    padding: 20px 14px;
+    border-radius: 14px;
+  }
+
+  .dash-panel-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+
+  .dash-actions {
+    gap: 8px;
+  }
+
+  .dash-chip {
+    font-size: 0.72rem;
+    padding: 6px 10px;
+  }
+
+  /* nav: brand + session pill stack above the scrolling links */
+  .dash-nav {
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 16px 0 14px;
+  }
+
+  .dash-nav .nav-links {
+    width: 100%;
+    gap: 12px;
+  }
+
+  .dash-session {
+    font-size: 0.76rem;
+    padding: 4px 10px;
+  }
+
+  /* tabs: keep the scroll-row behavior from .bar-scroll, roomier targets */
+  .dash-tab {
+    padding: 12px 14px;
+    font-size: 0.88rem;
+  }
+
+  /* portfolio table: scroll sideways instead of crushing; the expanded
+   * asset rows stack name over qty/usd */
+  .dash-table {
+    min-width: 620px;
+    font-size: 0.84rem;
+  }
+
+  .dash-table th,
+  .dash-table td {
+    padding: 10px 6px;
+  }
+
+  .dash-asset {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+
+  .dash-asset-name {
+    flex: 1 1 100%;
+  }
+
+  .dash-asset-qty {
+    text-align: left;
+  }
+
+  .dash-asset-usd {
+    min-width: 0;
+    margin-left: auto;
+  }
+
+  .dash-depth-btn {
+    padding: 6px 12px;
+    font-size: 1rem;
+  }
+
+  .dash-copy {
+    padding: 6px 10px;
+    font-size: 0.85rem;
+  }
+
+  /* networks tab: cards stack, env rows wrap, balances stay visible */
+  .dash-netrow {
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 14px;
+  }
+
+  .dash-netinfo {
+    flex: 1 1 100%;
+  }
+
+  .dash-netenvs {
+    flex: 1 1 100%;
+  }
+
+  .dash-netenv {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  .dash-netbal {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .dash-netbalv {
+    font-size: 0.88rem;
+  }
+
+  /* activity: rows wrap, counterparty drops to its own line */
+  .dash-agroup {
+    padding: 14px;
+  }
+
+  .dash-agroup-head {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  .dash-arow {
+    flex-wrap: wrap;
+    row-gap: 6px;
+    gap: 8px;
+  }
+
+  .dash-acp {
+    flex: 1 1 100%;
+    order: 5;
+  }
+
+  /* login gate hero */
+  .dash-hero {
+    padding: 44px 8px 28px;
+  }
+
+  .dash-walletnote {
+    display: block;
+    margin-top: 4px;
+  }
+}
+
+@media (max-width: 400px) {
+  .dash-panel {
+    padding: 16px 10px;
+  }
+
+  .dash-netcount,
+  .dash-refresh {
+    padding: 10px 12px;
+    font-size: 0.82rem;
+  }
+
+  .dash-envtag {
+    min-width: 0;
+  }
+}
+
+/* ---------- real login gate: forms ---------- */
+.dash-label {
+  display: block;
+  font-size: 0.78rem;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin: 14px 0 6px;
+}
+
+.dash-input,
+.dash-challenge {
+  width: 100%;
+  background: rgba(5, 3, 9, 0.72);
+  border: 1px solid var(--card-border);
+  border-radius: 10px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+
+.dash-input:focus,
+.dash-challenge:focus {
+  outline: none;
+  border-color: #22d3ee;
+  box-shadow: 0 0 12px rgba(34, 211, 238, 0.35);
+}
+
+.dash-challenge {
+  resize: vertical;
+  word-break: break-all;
+}
+
+.dash-formrow {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.dash-card .dash-error {
+  margin: 12px 0 0;
+}
+
+.dash-logout {
+  font-size: 0.78rem;
+  padding: 4px 12px;
+}
+
+/* ---- expandable holdings rows (tokens + NFTs) ---- */
+
+.dash-chainrow {
+  cursor: pointer;
+}
+
+.dash-chainrow:hover td {
+  background: rgba(148, 163, 184, 0.06);
+}
+
+.dash-chainrow:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.dash-usd {
+  font-weight: 700;
+  font-size: 1.02rem;
+}
+
+.dash-assetsrow td {
+  padding-top: 4px;
+}
+
+.dash-assets {
+  padding: 2px 4px 10px;
+}
+
+.dash-seg {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(148, 163, 184, 0.06);
+}
+
+.dash-seg-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.dash-seg-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.dash-segbtn {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.82rem;
+  padding: 5px 14px;
+  border-radius: 7px;
+  white-space: nowrap;
+}
+
+.dash-segbtn:hover {
+  color: var(--text);
+}
+
+.dash-segbtn.on {
+  background: rgba(139, 92, 246, 0.18);
+  color: var(--text);
+}
+
+.dash-assetlist {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.dash-asset {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 14px;
+  border-top: 1px solid var(--line);
+  font-size: 0.88rem;
+}
+
+.dash-asset:first-child {
+  border-top: none;
+}
+
+.dash-asset-native {
+  background: rgba(139, 92, 246, 0.07);
+}
+
+.dash-dot-token {
+  background: #64748b;
+}
+
+.dash-asset-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dash-asset-name .dash-sub {
+  display: block;
+  font-weight: 400;
+}
+
+.dash-asset-qty {
+  font-family: var(--mono);
+  font-size: 0.84rem;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.dash-asset-usd {
+  min-width: 96px;
+  text-align: right;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.dash-asset-empty {
+  padding: 14px;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.dash-chart-link {
+  display: inline-flex;
+  align-items: center;
+  color: var(--muted);
+  opacity: 0.7;
+  transition:
+    opacity 0.15s ease,
+    color 0.15s ease;
+}
+
+.dash-chart-link:hover {
+  opacity: 1;
+  color: var(--accent, #8b5cf6);
+}
+
+.dash-nftlist {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.dash-nft {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+  font-size: 0.84rem;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: rgba(148, 163, 184, 0.04);
+}
+
+.dash-nft-name {
+  font-weight: 600;
+}
+
+.dash-nft code {
+  font-size: 0.74rem;
+  color: var(--muted);
+}
+
+/* ---------- LP positions (Uniswap v4, read-only) ---------- */
+/* Split bar showing the two-token distribution of a position. */
+.lp-dist {
+  display: inline-flex;
+  width: 120px;
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(148, 163, 184, 0.14);
+  margin-bottom: 4px;
+}
+
+.lp-dist-a {
+  background: #22d3ee;
+  box-shadow: 0 0 6px rgba(34, 211, 238, 0.6);
+}
+
+.lp-dist-b {
+  background: #8b5cf6;
+  box-shadow: 0 0 6px rgba(139, 92, 246, 0.6);
+}
+
+/* Subscript zero-count in tiny price bounds (0.0₅85). */
+.lp-sub {
+  font-size: 0.62rem;
+  color: #22d3ee;
+}
+
+/* Clickable LP rows: simple summary line, detail expands below. */
+.lp-row {
+  cursor: pointer;
+}
+.lp-row:hover td {
+  background: rgba(34, 211, 238, 0.05);
+}
+.lp-row.open td {
+  border-bottom: none;
+}
+.lp-detail td {
+  background: rgba(148, 163, 184, 0.05);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+}
+.lp-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  padding: 6px 0;
+}
+.lp-detail-label {
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin-bottom: 4px;
+}
+
+/* ---------- portfolio: network rail + holdings (Bankr-style) ---------- */
+.dash-portfolio {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+/* left: network rail — selector + per-chain toggles */
+.dash-rail {
+  padding: 20px 16px;
+  position: sticky;
+  top: 16px;
+}
+
+.dash-rail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.dash-rail-head h2 {
+  font-size: 1.05rem;
+  margin: 0;
+}
+
+.dash-raillist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.dash-railitem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 10px;
+  padding: 3px;
+}
+
+.dash-railitem.active {
+  background: rgba(139, 92, 246, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(139, 92, 246, 0.4);
+}
+
+.dash-railitem.off .dash-railrow {
+  opacity: 0.45;
+}
+
+.dash-railrow {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  padding: 9px 10px;
+  border-radius: 8px;
+}
+
+.dash-railrow:hover {
+  background: rgba(148, 163, 184, 0.07);
+}
+
+.dash-railrow:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.dash-railname {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.dash-railname > span:first-child {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 0.92rem;
+}
+
+.dash-railbal {
+  margin-left: auto;
+  font-weight: 600;
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+
+/* right: holdings for the selected network */
+.dash-holdings {
+  min-width: 0;
+}
+
+.dash-holdmeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 28px;
+  align-items: center;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  margin-bottom: 16px;
+  background: rgba(148, 163, 184, 0.04);
+}
+
+.dash-holdbal {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.dash-holdbal strong {
+  font-size: 1.35rem;
+}
+
+.dash-holdwallets {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.dash-holdwallet {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+}
+
+.dash-holdwallet code {
+  font-size: 0.82rem;
+}
+
+/* per-row wallet tag inside the unified holdings table */
+.dash-table .dash-wallet {
+  margin: 4px 0 0 10px;
+  font-size: 0.64rem;
+  padding: 2px 9px;
+}
+
+/* LP block inside the holdings column */
+.dash-lpblock {
+  margin-top: 26px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+
+.dash-lpblock-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.dash-lpblock-head h3 {
+  font-family: var(--serif);
+  margin: 0 0 4px;
+  font-size: 1.2rem;
+}
+
+.dash-lpblock-head p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+/* addresses disclosure under the holdings table */
+.dash-addrs {
+  margin-top: 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 14px;
+}
+
+.dash-addrs summary {
+  cursor: pointer;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.dash-addrlist {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dash-addrlist li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.85rem;
+}
+
+.dash-addrlist .dash-num {
+  margin-left: auto;
+}
+
+.dash-addrlist .dash-wallet {
+  margin-right: 0;
+}
