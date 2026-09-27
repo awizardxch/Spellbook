@@ -1179,3 +1179,249 @@
   font-size: 0.62rem;
   color: #22d3ee;
 }
+
+/* ---------- portfolio: network rail + holdings (Bankr-style) ---------- */
+.dash-portfolio {
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+/* left: network rail — selector + per-chain toggles */
+.dash-rail {
+  padding: 20px 16px;
+  position: sticky;
+  top: 16px;
+}
+
+.dash-rail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.dash-rail-head h2 {
+  font-size: 1.05rem;
+  margin: 0;
+}
+
+.dash-raillist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.dash-railitem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 10px;
+  padding: 3px;
+}
+
+.dash-railitem.active {
+  background: rgba(139, 92, 246, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(139, 92, 246, 0.4);
+}
+
+.dash-railitem.off .dash-railrow {
+  opacity: 0.45;
+}
+
+.dash-railrow {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  padding: 9px 10px;
+  border-radius: 8px;
+}
+
+.dash-railrow:hover {
+  background: rgba(148, 163, 184, 0.07);
+}
+
+.dash-railrow:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.dash-railname {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.dash-railname > span:first-child {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 0.92rem;
+}
+
+.dash-railbal {
+  margin-left: auto;
+  font-weight: 600;
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+
+/* right: holdings for the selected network */
+.dash-holdings {
+  min-width: 0;
+}
+
+.dash-holdmeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 28px;
+  align-items: center;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  margin-bottom: 16px;
+  background: rgba(148, 163, 184, 0.04);
+}
+
+.dash-holdbal {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.dash-holdbal strong {
+  font-size: 1.35rem;
+}
+
+.dash-holdwallets {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.dash-holdwallet {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+}
+
+.dash-holdwallet code {
+  font-size: 0.82rem;
+}
+
+/* per-row wallet tag inside the unified holdings table */
+.dash-table .dash-wallet {
+  margin: 4px 0 0 10px;
+  font-size: 0.64rem;
+  padding: 2px 9px;
+}
+
+/* LP block inside the holdings column */
+.dash-lpblock {
+  margin-top: 26px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+
+.dash-lpblock-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.dash-lpblock-head h3 {
+  font-family: var(--serif);
+  margin: 0 0 4px;
+  font-size: 1.2rem;
+}
+
+.dash-lpblock-head p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+/* addresses disclosure under the holdings table */
+.dash-addrs {
+  margin-top: 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 14px;
+}
+
+.dash-addrs summary {
+  cursor: pointer;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.dash-addrlist {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dash-addrlist li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.85rem;
+}
+
+.dash-addrlist .dash-num {
+  margin-left: auto;
+}
+
+.dash-addrlist .dash-wallet {
+  margin-right: 0;
+}
+
+/* responsive: the rail becomes a horizontal selector above holdings */
+@media (max-width: 960px) {
+  .dash-portfolio {
+    grid-template-columns: 1fr;
+  }
+
+  .dash-rail {
+    position: static;
+  }
+
+  .dash-raillist {
+    flex-direction: row;
+    overflow-x: auto;
+    padding-bottom: 6px;
+  }
+
+  .dash-railitem {
+    flex: 0 0 auto;
+  }
+
+  .dash-railrow {
+    white-space: nowrap;
+  }
+
+  .dash-rail .dash-note {
+    display: none;
+  }
+}
