@@ -1328,7 +1328,8 @@ def build_v4_modify_liquidities_calldata(actions: bytes,
                              [_enc_bytes(bytes(actions)),
                               _enc_bytes_array([bytes(p) for p in params])])
     return _calldata(V4_MODIFY_LIQUIDITIES_SELECTOR,
-                     _head_tail([None, _u256(deadline)], [unlock_data]))
+                     _head_tail([None, _u256(deadline)],
+                                [_enc_bytes(unlock_data)]))
 
 
 def build_v4_mint_params(currency0: str, currency1: str, fee: int,

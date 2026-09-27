@@ -125,7 +125,18 @@ class Rpc:
                            "method": method, "params": params or []}).encode()
         req = urllib.request.Request(self.url, data=body,
                                      headers={"Content-Type": "application/json",
-                                              "User-Agent": f"spellbook/{__version__}"})
+                                              # Robinhood Chain's RPC sits
+                                              # behind Cloudflare, which kills
+                                              # connections carrying a
+                                              # non-browser User-Agent
+                                              # mid-read (IncompleteRead /
+                                              # Remote end closed). A Chrome
+                                              # UA answers reliably.
+                                              "User-Agent": "Mozilla/5.0 "
+                                              "(X11; Linux x86_64) "
+                                              "AppleWebKit/537.36 (KHTML, "
+                                              "like Gecko) Chrome/126.0.0.0 "
+                                              "Safari/537.36"})
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 resp = json.load(r)
