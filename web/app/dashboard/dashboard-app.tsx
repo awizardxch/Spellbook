@@ -711,6 +711,61 @@ export default function DashboardApp({
                   </div>
                 </div>
 
+                <details className="dash-addrs">
+                  <summary>
+                    Addresses (
+                    {selHoldings.reduce((n, h) => n + h.addresses.length, 0)}{" "}
+                    of{" "}
+                    {selHoldings.reduce((n, h) => n + h.watchAddresses, 0)})
+                  </summary>
+                  {selHoldings.length > 0 && (
+                    <ul className="dash-addrlist">
+                      {selHoldings.flatMap((h) =>
+                        h.addresses.map((a, i) => {
+                          const ck = `addr-${wkey(h.wallet, h.id)}-${i}`;
+                          return (
+                            <li key={ck}>
+                              <WalletBadge wallet={h.wallet} />
+                              <span className="dash-idx">#{a.index}</span>
+                              <code title={a.address}>
+                                {truncate(a.address)}
+                              </code>
+                              <button
+                                className="dash-copy"
+                                type="button"
+                                onClick={() => copy(a.address, ck)}
+                                aria-label={`Copy ${h.wallet} ${h.label} address #${a.index}`}
+                              >
+                                {copied === ck ? "✓" : "⧉"}
+                              </button>
+                              <span className="dash-num">
+                                {a.balance !== null ? (
+                                  <>
+                                    {a.balance}{" "}
+                                    <span className="dash-unit">{h.unit}</span>
+                                  </>
+                                ) : (
+                                  <span className="dash-muted">—</span>
+                                )}
+                              </span>
+                              {a.balance !== null ? (
+                                <span className="dash-ok">●</span>
+                              ) : (
+                                <span
+                                  className="dash-warn"
+                                  title={a.error ?? "unavailable"}
+                                >
+                                  ●
+                                </span>
+                              )}
+                            </li>
+                          );
+                        })
+                      )}
+                    </ul>
+                  )}
+                </details>
+
                 {viewTab === "assets" ? (
                   <div className="dash-tablewrap">
                     <table className="dash-table">
@@ -1113,60 +1168,6 @@ export default function DashboardApp({
                     appear.
                   </p>
                 )}
-                <details className="dash-addrs">
-                  <summary>
-                    Addresses (
-                    {selHoldings.reduce((n, h) => n + h.addresses.length, 0)}{" "}
-                    of{" "}
-                    {selHoldings.reduce((n, h) => n + h.watchAddresses, 0)})
-                  </summary>
-                  {selHoldings.length > 0 && (
-                    <ul className="dash-addrlist">
-                      {selHoldings.flatMap((h) =>
-                        h.addresses.map((a, i) => {
-                          const ck = `addr-${wkey(h.wallet, h.id)}-${i}`;
-                          return (
-                            <li key={ck}>
-                              <WalletBadge wallet={h.wallet} />
-                              <span className="dash-idx">#{a.index}</span>
-                              <code title={a.address}>
-                                {truncate(a.address)}
-                              </code>
-                              <button
-                                className="dash-copy"
-                                type="button"
-                                onClick={() => copy(a.address, ck)}
-                                aria-label={`Copy ${h.wallet} ${h.label} address #${a.index}`}
-                              >
-                                {copied === ck ? "✓" : "⧉"}
-                              </button>
-                              <span className="dash-num">
-                                {a.balance !== null ? (
-                                  <>
-                                    {a.balance}{" "}
-                                    <span className="dash-unit">{h.unit}</span>
-                                  </>
-                                ) : (
-                                  <span className="dash-muted">—</span>
-                                )}
-                              </span>
-                              {a.balance !== null ? (
-                                <span className="dash-ok">●</span>
-                              ) : (
-                                <span
-                                  className="dash-warn"
-                                  title={a.error ?? "unavailable"}
-                                >
-                                  ●
-                                </span>
-                              )}
-                            </li>
-                          );
-                        })
-                      )}
-                    </ul>
-                  )}
-                </details>
               </>
             ) : (
               <p className="dash-note">
