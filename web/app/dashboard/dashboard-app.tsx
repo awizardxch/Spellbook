@@ -1538,176 +1538,54 @@ export default function DashboardApp({
 }
 
 /**
- * Security panel — MetaMask-style key backup UI.
- * Human-authenticated only. The agent cannot access these endpoints.
+ * Security panel — static guidance only. This site runs on Vercel, not on
+ * the agent's machine, so it can never read, reveal or unlock a seed. Seal
+ * and unlock happen on the agent's VM (spellbook-seed serve, a one-time
+ * local page); key reveal is `python3 -m spellbook.recovery backup` at the
+ * VM's terminal. docs/SEALED_SEED.md.
  */
 function SecurityPanel() {
-  const [revealed, setRevealed] = useState<{
-    mnemonic?: string;
-    evmKey?: string;
-    chiaKey?: string;
-  } | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [hotWalletStatus, setHotWalletStatus] = useState<{
-    initialized: boolean;
-    address?: string;
-  } | null>(null);
-
-  // Load hot wallet status on mount
-  useEffect(() => {
-    fetch("/api/security/hot-wallet", { credentials: "include" })
-      .then((r) => r.json())
-      .then(setHotWalletStatus)
-      .catch(() => setHotWalletStatus({ initialized: false }));
-  }, []);
-
-  const reveal = async (type: "mnemonic" | "evm-key" | "chia-key") => {
-    setLoading(true);
-    setError(null);
-    try {
-      // No password: your viewer session is the credential (the agent's
-      // own session can never pass the server's role check). Keys are
-      // derived per chain — the EVM key below is the Robinhood mainnet
-      // key (evm-4663), the actual key controlling the wallet.
-      const res = await fetch(`/api/security/reveal`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ type }),
-      });
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || "Reveal failed");
-      }
-      const data = await res.json();
-      setRevealed((prev) => ({ ...prev, [type === "mnemonic" ? "mnemonic" : type === "evm-key" ? "evmKey" : "chiaKey"]: data.value }));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Reveal failed");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const hideAll = () => {
-    setRevealed(null);
-    setError(null);
-  };
-
   return (
     <section className="dash-security">
       <div className="dash-panel">
         <h2>Security &amp; Backup</h2>
         <p className="dash-note">
-          Your keys control your funds. Back them up NOW on paper, offline.
-          The agent cannot see this page — only you (the human) can reveal keys.
+          Your keys control your funds. Keep the paper backup (both sets of 24
+          words) offline, two copies, two places. This site never asks for
+          your recovery words or your seal password — anything that does is
+          not Spellbook.
         </p>
 
         <div className="dash-security-status">
           <h3>Seed lock (survives VM wipes)</h3>
           <p className="dash-note">
-            Your agent&apos;s seed can be sealed with a password you choose,
-            so a wiped or restarted VM gets the same wallet back. Sealing and
-            unlocking happen on your agent&apos;s own machine: your agent runs{" "}
-            <code>spellbook-seed serve</code> and sends you a one-time link.
-            Enter your password there. Never enter it on this site, and
-            never enter it in chat.
+            Seal your agent&apos;s seed with a password you choose, so a wiped
+            or restarted VM gets the same wallet back. Sealing and unlocking
+            happen on your agent&apos;s own machine: your agent runs{" "}
+            <code>spellbook-seed serve</code> and sends you a one-time link;
+            enter your password there. Never on this site, never in chat.
+          </p>
+          <p className="dash-note">
+            Your agent checks the lock at the start of every session with{" "}
+            <code>spellbook-seed status</code>.
           </p>
         </div>
 
-        {hotWalletStatus && (
-          <div className="dash-security-status">
-            <h3>Hot Wallet (for automation)</h3>
-            {hotWalletStatus.initialized ? (
-              <p>
-                ✓ Initialized: <code>{hotWalletStatus.address}</code>
-                <br />
-                <span className="dash-note">
-                  The agent uses this for automated transactions. It persists across VM wipes.
-                </span>
-              </p>
-            ) : (
-              <p>
-                ✗ Not initialized.
-                <br />
-                <span className="dash-note">
-                  Run: <code>python3 -m spellbook.hotwallet setup</code> (see docs/UPGRADE_GUIDE.md)
-                </span>
-              </p>
-            )}
-          </div>
-        )}
-
-        <div className="dash-security-reveal">
-          <h3>Reveal Keys</h3>
+        <div className="dash-security-status">
+          <h3>Viewing your keys</h3>
           <p className="dash-note">
-            Signed in as the human viewer — one tap reveals. Keys are shown
-            once — write them down immediately, then Hide.
+            At your agent machine&apos;s terminal (not through the agent):{" "}
+            <code>python3 -m spellbook.recovery backup</code> shows the
+            daemon-seed words and the live private keys to import into
+            MetaMask or Sage.
           </p>
-          {error && <p className="dash-error">{error}</p>}
-
-          <div className="dash-security-buttons">
-            <button
-              onClick={() => reveal("mnemonic")}
-              disabled={loading}
-              className="dash-button"
-            >
-              {loading ? "Revealing…" : "Reveal Master Seed (24 words)"}
-            </button>
-            <button
-              onClick={() => reveal("evm-key")}
-              disabled={loading}
-              className="dash-button"
-            >
-              {loading ? "Revealing…" : "Reveal EVM Private Key (Robinhood)"}
-            </button>
-            <button
-              onClick={() => reveal("chia-key")}
-              disabled={loading}
-              className="dash-button"
-            >
-              {loading ? "Revealing…" : "Reveal Chia Private Key (testnet)"}
-            </button>
-          </div>
-
-          {revealed && (
-            <div className="dash-security-revealed">
-              <h4>⚠️ Write these down NOW, then click Hide</h4>
-              {revealed.mnemonic && (
-                <div>
-                  <strong>Master Seed (24 words):</strong>
-                  <p className="dash-mnemonic">{revealed.mnemonic}</p>
-                  <p className="dash-note">
-                    This is the daemon&apos;s master seed — restoring it reproduces
-                    every wallet. It is NOT a MetaMask-importable phrase for the
-                    wallet address; use the EVM private key below for that.
-                  </p>
-                </div>
-              )}
-              {revealed.evmKey && (
-                <div>
-                  <strong>EVM Private Key (Robinhood mainnet — MetaMask import):</strong>
-                  <p><code>{revealed.evmKey}</code></p>
-                </div>
-              )}
-              {revealed.chiaKey && (
-                <div>
-                  <strong>Chia Private Key:</strong>
-                  <p><code>{revealed.chiaKey}</code></p>
-                </div>
-              )}
-              <button onClick={hideAll} className="dash-button danger">
-                Hide All (clear from screen)
-              </button>
-            </div>
-          )}
         </div>
 
         <div className="dash-security-docs">
           <h3>Documentation</h3>
           <ul>
-            <li><a href="/docs/KEY_RECOVERY.md" target="_blank" rel="noreferrer">Key Recovery Guide</a></li>
-            <li><a href="/docs/UPGRADE_GUIDE.md" target="_blank" rel="noreferrer">Upgrade Guide (existing users)</a></li>
+            <li><a href="https://github.com/awizardxch/Spellbook/blob/main/docs/SEALED_SEED.md" target="_blank" rel="noreferrer">Sealed seed</a></li>
+            <li><a href="https://github.com/awizardxch/Spellbook/blob/main/docs/KEY_RECOVERY.md" target="_blank" rel="noreferrer">Key recovery guide</a></li>
           </ul>
         </div>
       </div>

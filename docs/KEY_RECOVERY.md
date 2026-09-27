@@ -101,11 +101,14 @@ unlock the seed. Seal and unlock always happen on the VM's own viewer
 page. **Never** type the seal password or the recovery words into the
 hosted dashboard.
 
-## Hot wallet (`hotwallet.py`): not recommended
+## Hot wallet and `keymanager.py`: removed
 
-`~/workspace/.spellbook/hot.key` stores a **plain-text** private key where
-the agent can read it. That defeats the daemon's key isolation. Use the
-sealed seed instead: after unlock, the daemon signs as usual.
+An earlier version kept a **plain-text** private key in
+`~/workspace/.spellbook/hot.key` where the agent could read it, which
+defeats the daemon's key isolation. It also had an unused encrypted-key
+helper. Both are gone. Use the sealed seed instead: after unlock, the
+daemon signs as usual. If a `hot.key` or `key.enc` file exists, move any
+funds that key alone controls and delete the file.
 
 ## If the keys are already lost
 

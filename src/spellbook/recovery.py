@@ -162,7 +162,7 @@ def cmd_addresses(loc):
 
 def cmd_reveal(loc, key_type, chain=None):
     """
-    Reveal a single key value (for the dashboard API).
+    Reveal a single key value, for a human at the terminal.
     Prints ONLY the value on stdout — for programmatic use.
     WARNING: Only call this from human-authenticated contexts.
 
