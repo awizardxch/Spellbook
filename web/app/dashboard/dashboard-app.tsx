@@ -1603,6 +1603,18 @@ function SecurityPanel() {
           The agent cannot see this page — only you (the human) can reveal keys.
         </p>
 
+        <div className="dash-security-status">
+          <h3>Seed lock (survives VM wipes)</h3>
+          <p className="dash-note">
+            Your agent&apos;s seed can be sealed with a password you choose,
+            so a wiped or restarted VM gets the same wallet back. Sealing and
+            unlocking happen on your agent&apos;s own machine: your agent runs{" "}
+            <code>spellbook-seed serve</code> and sends you a one-time link.
+            Enter your password there. Never enter it on this site, and
+            never enter it in chat.
+          </p>
+        </div>
+
         {hotWalletStatus && (
           <div className="dash-security-status">
             <h3>Hot Wallet (for automation)</h3>

@@ -25,6 +25,7 @@ test = [
 [project.scripts]
 spellbookd = "spellbook.daemon:main"
 spellbook = "spellbook.cli:main"
+spellbook-seed = "spellbook.sealed:main"
 
 [project.urls]
 Homepage = "https://github.com/awizardxch/Spellbook"

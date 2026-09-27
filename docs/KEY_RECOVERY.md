@@ -2,172 +2,114 @@
 
 ## The Problem
 
-Spellbook agent VMs are wiped every few sessions (on compaction). When the VM is wiped:
-- The seed file (`~/.spellbook-testnet/seed.key`) is destroyed
-- The daemon's in-memory key is gone
-- **If you didn't save your recovery phrase, your funds are permanently locked**
+Spellbook agent VMs are wiped every few sessions (on compaction or a fresh
+session). Everything outside `~/workspace` is lost, including:
+- the daemon's seed files (`~/.spellbook-testnet/seed.key`, and
+  `std_seed.key` on standard-derivation installs)
+- the daemon's in-memory keys
 
-There is no way to recover a lost private key. This guide shows you how to back up NOW, before it's too late.
+**If the seed is not backed up somewhere that survives, the funds are
+permanently locked.** There are two backups, and you want both:
 
-## Quick Start: Backup Your Keys NOW
+| Backup | Survives | Restores with | Protects against |
+|---|---|---|---|
+| **Sealed seed** (`~/workspace/.spellbook/seed.sealed`) | VM wipes | the human's password, on a one-time local page | routine wipes and session resets |
+| **Paper** (24 words, two sets) | everything | the human re-typing the words | losing the VM, the workspace, or the password |
 
-Run this on your VM **before** the next wipe:
-
-```bash
-python3 ~/workspace/.spellbook/recovery.py backup
-```
-
-This displays:
-1. **Master seed** (64-byte hex) — the root of everything
-2. **24-word recovery phrase** — restores all chains
-3. **EVM private key** — import into MetaMask (single chain)
-4. **Chia master secret key** — for Chia wallet import
-5. **Addresses** — verify they're correct
-
-### What to write down
-
-- ✅ The **24-word phrase** on **paper**, pen, by hand — this restores EVERYTHING
-- ✅ **Two copies**, in **two separate physical locations**
-- ✅ Verify by reading the words back
-- ❌ NEVER store in chat, email, cloud notes, or screenshots
-- ❌ NEVER share with anyone
-
-The individual private keys (EVM, Chia) are for importing ONE chain into a wallet app without exposing the master phrase. You don't need to write these down if you have the 24 words — they can be re-derived.
-
-## Automated Transactions: Hot Wallet Setup
-
-For frequent automated transactions (crons, bots), the agent needs key access without user interaction.
-
-### Architecture
-
-- **Hot wallet** (`~/workspace/.spellbook/hot.key`): Plain private key, 600 permissions. Persists across VM wipes because `~/workspace` survives. The agent reads it directly for signing.
-- **Cold backup** (encrypted file + paper phrase): For disaster recovery if the hot wallet is lost.
-
-### Setup (one time)
+## 1. Every session: check the seed
 
 ```bash
-# 1. Provide the private key via env var (transient)
-export SPELLBOOK_PRIVKEY="0x..."
-
-# 2. Initialize the hot wallet
-python3 ~/workspace/.spellbook/hotwallet.py setup
-
-# 3. Verify the address
-python3 ~/workspace/.spellbook/hotwallet.py address
-
-# 4. Clear the env var
-unset SPELLBOOK_PRIVKEY
+spellbook-seed status
 ```
 
-### Using in automation
+| State | Exit | Meaning | Do |
+|---|---|---|---|
+| `unlocked` | 0 | seed present, matches the seal | nothing |
+| `locked` | 3 | seal present, seed missing (after a wipe) | `spellbook-seed serve` → human unlocks |
+| `unsealed` | 4 | seed present, no seal | `spellbook-seed serve` → human seals |
+| `mismatch` | 5 | seed on disk ≠ sealed seed | stop; tell the human |
+| `empty` | 6 | no seed, no seal | fresh install, or paper restore |
 
-```python
-from hotwallet import HotWallet
+Full design: [SEALED_SEED.md](SEALED_SEED.md).
 
-w = HotWallet()  # loads from ~/workspace/.spellbook/hot.key
-print(w.address)
-
-# Sign a transaction
-signed = w.sign_transaction({
-    'to': '0x...',
-    'value': 0,
-    'gas': 200000,
-    'maxFeePerGas': 10**9,
-    'maxPriorityFeePerGas': 10**9,
-    'nonce': 0,
-    'chainId': 4663,
-    'data': '0x...',
-})
-# Broadcast signed.rawTransaction via your RPC
-```
-
-### Rotating the hot key
-
-If compromised, or for regular rotation:
+## 2. Seal the seed (once)
 
 ```bash
-export SPELLBOOK_PRIVKEY="0x...new key..."
-python3 ~/workspace/.spellbook/hotwallet.py rotate
-unset SPELLBOOK_PRIVKEY
+spellbook-seed serve
 ```
 
-Then transfer funds to the new address and update any references.
+It prints a one-time link (`http://127.0.0.1:8787/<token>/`). The human
+opens it, picks a password (12+ characters), and the seed files are
+encrypted into `~/workspace/.spellbook/seed.sealed` (scrypt + AES-256-GCM).
+A human at the VM's terminal can instead run `spellbook-seed seal`.
 
-## Recover After a VM Wipe
-
-### From paper backup
+## 3. After a wipe: unlock
 
 ```bash
-python3 ~/workspace/.spellbook/recovery.py restore
-# Enter your 24 words when prompted
+spellbook-seed status   # -> locked
+spellbook-seed serve    # human opens the link, enters the password
+spellbook-seed status   # -> unlocked; start the daemon
 ```
 
-This restores the seed file. Then re-run hot wallet setup.
+Unlock writes the seed files back exactly as they were (0600). It never
+overwrites a different seed, and a wrong password writes nothing. The
+viewer stops after 5 wrong passwords.
 
-### From encrypted backup
+**The agent never handles the password**: not in chat, not in argv, not in
+env. Only the human types it, into the viewer page or the terminal.
 
-If you created an encrypted backup:
+## 4. Paper backup
+
+The installer shows two sets of 24 words **once**:
+
+- **SET 1: standard recovery.** These are the daemon's live keys
+  (`key_derivation=standard`). The words work in Sage and MetaMask. They
+  **cannot be shown again**, because `std_seed.key` is a one-way BIP-39 seed.
+- **SET 2: daemon seed.** These words recover through Spellbook only.
+  They are the contents of `seed.key`, so they can be re-shown:
 
 ```bash
-# The backup file is in ~/workspace/.spellbook/backups/
-# Decrypt with your password, then restore
+python3 -m spellbook.recovery backup      # SET 2 words + the LIVE EVM/Chia keys
+python3 -m spellbook.recovery addresses   # live EVM address only
 ```
 
-## Import into MetaMask
+`backup` shows the keys the daemon actually signs with, for both
+standard and kdf installs. Write the words on paper, keep two copies in
+two places, and never put them in chat, email, cloud notes or screenshots.
 
-1. Run `python3 ~/workspace/.spellbook/recovery.py backup`
-2. Copy the **EVM Private Key** (0x...)
-3. MetaMask → Account menu → Import Account → Paste private key
-4. Your EVM wallet appears (same address as Spellbook)
+### Restore from paper (no seal, or password lost)
 
-This imports ONLY the EVM chain. Your Chia/Solana wallets are unaffected.
-To import everything, use the 24-word phrase (MetaMask → Import via recovery phrase).
+```bash
+python3 -m spellbook.recovery restore             # SET 2 -> seed.key
+python3 -m spellbook.recovery restore --standard  # SET 1 -> std_seed.key
+```
 
-## For Developers: Preventing Key Loss
+Standard installs need both. Neither command overwrites an existing
+file. Afterwards, seal again (`spellbook-seed serve`).
 
-### At wallet creation time
+## Where the files are
 
-The installer MUST enforce paper backup:
+Tools find paths through the daemon's `spellbook.json`. They look in
+`--config-dir`, then `$SPELLBOOK_CONFIG_DIR`, then `~/.spellbook-testnet`,
+then `/opt/spellbook`. The sealed file lives at
+`$SPELLBOOK_SEALED_PATH`, or by default `~/workspace/.spellbook/seed.sealed`.
 
-1. Generate the wallet
-2. Display the 24-word phrase + all derived addresses
-3. **Require the user to type 3 random words** (e.g., words #7, #15, #22) to prove they wrote it down
-4. Do not proceed until verification passes
-5. Offer to set up the hot wallet for automation
+## Dashboard Security tab
 
-### Dashboard Security page
+The hosted dashboard runs on Vercel, not on your VM, so it cannot read or
+unlock the seed. Seal and unlock always happen on the VM's own viewer
+page. **Never** type the seal password or the recovery words into the
+hosted dashboard.
 
-Add a "Security" section with MetaMask-style controls:
-- **Reveal Recovery Phrase** (human password required)
-- **Reveal Private Key** (human password required)
-- **Download Encrypted Backup**
-- **Hot Wallet Status** (initialized? address?)
+## Hot wallet (`hotwallet.py`): not recommended
 
-Agent cannot access these — human-only.
+`~/workspace/.spellbook/hot.key` stores a **plain-text** private key where
+the agent can read it. That defeats the daemon's key isolation. Use the
+sealed seed instead: after unlock, the daemon signs as usual.
 
-## If You've Already Lost Your Keys
+## If the keys are already lost
 
-**There is no recovery.** The funds are permanently locked.
-
-1. Create a new wallet
-2. Back up IMMEDIATELY using this guide
-3. Transfer any accessible funds to the new wallet
-
-## Technical Details
-
-- Seed file: `~/.spellbook-testnet/seed.key` (64 hex chars = 32 bytes entropy)
-- Mnemonic: BIP-39, 24 words, English wordlist
-- Master seed: BIP-39 seed (64 bytes) from mnemonic
-- EVM derivation: BIP-32 `m/44'/60'/0'/0/0` (MetaMask-compatible)
-- Chia derivation: `chia_master_sk()` from master seed
-- Hot wallet: `~/workspace/.spellbook/hot.key` (600 perms, plain hex)
-- Encryption: AES-256-GCM with Scrypt KDF (for cold backups)
-
-## Files
-
-- `~/workspace/.spellbook/recovery.py` — Backup/restore (master + individual keys)
-- `~/workspace/.spellbook/hotwallet.py` — Hot wallet for automation
-- `~/workspace/.spellbook/keymanager.py` — Encrypted cold storage
-- `~/workspace/.spellbook/hot.key` — Hot wallet private key (600)
-- `~/workspace/.spellbook/backups/` — Encrypted backups
-- `~/workspace/.spellbook/KEY_RECOVERY.md` — This guide
+With no seal, no paper and no seed file, **there is no recovery**:
+1. Create a new wallet.
+2. Seal it and write down the paper backup IMMEDIATELY.
+3. Move any funds you can still reach to the new wallet.

@@ -279,6 +279,26 @@ other chain.
 Rule: write both sets down on paper, offline, at install. Verify after
 any import by comparing the shown addresses.
 
+### 6b. Sealed seed — every session starts with `spellbook-seed status`
+
+Agent VMs lose the seed files on a wipe or session reset. The sealed seed
+(`~/workspace/.spellbook/seed.sealed`, password-locked, survives wipes)
+brings them back without anyone re-typing words — see
+[SEALED_SEED.md](SEALED_SEED.md). At the start of **every** session,
+including after context compaction, run:
+
+```bash
+spellbook-seed status   # exit 0 unlocked · 3 locked · 4 unsealed · 5 mismatch · 6 empty
+```
+
+- `locked` → run `spellbook-seed serve`, give your human the one-time
+  link it prints, and wait. They enter the password on that page; the
+  seed files come back and the daemon can start.
+- `unsealed` → same command; the page offers **Seal** to your human.
+- **Never** ask for the password in chat, never pass it on a command
+  line, and never re-install over a `locked` wallet (a new install mints
+  a new wallet and strands the old one).
+
 ## 7. Pointer files
 
 - This document: `docs/AGENT_ONBOARDING.md`

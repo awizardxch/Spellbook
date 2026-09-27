@@ -639,71 +639,80 @@ note: the default config is a signer, not a policy engine (S4).
 EOF
 
 # ---------------------------------------------------------------- backup verification
-# The user MUST prove they wrote down the recovery phrase before we finish.
-# We ask for 3 random words from the SET 1 mnemonic (the primary recovery path).
-# This is not skippable — without the paper backup, a VM wipe = permanent loss.
+# The human proves they wrote down the SET 1 words (the primary recovery
+# path) by typing 3 of them back. SET 1's words cannot be re-derived from
+# std_seed.key later (BIP-39 seeds are one-way), so this is the one chance.
+# Needs a human at a terminal: with no TTY (an agent-run --as-agent install)
+# it is skipped with a warning, never faked, and the handoff below makes
+# the paper backup the human's first job.
 if [ "$UPGRADE" != "1" ]; then
+  # The words are the line after "24 WORDS" in make_standard_wallet.py's block.
+  STD_MNEMONIC="$(printf '%s\n' "${STD_BACKUP:-}" | awk '/24 WORDS/{getline; $1=$1; print; exit}')"
+  if [ "$(printf '%s' "$STD_MNEMONIC" | wc -w | tr -d ' ')" != "24" ]; then
+    warn "could not read the SET 1 words back for verification — check the paper copy against the block above by hand"
+  elif [ ! -t 0 ]; then
+    warn "no terminal: backup verification SKIPPED. The human must copy SET 1 to paper before anything else."
+  else
 cat <<'EOF'
 
 ================================================================
-BACKUP VERIFICATION — REQUIRED
+BACKUP VERIFICATION
 ================================================================
 You were shown TWO sets of 24 words above (SET 1: standard recovery,
-SET 2: daemon seed). SET 1 is the primary recovery path.
+SET 2: daemon seed). SET 1 is the primary recovery path, and its words
+are NEVER shown again.
 
 To prove you've written them down, enter 3 words from SET 1 when asked.
 Get them from your PAPER copy — not by scrolling up.
-(If you didn't write them down, do it NOW before continuing.)
 EOF
-  # Pick 3 random positions (1-indexed)
   POS1=$((RANDOM % 24 + 1))
   POS2=$((RANDOM % 24 + 1))
   while [ "$POS2" = "$POS1" ]; do POS2=$((RANDOM % 24 + 1)); done
   POS3=$((RANDOM % 24 + 1))
   while [ "$POS3" = "$POS1" ] || [ "$POS3" = "$POS2" ]; do POS3=$((RANDOM % 24 + 1)); done
+  WORD1=$(printf '%s' "$STD_MNEMONIC" | cut -d' ' -f"$POS1")
+  WORD2=$(printf '%s' "$STD_MNEMONIC" | cut -d' ' -f"$POS2")
+  WORD3=$(printf '%s' "$STD_MNEMONIC" | cut -d' ' -f"$POS3")
 
-  # Get the expected words from the SET 1 mnemonic
-  # (STD_MNEMONIC is set earlier in the script from the standard-recovery wallet)
-  WORD1=$(echo "$STD_MNEMONIC" | cut -d' ' -f"$POS1")
-  WORD2=$(echo "$STD_MNEMONIC" | cut -d' ' -f"$POS2")
-  WORD3=$(echo "$STD_MNEMONIC" | cut -d' ' -f"$POS3")
-
+  VERIFIED=0
   for attempt in 1 2 3; do
+    INPUT1=""; INPUT2=""; INPUT3=""
     echo ""
     echo "Enter word #$POS1 from SET 1 (from your paper backup):"
-    read -r INPUT1
+    read -r INPUT1 || true
     echo "Enter word #$POS2 from SET 1:"
-    read -r INPUT2
+    read -r INPUT2 || true
     echo "Enter word #$POS3 from SET 1:"
-    read -r INPUT3
-
-    # Normalize: lowercase, trim whitespace
-    INPUT1=$(echo "$INPUT1" | tr '[:upper:]' '[:lower:]' | xargs)
-    INPUT2=$(echo "$INPUT2" | tr '[:upper:]' '[:lower:]' | xargs)
-    INPUT3=$(echo "$INPUT3" | tr '[:upper:]' '[:lower:]' | xargs)
-
+    read -r INPUT3 || true
+    INPUT1=$(printf '%s' "$INPUT1" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+    INPUT2=$(printf '%s' "$INPUT2" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+    INPUT3=$(printf '%s' "$INPUT3" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
     if [ "$INPUT1" = "$WORD1" ] && [ "$INPUT2" = "$WORD2" ] && [ "$INPUT3" = "$WORD3" ]; then
+      VERIFIED=1
       echo ""
-      echo "✓ Backup verified. Installation complete."
-      echo "  Remember: two copies, two places. Test your backup with:"
-      echo "    python3 -m spellbook.recovery backup"
+      echo "✓ Backup verified. Remember: two copies, two places."
       break
-    else
-      if [ "$attempt" = "3" ]; then
-        echo ""
-        echo "✗ Verification failed 3 times."
-        echo "  Your wallet is installed, but WITHOUT a verified backup."
-        echo "  If the VM is wiped before you back up, your funds are LOST."
-        echo "  Run this NOW to see your recovery phrase:"
-        echo "    python3 -m spellbook.recovery backup"
-        echo "  Then verify with: spellbook verify-backup"
-      else
-        echo ""
-        echo "✗ Words don't match. Check your paper backup and try again."
-        echo "  (Attempt $attempt of 3)"
-      fi
+    elif [ "$attempt" != "3" ]; then
+      echo ""
+      echo "✗ Words don't match. Check your paper backup and try again. (Attempt $attempt of 3)"
     fi
   done
+  if [ "$VERIFIED" != "1" ]; then
+    echo ""
+    echo "✗ Verification failed 3 times. The wallet is installed WITHOUT a"
+    echo "  verified SET 1 backup, and SET 1's words cannot be shown again."
+    echo "  Back up the raw keys and SET 2 now (as the ${SPELLBOOK_USER} user):"
+    echo "    ${VENV}/bin/python -m spellbook.recovery --config-dir ${PREFIX} backup"
+  fi
+  fi
+  unset STD_MNEMONIC WORD1 WORD2 WORD3 INPUT1 INPUT2 INPUT3
+cat <<EOF
+
+SEAL THE SEED (recommended — survives machine wipes, docs/SEALED_SEED.md):
+  a password-locked copy of the seed that the human can unlock after a
+  wipe from a one-time local page, without re-typing any words:
+    ${VENV}/bin/spellbook-seed --config-dir ${PREFIX} --sealed <persistent path> serve
+EOF
 fi
 if [ "${AS_AGENT:-0}" = "1" ]; then
 cat <<EOF

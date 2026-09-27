@@ -1,5 +1,11 @@
 # Upgrading to the Spellbook Key Recovery System
 
+> **Start here instead:** to survive VM wipes, seal the seed with a
+> password (`spellbook-seed serve`, see [SEALED_SEED.md](SEALED_SEED.md)).
+> That replaces the hot wallet and the `keymanager.py` encrypted backup
+> described below. Neither is recommended: the hot wallet leaves a
+> plain-text key on disk.
+
 ## Who This Is For
 
 You have an existing Spellbook wallet with a master seed (24-word phrase or raw seed file). You want to:
