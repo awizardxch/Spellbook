@@ -1275,37 +1275,47 @@ def _require_v4_pool_key_args(fee: int, tick_spacing: int,
         raise DexError("v4 ticks must align with tick_spacing")
 
 
-def _require_v4_currencies(currency0: str, currency1: str) -> tuple[str, str]:
+def _require_v4_currencies(currency0: str, currency1: str,
+                           allow_native: bool = False) -> tuple[str, str]:
     """Currencies must be sorted; native (address zero) sorts first.
 
-    Native-currency positions are refused here: settling them needs
-    msg.value + SWEEP, which the daemon's v4 intents do not send yet —
-    wrap to WETH first."""
+    Native-currency positions settle via msg.value, which only the
+    daemon's native-aware v4 paths send — keep ``allow_native`` False
+    unless the caller settles native explicitly. When allowed, native
+    must be currency0 (it sorts below every address).
+    """
     _require_address(currency0, "currency0")
     _require_address(currency1, "currency1")
     if currency0.lower() == V4_NATIVE_CURRENCY or \
             currency1.lower() == V4_NATIVE_CURRENCY:
-        raise DexError("v4 native-currency positions are not supported yet "
-                       "— wrap to WETH first")
+        if not allow_native:
+            raise DexError("v4 native-currency positions need allow_native "
+                           "— wrap to WETH first")
+        if currency0.lower() != V4_NATIVE_CURRENCY:
+            raise DexError("v4 native currency must be currency0 "
+                           "(sort order)")
     if currency0.lower() >= currency1.lower():
         raise DexError("v4 requires currency0 < currency1 (sort order)")
     return currency0, currency1
 
 
 def build_v4_pool_key(currency0: str, currency1: str, fee: int,
-                     tick_spacing: int, hooks: str) -> bytes:
+                     tick_spacing: int, hooks: str,
+                     allow_native: bool = False) -> bytes:
     """ABI-encode a v4 PoolKey struct (5 words, static)."""
-    _require_v4_currencies(currency0, currency1)
+    _require_v4_currencies(currency0, currency1, allow_native)
     _require_address(hooks, "hooks")
     return b"".join([_addr(currency0), _addr(currency1), _u24(fee),
                      _i24(tick_spacing), _addr(hooks)])
 
 
 def v4_pool_id(currency0: str, currency1: str, fee: int,
-               tick_spacing: int, hooks: str) -> str:
+               tick_spacing: int, hooks: str,
+               allow_native: bool = False) -> str:
     """PoolId = keccak256(abi.encode(poolKey)) — the id getSlot0 takes."""
     from Crypto.Hash import keccak
-    key = build_v4_pool_key(currency0, currency1, fee, tick_spacing, hooks)
+    key = build_v4_pool_key(currency0, currency1, fee, tick_spacing, hooks,
+                            allow_native)
     return "0x" + keccak.new(data=key, digest_bits=256).hexdigest()
 
 
@@ -1336,11 +1346,12 @@ def build_v4_mint_params(currency0: str, currency1: str, fee: int,
                          tick_spacing: int, hooks: str,
                          tick_lower: int, tick_upper: int, liquidity: int,
                          amount0_max: int, amount1_max: int,
-                         owner: str, hook_data: bytes = b"") -> bytes:
+                         owner: str, hook_data: bytes = b"",
+                         allow_native: bool = False) -> bytes:
     """MINT_POSITION params: (PoolKey, tickLower, tickUpper, liquidity,
     amount0Max, amount1Max, owner, hookData). amount0Max/amount1Max are the
     hard maximum-spend (slippage) bounds."""
-    _require_v4_currencies(currency0, currency1)
+    _require_v4_currencies(currency0, currency1, allow_native)
     _require_v4_pool_key_args(fee, tick_spacing, tick_lower, tick_upper)
     _require_positive_int(liquidity, "liquidity")
     for n, w in ((amount0_max, "amount0 max"), (amount1_max, "amount1 max")):
@@ -1348,7 +1359,7 @@ def build_v4_mint_params(currency0: str, currency1: str, fee: int,
             raise DexError(f"v4 {w} must be a uint128")
     _require_address(owner, "owner")
     pool_key = build_v4_pool_key(currency0, currency1, fee,
-                                 tick_spacing, hooks)
+                                 tick_spacing, hooks, allow_native)
     return _head_tail(
         [pool_key, _i24(tick_lower), _i24(tick_upper), _u256(liquidity),
          _u128(amount0_max), _u128(amount1_max), _addr(owner), None],
@@ -1374,18 +1385,21 @@ def build_v4_decrease_params(token_id: int, liquidity: int,
         [_enc_bytes(bytes(hook_data))])
 
 
-def build_v4_settle_pair_params(currency0: str, currency1: str) -> bytes:
+def build_v4_settle_pair_params(currency0: str, currency1: str,
+                                  allow_native: bool = False) -> bytes:
     """SETTLE_PAIR params: (currency0, currency1) — pays the full open
-    debt for both currencies (payer is the unlock locker, i.e. us)."""
-    _require_v4_currencies(currency0, currency1)
+    debt for both currencies (payer is the unlock locker, i.e. us).
+    Native currency settles from the tx's msg.value."""
+    _require_v4_currencies(currency0, currency1, allow_native)
     return _addr(currency0) + _addr(currency1)
 
 
 def build_v4_take_pair_params(currency0: str, currency1: str,
-                             recipient: str) -> bytes:
+                             recipient: str,
+                             allow_native: bool = False) -> bytes:
     """TAKE_PAIR params: (currency0, currency1, recipient) — takes the full
     open credit for both currencies to ``recipient``."""
-    _require_v4_currencies(currency0, currency1)
+    _require_v4_currencies(currency0, currency1, allow_native)
     _require_address(recipient, "recipient")
     return _addr(currency0) + _addr(currency1) + _addr(recipient)
 
@@ -1405,15 +1419,21 @@ def build_v4_lp_add_calldata(currency0: str, currency1: str, fee: int,
                              tick_lower: int, tick_upper: int,
                              liquidity: int,
                              amount0_max: int, amount1_max: int,
-                             recipient: str, deadline: int) -> str:
+                             recipient: str, deadline: int,
+                             allow_native: bool = False) -> str:
     """One-tx v4 add: [MINT_POSITION, SETTLE_PAIR]. ``liquidity`` is in
     position liquidity units (compute off-chain, e.g. from the pool's
     current price and the desired token amounts); amount0Max/amount1Max
-    bound the spend."""
+    bound the spend. With a native currency0, the caller must send
+    msg.value covering the native leg — keep its max tight, because any
+    unspent native stays in the PositionManager.
+    """
     mint = build_v4_mint_params(currency0, currency1, fee, tick_spacing,
                                 hooks, tick_lower, tick_upper, liquidity,
-                                amount0_max, amount1_max, recipient)
-    settle = build_v4_settle_pair_params(currency0, currency1)
+                                amount0_max, amount1_max, recipient,
+                                allow_native=allow_native)
+    settle = build_v4_settle_pair_params(currency0, currency1,
+                                         allow_native=allow_native)
     return build_v4_modify_liquidities_calldata(
         bytes([V4_ACTIONS["MINT_POSITION"], V4_ACTIONS["SETTLE_PAIR"]]),
         [mint, settle], deadline)
@@ -1423,13 +1443,15 @@ def build_v4_lp_remove_calldata(token_id: int, liquidity: int,
                                 amount0_min: int, amount1_min: int,
                                 currency0: str, currency1: str,
                                 recipient: str, deadline: int,
-                                burn_nft: bool = False) -> str:
+                                burn_nft: bool = False,
+                                allow_native: bool = False) -> str:
     """One-tx v4 remove: [DECREASE_LIQUIDITY, TAKE_PAIR]. With
     ``burn_nft`` (full exits), appends BURN_POSITION to retire the NFT."""
     _require_positive_int(liquidity, "liquidity to remove")
     dec = build_v4_decrease_params(token_id, liquidity,
                                    amount0_min, amount1_min)
-    take = build_v4_take_pair_params(currency0, currency1, recipient)
+    take = build_v4_take_pair_params(currency0, currency1, recipient,
+                                     allow_native=allow_native)
     actions = [V4_ACTIONS["DECREASE_LIQUIDITY"], V4_ACTIONS["TAKE_PAIR"]]
     params = [dec, take]
     if burn_nft:
@@ -1440,12 +1462,14 @@ def build_v4_lp_remove_calldata(token_id: int, liquidity: int,
 
 
 def build_v4_lp_claim_calldata(token_id: int, currency0: str, currency1: str,
-                               recipient: str, deadline: int) -> str:
+                               recipient: str, deadline: int,
+                               allow_native: bool = False) -> str:
     """One-tx v4 fee claim: [DECREASE_LIQUIDITY (0), TAKE_PAIR]. The
     position's liquidity is untouched; accrued fees are credited and
     taken to ``recipient``."""
     dec = build_v4_decrease_params(token_id, 0, 0, 0)
-    take = build_v4_take_pair_params(currency0, currency1, recipient)
+    take = build_v4_take_pair_params(currency0, currency1, recipient,
+                                     allow_native=allow_native)
     return build_v4_modify_liquidities_calldata(
         bytes([V4_ACTIONS["DECREASE_LIQUIDITY"], V4_ACTIONS["TAKE_PAIR"]]),
         [dec, take], deadline)
@@ -1559,6 +1583,21 @@ def decode_slot0_sqrt_price_x96(result_hex: str) -> int:
     if len(h) < 64:
         raise DexError(f"bad slot0 return data: {result_hex!r}"[:80])
     return int(h[0:64], 16)
+
+
+#: Uniswap v4 StateView addresses per chain id — the read-only pool-state
+#: lens. Used where the local PoolManager deployment does not expose
+#: getSlot0 (Robinhood Chain's modified PoolManager reverts on it).
+V4_STATE_VIEW_ADDRESSES = {
+    4663: "0xf3334192d15450cdd385c8b70e03f9a6bd9e673b",
+}
+
+
+def build_state_view_get_slot0_calldata(pool_id_hex: str) -> str:
+    """StateView.getSlot0(bytes32) eth_call payload. StateView's getSlot0
+    returns the same (sqrtPriceX96, tick, protocolFee, lpFee) layout as
+    PoolManager.getSlot0, so decode_slot0_sqrt_price_x96 applies."""
+    return build_pool_manager_get_slot0_calldata(pool_id_hex)
 
 
 # ---------------------------------------------------------------------------

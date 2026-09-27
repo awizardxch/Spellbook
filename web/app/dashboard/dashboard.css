@@ -1151,3 +1151,31 @@
   font-size: 0.74rem;
   color: var(--muted);
 }
+
+/* ---------- LP positions (Uniswap v4, read-only) ---------- */
+/* Split bar showing the two-token distribution of a position. */
+.lp-dist {
+  display: inline-flex;
+  width: 120px;
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(148, 163, 184, 0.14);
+  margin-bottom: 4px;
+}
+
+.lp-dist-a {
+  background: #22d3ee;
+  box-shadow: 0 0 6px rgba(34, 211, 238, 0.6);
+}
+
+.lp-dist-b {
+  background: #8b5cf6;
+  box-shadow: 0 0 6px rgba(139, 92, 246, 0.6);
+}
+
+/* Subscript zero-count in tiny price bounds (0.0₅85). */
+.lp-sub {
+  font-size: 0.62rem;
+  color: #22d3ee;
+}

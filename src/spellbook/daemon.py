@@ -1060,21 +1060,35 @@ class Daemon:
         """Execute an approved v4 dex_lp_add intent.
 
         Two-stage Permit2 approvals (token -> Permit2, then Permit2 ->
-        PositionManager), both exact-amount and only where short, then
-        modifyLiquidities([MINT_POSITION, SETTLE_PAIR]). Pre-flight reads
-        prove the address is a PositionManager and the pool is
+        PositionManager), both exact-amount and only where short — the
+        native side skips approvals and settles via msg.value instead.
+        Then modifyLiquidities([MINT_POSITION, SETTLE_PAIR]). Pre-flight
+        reads prove the address is a PositionManager and the pool is
         initialized — read-only, fail closed.
         """
         posm = params["position_manager"]
         permit2 = params["permit2"]
         c0, c1 = params["token_a"], params["token_b"]  # sorted at validation
+        native = c0.lower() == dex_mod.V4_NATIVE_CURRENCY
         pool_manager = dex_mod.decode_address_return(rpc.eth_call(
             posm, dex_mod.build_posm_pool_manager_calldata(), sender))
         pool_id = dex_mod.v4_pool_id(c0, c1, params["fee"],
-                                     params["tick_spacing"], params["hooks"])
-        sqrt_price = dex_mod.decode_slot0_sqrt_price_x96(rpc.eth_call(
-            pool_manager,
-            dex_mod.build_pool_manager_get_slot0_calldata(pool_id), sender))
+                                     params["tick_spacing"], params["hooks"],
+                                     allow_native=native)
+        try:
+            sqrt_price = dex_mod.decode_slot0_sqrt_price_x96(rpc.eth_call(
+                pool_manager,
+                dex_mod.build_pool_manager_get_slot0_calldata(pool_id),
+                sender))
+        except evm.EvmError:
+            # Robinhood Chain's modified PoolManager reverts on getSlot0 —
+            # fall back to the read-only StateView lens for this chain.
+            sv = dex_mod.V4_STATE_VIEW_ADDRESSES.get(info["chain_id"])
+            if not sv:
+                raise
+            sqrt_price = dex_mod.decode_slot0_sqrt_price_x96(rpc.eth_call(
+                sv, dex_mod.build_state_view_get_slot0_calldata(pool_id),
+                sender))
         if sqrt_price == 0:
             raise evm.EvmError("v4 pool is not initialized — mint would "
                                "revert on-chain, refusing")
@@ -1082,12 +1096,16 @@ class Daemon:
             c0, c1, params["fee"], params["tick_spacing"], params["hooks"],
             params["tick_lower"], params["tick_upper"], params["liquidity"],
             params["amount_a_wei"], params["amount_b_wei"], sender,
-            call_deadline)
+            call_deadline, allow_native=native)
         nonce = rpc.nonce(sender)
         gas_price = _evm_gas_price(rpc)
         approve_txs = []
         for tok, max_amt in ((c0, params["amount_a_wei"]),
                              (c1, params["amount_b_wei"])):
+            if tok.lower() == dex_mod.V4_NATIVE_CURRENCY:
+                # Native settles from msg.value on the mint tx — no
+                # Permit2 stages exist for it.
+                continue
             ah, nonce = self._evm_ensure_allowance(
                 rpc, priv, info["chain_id"], sender, nonce, tok, permit2,
                 max_amt, gas_price)
@@ -1098,9 +1116,12 @@ class Daemon:
                 posm, max_amt, call_deadline, gas_price)
             if ph:
                 approve_txs.append(ph)
+        # The native max doubles as the tx value. Keep it tight for native
+        # legs: any unspent native stays in the PositionManager.
+        value_wei = params["amount_a_wei"] if native else 0
         tx_hash, _, block = self._evm_send_call(
-            rpc, priv, info["chain_id"], sender, nonce, posm, 0, data,
-            gas_price, "lp_add_v4")
+            rpc, priv, info["chain_id"], sender, nonce, posm, value_wei,
+            data, gas_price, "lp_add_v4")
         out = {"submitted": True, "tx_hash": tx_hash, "block": block,
                "from": sender, "pool_manager": pool_manager,
                "pool_id": pool_id}
@@ -3684,11 +3705,16 @@ class Daemon:
             if p.get(k) not in (None, 0):
                 raise evm.EvmError(f"{k} is v2/v3-only — v4 bounds are the "
                                    "max spends amount_a_wei/amount_b_wei")
-        for k in ("amount_a_wei", "amount_b_wei"):
+        for k, tok in (("amount_a_wei", tok_a), ("amount_b_wei", tok_b)):
             v = p.get(k)
-            if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
-                raise evm.EvmError(f"v4 {k} (max spend) must be a positive "
-                                   "int in base units")
+            if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                raise evm.EvmError(f"v4 {k} (max spend) must be a "
+                                   "non-negative int in base units")
+            if v == 0 and tok.lower() != dex_mod.V4_NATIVE_CURRENCY:
+                raise evm.EvmError(f"v4 {k} (max spend) must be positive "
+                                   "for ERC-20 tokens")
+            if v >= 2 ** 128:
+                raise evm.EvmError(f"v4 {k} (max spend) exceeds uint128")
         liq = p.get("liquidity")
         if isinstance(liq, bool) or not isinstance(liq, int) or liq <= 0:
             raise evm.EvmError("v4 liquidity must be a positive int "
@@ -3716,14 +3742,15 @@ class Daemon:
             raise evm.EvmError("v4 ticks must align with tick_spacing")
         if tok_a.lower() >= tok_b.lower():
             raise evm.EvmError("v4 requires token_a < token_b (sort order)")
-        if tok_a.lower() == dex_mod.V4_NATIVE_CURRENCY or \
-                tok_b.lower() == dex_mod.V4_NATIVE_CURRENCY:
-            raise evm.EvmError("v4 native-currency positions are not "
-                               "supported yet — wrap to WETH first")
-        if tok_a.lower() == dex_mod.V4_NATIVE_CURRENCY or \
-                tok_b.lower() == dex_mod.V4_NATIVE_CURRENCY:
-            raise evm.EvmError("v4 native-currency positions are not "
-                               "supported yet — wrap to WETH first")
+        native_a = tok_a.lower() == dex_mod.V4_NATIVE_CURRENCY
+        native_b = tok_b.lower() == dex_mod.V4_NATIVE_CURRENCY
+        if native_a and native_b:
+            raise evm.EvmError("both tokens native — refusing")
+        if native_b:
+            # Unreachable given the sort-order check above (0x0 sorts
+            # first), but explicit beats implicit for a money path.
+            raise evm.EvmError("v4 native currency must be token_a "
+                               "(sort order)")
         return {"intent": "dex_lp_add", "chain": chain, "protocol": "v4",
                 "position_manager": posm, "permit2": permit2,
                 "token_a": tok_a, "token_b": tok_b,
@@ -3745,9 +3772,16 @@ class Daemon:
     def rt_dex_lp_add(self, p: dict, muse_id: str) -> dict:
         """Queue/approve/deny/execute path for a bounded LP-add intent."""
         intent = self._validate_dex_lp_add(p)
-        entries = [(intent["chain"], intent["token_a"].lower(),
+
+        def _asset(t: str) -> str:
+            # Match the dex_swap convention: the zero address is the
+            # chain's native currency for policy keys.
+            return ("native" if t.lower() == dex_mod.V4_NATIVE_CURRENCY
+                    else t.lower())
+
+        entries = [(intent["chain"], _asset(intent["token_a"]),
                     intent["amount_a_wei"]),
-                   (intent["chain"], intent["token_b"].lower(),
+                   (intent["chain"], _asset(intent["token_b"]),
                     intent["amount_b_wei"])]
         return self._run_fund_intent(intent, muse_id, entries, "dex_lp_add")
 
