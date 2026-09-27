@@ -49,6 +49,8 @@ from spellbook.dex import (
     decode_address_return,
     build_pool_manager_get_slot0_calldata,
     decode_slot0_sqrt_price_x96,
+    build_state_view_get_slot0_calldata,
+    V4_STATE_VIEW_ADDRESSES,
     compare_quotes,
     normalize_venue,
     venue_serves_chain,
@@ -1057,11 +1059,27 @@ def test_validate_lp_add_v4_rejects_bad_fee(tmp_path, monkeypatch):
         d._validate_dex_lp_add(_v4_add_params(fee=2**24))
 
 
-def test_validate_lp_add_v4_rejects_native(tmp_path, monkeypatch):
+def test_validate_lp_add_v4_native_rules(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
     d = _daemon(tmp_path)
-    with pytest.raises(Exception, match="wrap to WETH"):
-        d._validate_dex_lp_add(_v4_add_params(token_a=HOOKLESS))
+    # Native as token_a is now supported; its max spend may be zero.
+    ok = d._validate_dex_lp_add(
+        _v4_add_params(token_a=HOOKLESS, amount_a_wei=0))
+    assert ok["token_a"] == HOOKLESS
+    # Native must sort first — as token_b it violates sort order.
+    with pytest.raises(Exception, match="sort order"):
+        d._validate_dex_lp_add(
+            _v4_add_params(token_a=A, token_b=HOOKLESS))
+    # Both sides native is meaningless.
+    with pytest.raises(Exception, match="token_a == token_b"):
+        d._validate_dex_lp_add(
+            _v4_add_params(token_a=HOOKLESS, token_b=HOOKLESS))
+    # Zero max spend on an ERC-20 side is still refused.
+    with pytest.raises(Exception, match="must be positive"):
+        d._validate_dex_lp_add(_v4_add_params(amount_a_wei=0))
+    # uint128 bound on max spends.
+    with pytest.raises(Exception, match="uint128"):
+        d._validate_dex_lp_add(_v4_add_params(amount_b_wei=2 ** 128))
 
 
 def test_validate_lp_add_v4_rejects_unknown_field(tmp_path, monkeypatch):
@@ -1172,3 +1190,68 @@ def test_rt_lp_claim_always_queues(tmp_path, monkeypatch):
     d = _daemon(tmp_path)
     out = d.rt_dex_lp_claim(_claim_params(), "muse-test")
     assert out["decision"] == "queued"
+
+
+# --------------------------------------------------------------------------
+# v4 native currency + StateView
+# --------------------------------------------------------------------------
+
+def test_v4_native_allowed_with_flag():
+    # Native as currency0 with allow_native=True encodes the pool key with
+    # the zero address in the currency0 slot.
+    key = build_v4_pool_key(currency0=V4_NATIVE_CURRENCY, currency1=B,
+                            fee=9000, tick_spacing=90,
+                            hooks="0x" + "00" * 20, allow_native=True)
+    assert key[12:32] == bytes(20)
+    assert key[32 + 12:64] == bytes.fromhex(B[2:])
+    pid = v4_pool_id(currency0=V4_NATIVE_CURRENCY, currency1=B,
+                     fee=9000, tick_spacing=90, hooks="0x" + "00" * 20,
+                     allow_native=True)
+    assert pid.startswith("0x") and len(pid) == 66
+    # Without the flag it is still refused.
+    with pytest.raises(DexError):
+        build_v4_pool_key(currency0=V4_NATIVE_CURRENCY, currency1=B,
+                          fee=9000, tick_spacing=90,
+                          hooks="0x" + "00" * 20)
+    # Native must be currency0 — as currency1 it violates sort order.
+    with pytest.raises(DexError):
+        build_v4_pool_key(currency0=B, currency1=V4_NATIVE_CURRENCY,
+                          fee=9000, tick_spacing=90,
+                          hooks="0x" + "00" * 20, allow_native=True)
+
+
+def test_v4_native_mint_calldata_layout():
+    # A single-sided ERC-20 mint against native currency0: amount0_max = 0,
+    # full amount1_max. Encodes [MINT_POSITION, SETTLE_PAIR].
+    data = build_v4_lp_add_calldata(
+        V4_NATIVE_CURRENCY, B, 9000, 90, "0x" + "00" * 20,
+        232920, 233100, 10**18, 0, 10**25, C, 2**32, allow_native=True)
+    assert data.startswith("0x")
+    assert len(bytes.fromhex(data[2:])) > 0
+    # settle_pair params carry the zero address as currency0
+    sp = build_v4_settle_pair_params(V4_NATIVE_CURRENCY, B,
+                                     allow_native=True)
+    assert sp[12:32] == bytes(20)
+    assert sp[32 + 12:64] == bytes.fromhex(B[2:])
+    # take_pair with native allowed too (remove/claim path)
+    tp = build_v4_take_pair_params(V4_NATIVE_CURRENCY, B, C,
+                                   allow_native=True)
+    assert tp[12:32] == bytes(20)
+    rm = build_v4_lp_remove_calldata(7, 10**15, 0, 0, V4_NATIVE_CURRENCY,
+                                     B, C, 2**32, allow_native=True)
+    assert rm.startswith("0x")
+    cl = build_v4_lp_claim_calldata(7, V4_NATIVE_CURRENCY, B, C, 2**32,
+                                    allow_native=True)
+    assert cl.startswith("0x")
+
+
+def test_state_view_get_slot0_matches_pm_selector():
+    # StateView.getSlot0 has the same selector and return layout as
+    # PoolManager.getSlot0, so the same decoder applies.
+    pm = build_pool_manager_get_slot0_calldata("0x" + "ab" * 32)
+    sv = build_state_view_get_slot0_calldata("0x" + "ab" * 32)
+    assert pm == sv
+    assert V4_STATE_VIEW_ADDRESSES[4663].startswith("0x")
+    # decode: first word sqrtPriceX96
+    raw = "0x" + (123456789).to_bytes(32, "big").hex() + "00" * 96
+    assert decode_slot0_sqrt_price_x96(raw) == 123456789

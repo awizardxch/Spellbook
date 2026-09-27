@@ -33,6 +33,58 @@ interface NftHolding {
   name: string | null;
 }
 
+/** One side of a Uniswap v4 pool key. */
+interface LpTokenMeta {
+  address: string;
+  symbol: string;
+  name: string;
+  decimals: number;
+  isNative: boolean;
+}
+
+/** One v4 LP position, as returned by /api/lp-positions. */
+interface LpPositionView {
+  tokenId: string;
+  owner: string;
+  poolId: string;
+  token0: LpTokenMeta;
+  token1: LpTokenMeta;
+  fee: number;
+  feeLabel: string;
+  tickSpacing: number;
+  hooks: string;
+  tickLower: number;
+  tickUpper: number;
+  tick: number;
+  inRange: boolean;
+  liquidity: string;
+  amount0: string;
+  amount1: string;
+  priceLower: string;
+  priceUpper: string;
+  pct0: number | null;
+  pct1: number | null;
+  price0Usd: string | null;
+  price1Usd: string | null;
+  valueUsd: string | null;
+  fees0: string;
+  fees1: string;
+  feesUsd: string | null;
+  /** annualized percent, e.g. 38.4 = 38.4% — null when not computable */
+  apr: number | null;
+  /** basis label, e.g. "est. · 24h volume" — the UI always marks it estimated */
+  aprBasis: string | null;
+  created: string | null;
+  createdBlock: number | null;
+}
+
+interface LpWallet {
+  wallet: string;
+  addresses: string[];
+  positions: LpPositionView[];
+  error?: string;
+}
+
 interface Holding {
   id: string;
   /** labeled wallet this row belongs to, e.g. "Spellbook" or "Bankr" */
@@ -74,6 +126,57 @@ function fmtUsd(v: string): string {
       maximumFractionDigits: 2,
     })
   );
+}
+
+/** human token amount: "51130.096158" → "51,130.096"; tiny values keep sig figs */
+function fmtAmt(v: string): string {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "—";
+  if (n === 0) return "0";
+  const abs = Math.abs(n);
+  const dp = abs >= 1000 ? 2 : abs >= 100 ? 2 : abs >= 1 ? 4 : 6;
+  return n.toLocaleString("en-US", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: dp,
+  });
+}
+
+/** price with subscript zeros for tiny values: 0.000085 → 0.0₅85 */
+function fmtPriceSub(v: string): { head: string; sub: string | null } {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return { head: "—", sub: null };
+  if (n >= 0.01 || n === 0) {
+    return {
+      head: n.toLocaleString("en-US", { maximumFractionDigits: 6 }),
+      sub: null,
+    };
+  }
+  const s = n.toFixed(20);
+  const m = /^0\.(0+)([1-9]\d{0,3})/.exec(s);
+  if (!m) {
+    return {
+      head: n.toLocaleString("en-US", { maximumFractionDigits: 8 }),
+      sub: null,
+    };
+  }
+  return { head: "0.0", sub: `${m[1].length}${m[2]}` };
+}
+
+/** ISO timestamp → "Sep 26, 2026" */
+function fmtDate(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+/** Order a pair quote-first the way Uniswap does (native last). */
+function lpOrdered(p: LpPositionView): [LpTokenMeta, LpTokenMeta] {
+  return p.token0.isNative ? [p.token1, p.token0] : [p.token0, p.token1];
 }
 
 interface ActivityEntry {
@@ -176,6 +279,10 @@ export default function DashboardApp({
   const [holdings, setHoldings] = useState<Holding[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Uniswap v4 LP positions (Robinhood Chain only, read-only).
+  const [lpWallets, setLpWallets] = useState<LpWallet[] | null>(null);
+  const [lpLoading, setLpLoading] = useState(false);
+  const [lpError, setLpError] = useState<string | null>(null);
   const [activity, setActivity] = useState<ChainActivity[] | null>(null);
   const [activityLoading, setActivityLoading] = useState(false);
   const [activityError, setActivityError] = useState<string | null>(null);
@@ -237,6 +344,42 @@ export default function DashboardApp({
     if (tab === "activity") loadActivity();
   }, [tab, loadActivity]);
 
+  // LP positions load with the portfolio tab (first paint) and on Refresh /
+  // depth change. The scan is cheap for empty wallets and cached per address.
+  const loadLp = useCallback(async (d: number) => {
+    setLpLoading(true);
+    setLpError(null);
+    try {
+      const res = await fetch(`/api/lp-positions?depth=${d}`, {
+        cache: "no-store",
+      });
+      if (!res.ok)
+        throw new Error(`lp-positions API returned HTTP ${res.status}`);
+      const json = (await res.json()) as { wallets?: LpWallet[] };
+      setLpWallets(Array.isArray(json.wallets) ? json.wallets : []);
+    } catch (e) {
+      setLpError(
+        e instanceof Error ? e.message : "failed to load LP positions"
+      );
+      setLpWallets([]);
+    } finally {
+      setLpLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadLp(depth);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadLp]);
+
+  const refreshAll = useCallback(
+    (d: number) => {
+      load(d);
+      loadLp(d);
+    },
+    [load, loadLp]
+  );
+
   const changeDepth = useCallback(
     (d: number) => {
       const next = Math.min(Math.max(d, 1), 100);
@@ -247,8 +390,9 @@ export default function DashboardApp({
         /* storage unavailable — no-op */
       }
       load(next);
+      loadLp(next);
     },
-    [load]
+    [load, loadLp]
   );
 
   const copy = useCallback(async (text: string, key: string) => {
@@ -381,10 +525,10 @@ export default function DashboardApp({
                 <button
                   className="btn ghost dash-refresh"
                   type="button"
-                  onClick={() => load(depth)}
-                  disabled={loading}
+                  onClick={() => refreshAll(depth)}
+                  disabled={loading || lpLoading}
                 >
-                  {loading ? "Refreshing…" : "Refresh"}
+                  {loading || lpLoading ? "Refreshing…" : "Refresh"}
                 </button>
                 <span className="dash-chip" title="Chains reporting">
                   {holdings ? `${reporting} / ${visible.length}` : "—"} reporting
@@ -763,6 +907,258 @@ export default function DashboardApp({
               read-only. This page cannot approve, sign, or broadcast
               anything — mainnet rows are live balances, not a spending
               interface.
+            </p>
+          </div>
+
+          <div className="dash-panel">
+            <div className="dash-panel-head">
+              <div>
+                <h2>LP positions</h2>
+                <p>
+                  Uniswap v4 positions on Robinhood Chain, grouped by
+                  wallet · read-only. APR is estimated from trailing
+                  swap volume.
+                </p>
+              </div>
+              <div className="dash-actions">
+                <button
+                  className="btn ghost dash-refresh"
+                  type="button"
+                  onClick={() => loadLp(depth)}
+                  disabled={lpLoading}
+                >
+                  {lpLoading ? "Scanning…" : "Rescan"}
+                </button>
+                <span className="dash-chip" title="v4 positions held">
+                  {lpWallets
+                    ? `${lpWallets.reduce(
+                        (n, w) => n + w.positions.length,
+                        0
+                      )} positions`
+                    : "—"}
+                </span>
+              </div>
+            </div>
+            {lpError && <p className="dash-error">{lpError}</p>}
+            <div className="dash-tablewrap">
+              <table className="dash-table">
+                <thead>
+                  <tr>
+                    <th>Pool</th>
+                    <th>Position</th>
+                    <th>Distribution</th>
+                    <th>Value</th>
+                    <th>Fees</th>
+                    <th>APR</th>
+                    <th>Created</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(lpWallets ?? []).map((w) => {
+                    if (w.error) {
+                      return (
+                        <Fragment key={w.wallet}>
+                          <tr className="dash-walletrow">
+                            <td colSpan={7}>
+                              <span
+                                className={`dash-wallet ${
+                                  w.wallet === "Bankr"
+                                    ? "dash-wallet-bankr"
+                                    : ""
+                                }`}
+                              >
+                                {w.wallet}
+                              </span>
+                              <span className="dash-walletnote">
+                                {w.addresses.length} addresses
+                              </span>
+                            </td>
+                          </tr>
+                          <tr>
+                            <td colSpan={7}>
+                              <span className="dash-warn">{w.error}</span>
+                            </td>
+                          </tr>
+                        </Fragment>
+                      );
+                    }
+                    return (
+                      <Fragment key={w.wallet}>
+                        <tr className="dash-walletrow">
+                          <td colSpan={7}>
+                            <span
+                              className={`dash-wallet ${
+                                w.wallet === "Bankr" ? "dash-wallet-bankr" : ""
+                              }`}
+                            >
+                              {w.wallet}
+                            </span>
+                            <span className="dash-walletnote">
+                              {w.addresses.length} addresses ·{" "}
+                              {w.positions.length} positions
+                            </span>
+                          </td>
+                        </tr>
+                        {w.positions.map((p) => {
+                          const [base, quote] = lpOrdered(p);
+                          const lo = fmtPriceSub(p.priceLower);
+                          const hi = fmtPriceSub(p.priceUpper);
+                          // pct0/pct1 follow token0/token1; display follows
+                          // base/quote order (native always quoted second).
+                          const pBase = p.token0.isNative ? p.pct1 : p.pct0;
+                          const pQuote = p.token0.isNative ? p.pct0 : p.pct1;
+                          const hasDist = pBase !== null && pQuote !== null;
+                          const wBase = hasDist ? (pBase as number) : 0;
+                          const wQuote = hasDist ? (pQuote as number) : 0;
+                          return (
+                            <tr key={`${p.owner}-${p.tokenId}`}>
+                              <td>
+                                <span className="dash-num">
+                                  {base.symbol}/{quote.symbol}
+                                </span>
+                                <span className="dash-sub">
+                                  v4 · {p.feeLabel}
+                                  {" · "}Robinhood Chain
+                                </span>
+                              </td>
+                              <td>
+                                <span
+                                  className={p.inRange ? "dash-ok" : "dash-warn"}
+                                  title={
+                                    p.inRange
+                                      ? "Current price is inside this range"
+                                      : "Current price is outside this range — the position earns no fees"
+                                  }
+                                >
+                                  ● {p.inRange ? "in range" : "out of range"}
+                                </span>
+                                <span className="dash-sub">
+                                  {lo.head}
+                                  {lo.sub && (
+                                    <sub className="lp-sub">{lo.sub}</sub>
+                                  )}
+                                  {" → "}
+                                  {hi.head}
+                                  {hi.sub && (
+                                    <sub className="lp-sub">{hi.sub}</sub>
+                                  )}{" "}
+                                  {quote.symbol}
+                                </span>
+                                <span className="dash-sub">
+                                  ticks {p.tickLower} → {p.tickUpper}
+                                </span>
+                              </td>
+                              <td>
+                                {hasDist ? (
+                                  <>
+                                    <span
+                                      className="lp-dist"
+                                      title={`${wBase.toFixed(1)}% ${base.symbol} · ${wQuote.toFixed(1)}% ${quote.symbol}`}
+                                    >
+                                      <span
+                                        className="lp-dist-a"
+                                        style={{ width: `${wBase}%` }}
+                                      />
+                                      <span
+                                        className="lp-dist-b"
+                                        style={{ width: `${wQuote}%` }}
+                                      />
+                                    </span>
+                                    <span className="dash-sub">
+                                      {wBase.toFixed(1)}% {base.symbol} ·{" "}
+                                      {wQuote.toFixed(1)}% {quote.symbol}
+                                    </span>
+                                  </>
+                                ) : (
+                                  <span className="dash-sub">—</span>
+                                )}
+                              </td>
+                              <td>
+                                <span className="dash-num">
+                                  {p.valueUsd !== null
+                                    ? fmtUsd(p.valueUsd)
+                                    : "—"}
+                                </span>
+                                <span className="dash-sub">
+                                  {fmtAmt(p.amount0)} {p.token0.symbol} +{" "}
+                                  {fmtAmt(p.amount1)} {p.token1.symbol}
+                                </span>
+                              </td>
+                              <td>
+                                <span className="dash-num">
+                                  {p.feesUsd !== null
+                                    ? fmtUsd(p.feesUsd)
+                                    : "—"}
+                                </span>
+                                <span className="dash-sub">
+                                  {fmtAmt(p.fees0)} {p.token0.symbol} +{" "}
+                                  {fmtAmt(p.fees1)} {p.token1.symbol}
+                                </span>
+                                <span className="dash-sub">unclaimed</span>
+                              </td>
+                              <td>
+                                <span className="dash-num">
+                                  {p.apr !== null
+                                    ? `${p.apr.toFixed(2)}%`
+                                    : "—"}
+                                </span>
+                                <span
+                                  className="dash-sub"
+                                  title={
+                                    p.aprBasis
+                                      ? `Estimate — ${p.aprBasis}`
+                                      : undefined
+                                  }
+                                >
+                                  {p.apr !== null ? (
+                                    <>
+                                      est.
+                                      {p.aprBasis ? ` · ${p.aprBasis}` : ""}
+                                    </>
+                                  ) : (
+                                    p.aprBasis ?? "—"
+                                  )}
+                                </span>
+                              </td>
+                              <td>
+                                <span className="dash-num">
+                                  {fmtDate(p.created)}
+                                </span>
+                                <span className="dash-sub">
+                                  token #{p.tokenId}
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {!lpLoading && (lpWallets ?? []).length === 0 && (
+                <p className="dash-note">
+                  No Uniswap v4 LP positions found in the configured
+                  dashboard wallets.
+                </p>
+              )}
+              {!lpLoading &&
+                (lpWallets ?? []).length > 0 &&
+                (lpWallets ?? []).every((w) => w.positions.length === 0) && (
+                  <p className="dash-note">
+                    No Uniswap v4 LP positions found in the configured
+                    dashboard wallets.
+                  </p>
+                )}
+              {lpLoading && lpWallets === null && (
+                <p className="dash-note">Scanning PositionManager…</p>
+              )}
+            </div>
+            <p className="dash-note">
+              Positions are discovered from PositionManager Transfer
+              events and verified by ownerOf · state via StateView ·
+              APR is an estimate from recent pool swap volume, not a
+              guarantee.
             </p>
           </div>
         </section>
