@@ -300,20 +300,31 @@ def test_v4_actions_match_official_constants():
 
 def _unlock_actions(p: bytes):
     """From a modifyLiquidities payload, return (actions_bytes,
-    params_list_of_bytes). Asserts the trailing deadline."""
+    params_list_of_bytes). Asserts the trailing deadline and the strict
+    unlockData layout the on-chain CalldataDecoder enforces
+    (length-prefixed bytes, strict offsets) — see SliceOutOfBounds
+    regression, 2026-09-26."""
     unlock_off = _word(p, 0)
     assert _word(p, 1) == DEADLINE
-    u = p[unlock_off:]
+    u_len = _word(p, unlock_off // 32)
+    u = p[unlock_off + 32:unlock_off + 32 + u_len]
+    assert len(u) == u_len
     act_off = _word(u, 0)
     par_off = _word(u, 1)
+    assert act_off == 0x40  # strict: actions tuple offset
     act_len = _word(u, act_off // 32)
     actions = u[act_off + 32:act_off + 32 + act_len]
+    # strict: params offset = 0x60 + word-aligned actions length
+    assert par_off == 0x60 + ((act_len + 31) // 32) * 32
     arr = u[par_off:]  # bytes[] encoding: length word, then offset heads
     data = arr[32:]    # element offsets are relative to here
     n = _word(arr, 0)
     params = []
     for i in range(n):
         off = int.from_bytes(data[i * 32:(i + 1) * 32], "big")
+        # strict: offsets must be tightly packed
+        assert off == 32 * n + sum(
+            32 + ((len(params[j]) + 31) // 32) * 32 for j in range(i))
         ln = int.from_bytes(data[off:off + 32], "big")
         params.append(data[off + 32:off + 32 + ln])
     return actions, params
