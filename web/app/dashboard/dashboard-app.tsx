@@ -291,7 +291,7 @@ export default function DashboardApp({
   const [selectedChain, setSelectedChain] = useState<string>(    "robinhood-mainnet"
   );
   // Network rail + Networks tab selection: the chain id shown in the holdings column.
-  const [assetsTab, setAssetsTab] = useState<"assets" | "nfts">("assets");
+  const [assetsTab, setAssetsTab] = useState<"assets" | "lp" | "nfts">("assets");
   // How many derivation addresses per chain to query (1–100), persisted
   // per browser. The API defaults to all bound addresses when omitted.
   const [depth, setDepth] = useState<number>(() => {
@@ -423,6 +423,12 @@ export default function DashboardApp({
     null;
   const activeId = selCfg?.id ?? null;
   const selHoldings = activeId ? holdingsFor(activeId) : [];
+  // LP positions only exist on Robinhood Chain: the LP tab is hidden
+  // elsewhere, and this fallback keeps a selected tab visible.
+  const viewTab =
+    assetsTab === "lp" && activeId !== "robinhood-mainnet"
+      ? "assets"
+      : assetsTab;
   const selUsd = selHoldings.reduce(
     (s, h) => s + (h.totalUsd != null ? Number(h.totalUsd) : 0),
     0
@@ -687,20 +693,39 @@ export default function DashboardApp({
                   <button
                     type="button"
                     role="tab"
-                    aria-selected={assetsTab === "assets"}
+                    aria-selected={viewTab === "assets"}
                     className={`dash-segbtn${
-                      assetsTab === "assets" ? " on" : ""
+                      viewTab === "assets" ? " on" : ""
                     }`}
                     onClick={() => setAssetsTab("assets")}
                   >
                     Tokens
                   </button>
+                  {activeId === "robinhood-mainnet" && (
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={viewTab === "lp"}
+                      className={`dash-segbtn${
+                        viewTab === "lp" ? " on" : ""
+                      }`}
+                      onClick={() => setAssetsTab("lp")}
+                    >
+                      LP
+                      {(lpWallets ?? []).some((w) => w.positions.length > 0)
+                        ? ` (${(lpWallets ?? []).reduce(
+                            (n, w) => n + w.positions.length,
+                            0
+                          )})`
+                        : ""}
+                    </button>
+                  )}
                   <button
                     type="button"
                     role="tab"
-                    aria-selected={assetsTab === "nfts"}
+                    aria-selected={viewTab === "nfts"}
                     className={`dash-segbtn${
-                      assetsTab === "nfts" ? " on" : ""
+                      viewTab === "nfts" ? " on" : ""
                     }`}
                     onClick={() => setAssetsTab("nfts")}
                   >
@@ -714,7 +739,7 @@ export default function DashboardApp({
                   </button>
                 </div>
 
-                {assetsTab === "assets" ? (
+                {viewTab === "assets" ? (
                   <div className="dash-tablewrap">
                     <table className="dash-table">
                       <thead>
@@ -833,6 +858,260 @@ export default function DashboardApp({
                       </p>
                     )}
                   </div>
+                ) : viewTab === "lp" ? (
+                <div className="dash-lpblock">
+                  <div className="dash-lpblock-head">
+                    <div>
+                      <h3>LP positions</h3>
+                      <p>
+                        Uniswap v4 positions on Robinhood Chain, grouped by
+                        wallet · read-only. APR is estimated from trailing
+                        swap volume.
+                      </p>
+                    </div>
+                    <div className="dash-actions">
+                      <button
+                        className="btn ghost dash-refresh"
+                        type="button"
+                        onClick={() => loadLp(depth)}
+                        disabled={lpLoading}
+                      >
+                        {lpLoading ? "Scanning…" : "Rescan"}
+                      </button>
+                      <span className="dash-chip" title="v4 positions held">
+                        {lpWallets
+                          ? `${lpWallets.reduce(
+                              (n, w) => n + w.positions.length,
+                              0
+                            )} positions`
+                          : "—"}
+                      </span>
+                    </div>
+                  </div>
+                  {lpError && <p className="dash-error">{lpError}</p>}
+                  <div className="dash-tablewrap">
+                    <table className="dash-table">
+                      <thead>
+                        <tr>
+                          <th>Pool</th>
+                          <th>Position</th>
+                          <th>Distribution</th>
+                          <th>Value</th>
+                          <th>Fees</th>
+                          <th>APR</th>
+                          <th>Created</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(lpWallets ?? []).map((w) => {
+                          if (w.error) {
+                            return (
+                              <tr key={w.wallet}>
+                                <td colSpan={7}>
+                                  <WalletBadge wallet={w.wallet} />
+                                  <span className="dash-warn">
+                                    {w.error}
+                                  </span>
+                                </td>
+                              </tr>
+                            );
+                          }
+                          return (
+                            <Fragment key={w.wallet}>
+                              {w.positions.map((p) => {
+                                const [base, quote] = lpOrdered(p);
+                                const lo = fmtPriceSub(p.priceLower);
+                                const hi = fmtPriceSub(p.priceUpper);
+                                // pct0/pct1 follow token0/token1; display
+                                // follows base/quote order (native always
+                                // quoted second).
+                                const pBase = p.token0.isNative
+                                  ? p.pct1
+                                  : p.pct0;
+                                const pQuote = p.token0.isNative
+                                  ? p.pct0
+                                  : p.pct1;
+                                const hasDist =
+                                  pBase !== null && pQuote !== null;
+                                const wBase = hasDist ? (pBase as number) : 0;
+                                const wQuote = hasDist
+                                  ? (pQuote as number)
+                                  : 0;
+                                return (
+                                  <tr key={`${p.owner}-${p.tokenId}`}>
+                                    <td>
+                                      <span className="dash-num">
+                                        {base.symbol}/{quote.symbol}
+                                      </span>{" "}
+                                      <WalletBadge wallet={w.wallet} />
+                                      <span className="dash-sub">
+                                        v4 · {p.feeLabel}
+                                        {" · "}Robinhood Chain
+                                      </span>
+                                    </td>
+                                    <td>
+                                      <span
+                                        className={
+                                          p.inRange
+                                            ? "dash-ok"
+                                            : "dash-warn"
+                                        }
+                                        title={
+                                          p.inRange
+                                            ? "Current price is inside this range"
+                                            : "Current price is outside this range — the position earns no fees"
+                                        }
+                                      >
+                                        ●{" "}
+                                        {p.inRange
+                                          ? "in range"
+                                          : "out of range"}
+                                      </span>
+                                      <span className="dash-sub">
+                                        {lo.head}
+                                        {lo.sub && (
+                                          <sub className="lp-sub">
+                                            {lo.sub}
+                                          </sub>
+                                        )}
+                                        {" → "}
+                                        {hi.head}
+                                        {hi.sub && (
+                                          <sub className="lp-sub">
+                                            {hi.sub}
+                                          </sub>
+                                        )}{" "}
+                                        {quote.symbol}
+                                      </span>
+                                      <span className="dash-sub">
+                                        ticks {p.tickLower} → {p.tickUpper}
+                                      </span>
+                                    </td>
+                                    <td>
+                                      {hasDist ? (
+                                        <>
+                                          <span
+                                            className="lp-dist"
+                                            title={`${wBase.toFixed(1)}% ${
+                                              base.symbol
+                                            } · ${wQuote.toFixed(1)}% ${
+                                              quote.symbol
+                                            }`}
+                                          >
+                                            <span
+                                              className="lp-dist-a"
+                                              style={{ width: `${wBase}%` }}
+                                            />
+                                            <span
+                                              className="lp-dist-b"
+                                              style={{ width: `${wQuote}%` }}
+                                            />
+                                          </span>
+                                          <span className="dash-sub">
+                                            {wBase.toFixed(1)}% {base.symbol}{" "}
+                                            · {wQuote.toFixed(1)}%{" "}
+                                            {quote.symbol}
+                                          </span>
+                                        </>
+                                      ) : (
+                                        <span className="dash-sub">—</span>
+                                      )}
+                                    </td>
+                                    <td>
+                                      <span className="dash-num">
+                                        {p.valueUsd !== null
+                                          ? fmtUsd(p.valueUsd)
+                                          : "—"}
+                                      </span>
+                                      <span className="dash-sub">
+                                        {fmtAmt(p.amount0)} {p.token0.symbol}{" "}
+                                        + {fmtAmt(p.amount1)}{" "}
+                                        {p.token1.symbol}
+                                      </span>
+                                    </td>
+                                    <td>
+                                      <span className="dash-num">
+                                        {p.feesUsd !== null
+                                          ? fmtUsd(p.feesUsd)
+                                          : "—"}
+                                      </span>
+                                      <span className="dash-sub">
+                                        {fmtAmt(p.fees0)} {p.token0.symbol} +{" "}
+                                        {fmtAmt(p.fees1)} {p.token1.symbol}
+                                      </span>
+                                      <span className="dash-sub">
+                                        unclaimed
+                                      </span>
+                                    </td>
+                                    <td>
+                                      <span className="dash-num">
+                                        {p.apr !== null
+                                          ? `${p.apr.toFixed(2)}%`
+                                          : "—"}
+                                      </span>
+                                      <span
+                                        className="dash-sub"
+                                        title={
+                                          p.aprBasis
+                                            ? `Estimate — ${p.aprBasis}`
+                                            : undefined
+                                        }
+                                      >
+                                        {p.apr !== null ? (
+                                          <>
+                                            est.
+                                            {p.aprBasis
+                                              ? ` · ${p.aprBasis}`
+                                              : ""}
+                                          </>
+                                        ) : (
+                                          p.aprBasis ?? "—"
+                                        )}
+                                      </span>
+                                    </td>
+                                    <td>
+                                      <span className="dash-num">
+                                        {fmtDate(p.created)}
+                                      </span>
+                                      <span className="dash-sub">
+                                        token #{p.tokenId}
+                                      </span>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </Fragment>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                    {!lpLoading && (lpWallets ?? []).length === 0 && (
+                      <p className="dash-note">
+                        No Uniswap v4 LP positions found in the configured
+                        dashboard wallets.
+                      </p>
+                    )}
+                    {!lpLoading &&
+                      (lpWallets ?? []).length > 0 &&
+                      (lpWallets ?? []).every(
+                        (w) => w.positions.length === 0
+                      ) && (
+                        <p className="dash-note">
+                          No Uniswap v4 LP positions found in the configured
+                          dashboard wallets.
+                        </p>
+                      )}
+                    {lpLoading && lpWallets === null && (
+                      <p className="dash-note">Scanning PositionManager…</p>
+                    )}
+                  </div>
+                  <p className="dash-note">
+                    Positions are discovered from PositionManager Transfer
+                    events and verified by ownerOf · state via StateView ·
+                    APR is an estimate from recent pool swap volume, not a
+                    guarantee.
+                  </p>
+                </div>
                 ) : selHoldings.some((h) => h.nfts.length > 0) ? (
                   <div className="dash-tablewrap">
                     <ul className="dash-nftlist">
@@ -862,263 +1141,6 @@ export default function DashboardApp({
                     appear.
                   </p>
                 )}
-
-                {activeId === "robinhood-mainnet" && (
-                  <div className="dash-lpblock">
-                    <div className="dash-lpblock-head">
-                      <div>
-                        <h3>LP positions</h3>
-                        <p>
-                          Uniswap v4 positions on Robinhood Chain, grouped by
-                          wallet · read-only. APR is estimated from trailing
-                          swap volume.
-                        </p>
-                      </div>
-                      <div className="dash-actions">
-                        <button
-                          className="btn ghost dash-refresh"
-                          type="button"
-                          onClick={() => loadLp(depth)}
-                          disabled={lpLoading}
-                        >
-                          {lpLoading ? "Scanning…" : "Rescan"}
-                        </button>
-                        <span className="dash-chip" title="v4 positions held">
-                          {lpWallets
-                            ? `${lpWallets.reduce(
-                                (n, w) => n + w.positions.length,
-                                0
-                              )} positions`
-                            : "—"}
-                        </span>
-                      </div>
-                    </div>
-                    {lpError && <p className="dash-error">{lpError}</p>}
-                    <div className="dash-tablewrap">
-                      <table className="dash-table">
-                        <thead>
-                          <tr>
-                            <th>Pool</th>
-                            <th>Position</th>
-                            <th>Distribution</th>
-                            <th>Value</th>
-                            <th>Fees</th>
-                            <th>APR</th>
-                            <th>Created</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {(lpWallets ?? []).map((w) => {
-                            if (w.error) {
-                              return (
-                                <tr key={w.wallet}>
-                                  <td colSpan={7}>
-                                    <WalletBadge wallet={w.wallet} />
-                                    <span className="dash-warn">
-                                      {w.error}
-                                    </span>
-                                  </td>
-                                </tr>
-                              );
-                            }
-                            return (
-                              <Fragment key={w.wallet}>
-                                {w.positions.map((p) => {
-                                  const [base, quote] = lpOrdered(p);
-                                  const lo = fmtPriceSub(p.priceLower);
-                                  const hi = fmtPriceSub(p.priceUpper);
-                                  // pct0/pct1 follow token0/token1; display
-                                  // follows base/quote order (native always
-                                  // quoted second).
-                                  const pBase = p.token0.isNative
-                                    ? p.pct1
-                                    : p.pct0;
-                                  const pQuote = p.token0.isNative
-                                    ? p.pct0
-                                    : p.pct1;
-                                  const hasDist =
-                                    pBase !== null && pQuote !== null;
-                                  const wBase = hasDist ? (pBase as number) : 0;
-                                  const wQuote = hasDist
-                                    ? (pQuote as number)
-                                    : 0;
-                                  return (
-                                    <tr key={`${p.owner}-${p.tokenId}`}>
-                                      <td>
-                                        <span className="dash-num">
-                                          {base.symbol}/{quote.symbol}
-                                        </span>{" "}
-                                        <WalletBadge wallet={w.wallet} />
-                                        <span className="dash-sub">
-                                          v4 · {p.feeLabel}
-                                          {" · "}Robinhood Chain
-                                        </span>
-                                      </td>
-                                      <td>
-                                        <span
-                                          className={
-                                            p.inRange
-                                              ? "dash-ok"
-                                              : "dash-warn"
-                                          }
-                                          title={
-                                            p.inRange
-                                              ? "Current price is inside this range"
-                                              : "Current price is outside this range — the position earns no fees"
-                                          }
-                                        >
-                                          ●{" "}
-                                          {p.inRange
-                                            ? "in range"
-                                            : "out of range"}
-                                        </span>
-                                        <span className="dash-sub">
-                                          {lo.head}
-                                          {lo.sub && (
-                                            <sub className="lp-sub">
-                                              {lo.sub}
-                                            </sub>
-                                          )}
-                                          {" → "}
-                                          {hi.head}
-                                          {hi.sub && (
-                                            <sub className="lp-sub">
-                                              {hi.sub}
-                                            </sub>
-                                          )}{" "}
-                                          {quote.symbol}
-                                        </span>
-                                        <span className="dash-sub">
-                                          ticks {p.tickLower} → {p.tickUpper}
-                                        </span>
-                                      </td>
-                                      <td>
-                                        {hasDist ? (
-                                          <>
-                                            <span
-                                              className="lp-dist"
-                                              title={`${wBase.toFixed(1)}% ${
-                                                base.symbol
-                                              } · ${wQuote.toFixed(1)}% ${
-                                                quote.symbol
-                                              }`}
-                                            >
-                                              <span
-                                                className="lp-dist-a"
-                                                style={{ width: `${wBase}%` }}
-                                              />
-                                              <span
-                                                className="lp-dist-b"
-                                                style={{ width: `${wQuote}%` }}
-                                              />
-                                            </span>
-                                            <span className="dash-sub">
-                                              {wBase.toFixed(1)}% {base.symbol}{" "}
-                                              · {wQuote.toFixed(1)}%{" "}
-                                              {quote.symbol}
-                                            </span>
-                                          </>
-                                        ) : (
-                                          <span className="dash-sub">—</span>
-                                        )}
-                                      </td>
-                                      <td>
-                                        <span className="dash-num">
-                                          {p.valueUsd !== null
-                                            ? fmtUsd(p.valueUsd)
-                                            : "—"}
-                                        </span>
-                                        <span className="dash-sub">
-                                          {fmtAmt(p.amount0)} {p.token0.symbol}{" "}
-                                          + {fmtAmt(p.amount1)}{" "}
-                                          {p.token1.symbol}
-                                        </span>
-                                      </td>
-                                      <td>
-                                        <span className="dash-num">
-                                          {p.feesUsd !== null
-                                            ? fmtUsd(p.feesUsd)
-                                            : "—"}
-                                        </span>
-                                        <span className="dash-sub">
-                                          {fmtAmt(p.fees0)} {p.token0.symbol} +{" "}
-                                          {fmtAmt(p.fees1)} {p.token1.symbol}
-                                        </span>
-                                        <span className="dash-sub">
-                                          unclaimed
-                                        </span>
-                                      </td>
-                                      <td>
-                                        <span className="dash-num">
-                                          {p.apr !== null
-                                            ? `${p.apr.toFixed(2)}%`
-                                            : "—"}
-                                        </span>
-                                        <span
-                                          className="dash-sub"
-                                          title={
-                                            p.aprBasis
-                                              ? `Estimate — ${p.aprBasis}`
-                                              : undefined
-                                          }
-                                        >
-                                          {p.apr !== null ? (
-                                            <>
-                                              est.
-                                              {p.aprBasis
-                                                ? ` · ${p.aprBasis}`
-                                                : ""}
-                                            </>
-                                          ) : (
-                                            p.aprBasis ?? "—"
-                                          )}
-                                        </span>
-                                      </td>
-                                      <td>
-                                        <span className="dash-num">
-                                          {fmtDate(p.created)}
-                                        </span>
-                                        <span className="dash-sub">
-                                          token #{p.tokenId}
-                                        </span>
-                                      </td>
-                                    </tr>
-                                  );
-                                })}
-                              </Fragment>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                      {!lpLoading && (lpWallets ?? []).length === 0 && (
-                        <p className="dash-note">
-                          No Uniswap v4 LP positions found in the configured
-                          dashboard wallets.
-                        </p>
-                      )}
-                      {!lpLoading &&
-                        (lpWallets ?? []).length > 0 &&
-                        (lpWallets ?? []).every(
-                          (w) => w.positions.length === 0
-                        ) && (
-                          <p className="dash-note">
-                            No Uniswap v4 LP positions found in the configured
-                            dashboard wallets.
-                          </p>
-                        )}
-                      {lpLoading && lpWallets === null && (
-                        <p className="dash-note">Scanning PositionManager…</p>
-                      )}
-                    </div>
-                    <p className="dash-note">
-                      Positions are discovered from PositionManager Transfer
-                      events and verified by ownerOf · state via StateView ·
-                      APR is an estimate from recent pool swap volume, not a
-                      guarantee.
-                    </p>
-                  </div>
-                )}
-
                 <details className="dash-addrs">
                   <summary>
                     Addresses (
