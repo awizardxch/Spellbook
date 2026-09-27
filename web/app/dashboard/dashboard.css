@@ -1213,7 +1213,7 @@ button.dash-netinfo:hover strong {
 /* ---------- portfolio: network rail + holdings (Bankr-style) ---------- */
 .dash-portfolio {
   display: grid;
-  grid-template-columns: 320px minmax(0, 1fr);
+  grid-template-columns: 240px minmax(0, 1fr);
   gap: 18px;
   align-items: start;
 }

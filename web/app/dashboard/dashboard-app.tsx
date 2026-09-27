@@ -508,9 +508,8 @@ export default function DashboardApp({
               role="listbox"
               aria-label="Select network"
             >
-              {CHAINS.map((cfg) => {
+              {enabledChains.map((cfg) => {
                 const hs = holdingsFor(cfg.id);
-                const on = enabled[cfg.id];
                 const usdSum = hs.reduce(
                   (s, h) => s + (h.totalUsd != null ? Number(h.totalUsd) : 0),
                   0
@@ -520,9 +519,7 @@ export default function DashboardApp({
                 return (
                   <li
                     key={cfg.id}
-                    className={`dash-railitem${active ? " active" : ""}${
-                      on ? "" : " off"
-                    }`}
+                    className={`dash-railitem${active ? " active" : ""}`}
                   >
                     <button
                       type="button"
@@ -531,7 +528,6 @@ export default function DashboardApp({
                       className="dash-railrow"
                       title={`${cfg.networkLabel} ${cfg.env} — view holdings`}
                       onClick={() => {
-                        if (!enabled[cfg.id]) toggle(cfg.id);
                         setSelectedChain(cfg.id);
                       }}
                     >
