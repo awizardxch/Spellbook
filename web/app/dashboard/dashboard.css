@@ -1052,6 +1052,20 @@ button.dash-netinfo:hover strong {
   background: rgba(148, 163, 184, 0.06);
 }
 
+.dash-seg-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.dash-seg-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
 .dash-segbtn {
   background: none;
   border: none;
