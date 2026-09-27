@@ -1,10 +1,10 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useState } from "react";
-import { CHAINS, NETWORKS } from "@/lib/chains";
+import { CHAINS } from "@/lib/chains";
 import "./dashboard.css";
 
-type Tab = "portfolio" | "networks" | "activity";
+type Tab = "portfolio" | "activity";
 
 interface AddressHolding {
   /** 1-based position in the agent's derivation order (#1, #2, …) */
@@ -287,7 +287,10 @@ export default function DashboardApp({
   const [activityLoading, setActivityLoading] = useState(false);
   const [activityError, setActivityError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
-  const [expandedChain, setExpandedChain] = useState<string | null>(null);
+  // Network rail selection: the chain id shown in the holdings column.
+  const [selectedChain, setSelectedChain] = useState<string>(
+    "robinhood-mainnet"
+  );
   const [assetsTab, setAssetsTab] = useState<"assets" | "nfts">("assets");
   // How many derivation addresses per chain to query (1–100), persisted
   // per browser. The API defaults to all bound addresses when omitted.
@@ -409,8 +412,23 @@ export default function DashboardApp({
     setEnabled((prev) => ({ ...prev, [id]: !prev[id] }));
   }, []);
 
-  const visible = (holdings ?? []).filter((h) => enabled[h.id]);
-  const reporting = visible.filter((h) => h.total !== null).length;
+  const holdingsFor = (id: string) =>
+    (holdings ?? []).filter((h) => h.id === id);
+  const enabledChains = CHAINS.filter((c) => enabled[c.id]);
+  // The rail selection may point at a chain that was just toggled off —
+  // fall back to the first enabled chain so rail + holdings never disagree.
+  const selCfg =
+    CHAINS.find((c) => c.id === selectedChain && enabled[c.id]) ??
+    enabledChains[0] ??
+    null;
+  const activeId = selCfg?.id ?? null;
+  const selHoldings = activeId ? holdingsFor(activeId) : [];
+  const selUsd = selHoldings.reduce(
+    (s, h) => s + (h.totalUsd != null ? Number(h.totalUsd) : 0),
+    0
+  );
+  const selPriced = selHoldings.some((h) => h.totalUsd != null);
+  const selReporting = selHoldings.filter((h) => h.total !== null).length;
   const enabledCount = CHAINS.filter((c) => enabled[c.id]).length;
   const mainnetOn = CHAINS.filter(
     (c) => c.env === "mainnet" && enabled[c.id]
@@ -418,8 +436,6 @@ export default function DashboardApp({
   const testnetOn = CHAINS.filter(
     (c) => c.env === "testnet" && enabled[c.id]
   ).length;
-  const holdingsFor = (id: string) =>
-    (holdings ?? []).filter((h) => h.id === id);
 
   /* ---------------- dashboard ---------------- */
 
@@ -459,7 +475,6 @@ export default function DashboardApp({
         {(
           [
             ["portfolio", "Portfolio"],
-            ["networks", "Networks"],
             ["activity", "Activity"],
           ] as [Tab, string][]
         ).map(([id, label]) => (
@@ -478,373 +493,682 @@ export default function DashboardApp({
       </div>
 
       {tab === "portfolio" && (
-        <section>
-          <div className="dash-panel">
-            <div className="dash-panel-head">
-              <div>
-                <h2>Portfolio</h2>
-                <p>
-                  Testnet holdings, read-only. Balances load live from
-                  public testnet RPCs and the Chia relay.
-                </p>
-              </div>
-              <div className="dash-actions">
+        <section className="dash-portfolio">
+          {/* left: network rail — selector + per-chain toggles */}
+          <div className="dash-panel dash-rail">
+            <div className="dash-rail-head">
+              <h2>Networks</h2>
+              <span className="dash-chip" title="Chains enabled">
+                {enabledCount} / {CHAINS.length}
+              </span>
+            </div>
+            <ul
+              className="dash-raillist"
+              role="listbox"
+              aria-label="Select network"
+            >
+              {CHAINS.map((cfg) => {
+                const hs = holdingsFor(cfg.id);
+                const on = enabled[cfg.id];
+                const usdSum = hs.reduce(
+                  (s, h) => s + (h.totalUsd != null ? Number(h.totalUsd) : 0),
+                  0
+                );
+                const priced = hs.some((h) => h.totalUsd != null);
+                const active = activeId === cfg.id;
+                return (
+                  <li
+                    key={cfg.id}
+                    className={`dash-railitem${active ? " active" : ""}${
+                      on ? "" : " off"
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      role="option"
+                      aria-selected={active}
+                      className="dash-railrow"
+                      title={`${cfg.networkLabel} ${cfg.env} — view holdings`}
+                      onClick={() => {
+                        if (!enabled[cfg.id]) toggle(cfg.id);
+                        setSelectedChain(cfg.id);
+                      }}
+                    >
+                      <span
+                        className="dash-dot"
+                        style={{ background: cfg.color }}
+                      />
+                      <span className="dash-railname">
+                        <span>{cfg.networkLabel}</span>
+                        <span className="dash-sub">
+                          {cfg.env === "mainnet" ? "Mainnet" : "Testnet"}
+                        </span>
+                      </span>
+                      <span className="dash-railbal">
+                        {holdings ? (
+                          priced ? (
+                            fmtUsd(String(usdSum))
+                          ) : (
+                            <span className="dash-muted">—</span>
+                          )
+                        ) : (
+                          <span className="dash-muted">…</span>
+                        )}
+                      </span>
+                    </button>
+                    <button
+                      role="switch"
+                      aria-checked={on}
+                      aria-label={`Toggle ${cfg.networkLabel} ${cfg.env}`}
+                      className={`dash-switch${on ? " on" : ""}`}
+                      type="button"
+                      onClick={() => toggle(cfg.id)}
+                    >
+                      <span className="dash-knob" />
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+            <p className="dash-note">
+              Toggling refilters holdings immediately. Strictly read-only —
+              this page cannot approve, sign, or broadcast anything.
+            </p>
+          </div>
+
+          {/* right: holdings for the selected network */}
+          <div className="dash-panel dash-holdings">
+            {selCfg ? (
+              <>
+                <div className="dash-panel-head">
+                  <div>
+                    <h2>
+                      {selCfg.networkLabel}{" "}
+                      <span className={`dash-envtag dash-env-${selCfg.env}`}>
+                        {selCfg.env === "mainnet" ? "Mainnet" : "Testnet"}
+                      </span>
+                    </h2>
+                    <p>{selCfg.detail}</p>
+                  </div>
+                  <div className="dash-actions">
+                    <div
+                      className="dash-depth"
+                      title="How many derivation addresses per chain to query (1–100)"
+                    >
+                      <span className="dash-depth-label">Addresses</span>
+                      <button
+                        className="dash-depth-btn"
+                        type="button"
+                        onClick={() => changeDepth(depth - 1)}
+                        disabled={loading || depth <= 1}
+                        aria-label="Fewer addresses"
+                      >
+                        −
+                      </button>
+                      <span className="dash-depth-num">{depth}</span>
+                      <button
+                        className="dash-depth-btn"
+                        type="button"
+                        onClick={() => changeDepth(depth + 1)}
+                        disabled={loading || depth >= 100}
+                        aria-label="More addresses"
+                      >
+                        +
+                      </button>
+                    </div>
+                    <button
+                      className="btn ghost dash-refresh"
+                      type="button"
+                      onClick={() => refreshAll(depth)}
+                      disabled={loading || lpLoading}
+                    >
+                      {loading || lpLoading ? "Refreshing…" : "Refresh"}
+                    </button>
+                    <span className="dash-chip" title="Wallets reporting">
+                      {holdings
+                        ? `${selReporting} / ${selHoldings.length}`
+                        : "—"}{" "}
+                      reporting
+                    </span>
+                    <span className="dash-chip" title="Mode">
+                      {mainnetOn > 0 && (
+                        <span className="dash-mainnet">MAINNET</span>
+                      )}
+                      {mainnetOn > 0 && testnetOn > 0 && (
+                        <span className="dash-modesep"> + </span>
+                      )}
+                      {testnetOn > 0 && (
+                        <span className="dash-testnet">TESTNET</span>
+                      )}
+                      {mainnetOn === 0 && testnetOn === 0 && (
+                        <span className="dash-muted">OFF</span>
+                      )}
+                    </span>
+                  </div>
+                </div>
+
+                {loadError && (
+                  <p className="dash-error">
+                    Couldn&apos;t reach the holdings API: {loadError}
+                  </p>
+                )}
+
+                <div className="dash-holdmeta">
+                  <div className="dash-holdbal">
+                    <span className="dash-sub">Balance</span>
+                    <strong>
+                      {holdings ? (
+                        selPriced ? (
+                          fmtUsd(String(selUsd))
+                        ) : (
+                          <span className="dash-muted">—</span>
+                        )
+                      ) : (
+                        <span className="dash-muted">…</span>
+                      )}
+                    </strong>
+                  </div>
+                  <div className="dash-holdwallets">
+                    {selHoldings.map((h) => {
+                      const a0 = h.addresses[0];
+                      const ck = `sel-${wkey(h.wallet, h.id)}`;
+                      return (
+                        <div
+                          key={wkey(h.wallet, h.id)}
+                          className="dash-holdwallet"
+                        >
+                          <WalletBadge wallet={h.wallet} />
+                          {a0 ? (
+                            <>
+                              <code title={a0.address}>
+                                {truncate(a0.address)}
+                              </code>
+                              <button
+                                className="dash-copy"
+                                type="button"
+                                onClick={() => copy(a0.address, ck)}
+                                aria-label={`Copy ${h.wallet} ${h.label} address`}
+                              >
+                                {copied === ck ? "✓" : "⧉"}
+                              </button>
+                            </>
+                          ) : (
+                            <span className="dash-muted">no addresses</span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
                 <div
-                  className="dash-depth"
-                  title="How many derivation addresses per chain to query (1–100)"
+                  className="dash-seg"
+                  role="tablist"
+                  aria-label={`${selCfg.networkLabel} holdings view`}
                 >
-                  <span className="dash-depth-label">Addresses</span>
                   <button
-                    className="dash-depth-btn"
                     type="button"
-                    onClick={() => changeDepth(depth - 1)}
-                    disabled={loading || depth <= 1}
-                    aria-label="Fewer addresses"
+                    role="tab"
+                    aria-selected={assetsTab === "assets"}
+                    className={`dash-segbtn${
+                      assetsTab === "assets" ? " on" : ""
+                    }`}
+                    onClick={() => setAssetsTab("assets")}
                   >
-                    −
+                    Tokens
                   </button>
-                  <span className="dash-depth-num">{depth}</span>
                   <button
-                    className="dash-depth-btn"
                     type="button"
-                    onClick={() => changeDepth(depth + 1)}
-                    disabled={loading || depth >= 100}
-                    aria-label="More addresses"
+                    role="tab"
+                    aria-selected={assetsTab === "nfts"}
+                    className={`dash-segbtn${
+                      assetsTab === "nfts" ? " on" : ""
+                    }`}
+                    onClick={() => setAssetsTab("nfts")}
                   >
-                    +
+                    NFTs
+                    {selHoldings.some((h) => h.nfts.length > 0)
+                      ? ` (${selHoldings.reduce(
+                          (n, h) => n + h.nfts.length,
+                          0
+                        )})`
+                      : ""}
                   </button>
                 </div>
-                <button
-                  className="dash-netcount"
-                  type="button"
-                  onClick={() => setTab("networks")}
-                  title="Choose networks"
-                >
-                  {enabledCount} of {CHAINS.length} chains →
-                </button>
-                <button
-                  className="btn ghost dash-refresh"
-                  type="button"
-                  onClick={() => refreshAll(depth)}
-                  disabled={loading || lpLoading}
-                >
-                  {loading || lpLoading ? "Refreshing…" : "Refresh"}
-                </button>
-                <span className="dash-chip" title="Chains reporting">
-                  {holdings ? `${reporting} / ${visible.length}` : "—"} reporting
-                </span>
-                <span className="dash-chip" title="Chains enabled">
-                  {enabledCount} / {CHAINS.length} enabled
-                </span>
-                <span className="dash-chip" title="Mode">
-                  {mainnetOn > 0 && (
-                    <span className="dash-mainnet">MAINNET</span>
-                  )}
-                  {mainnetOn > 0 && testnetOn > 0 && (
-                    <span className="dash-modesep"> + </span>
-                  )}
-                  {testnetOn > 0 && (
-                    <span className="dash-testnet">TESTNET</span>
-                  )}
-                  {mainnetOn === 0 && testnetOn === 0 && (
-                    <span className="dash-muted">OFF</span>
-                  )}
-                </span>
-              </div>
-            </div>
 
-            {loadError && (
-              <p className="dash-error">
-                Couldn&apos;t reach the holdings API: {loadError}
-              </p>
-            )}
+                {assetsTab === "assets" ? (
+                  <div className="dash-tablewrap">
+                    <table className="dash-table">
+                      <thead>
+                        <tr>
+                          <th>Token</th>
+                          <th>Balance</th>
+                          <th>Value</th>
+                          <th>PnL</th>
+                          <th>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {selHoldings.map((h) => {
+                          const key = wkey(h.wallet, h.id);
+                          const cfg = CHAINS.find((c) => c.id === h.id);
+                          return (
+                            <Fragment key={key}>
+                              {h.total !== null && (
+                                <tr>
+                                  <td>
+                                    <span
+                                      className="dash-dot"
+                                      style={{
+                                        background: cfg?.color ?? "#8b5cf6",
+                                      }}
+                                    />
+                                    {NATIVE_NAMES[h.unit] ?? h.unit}
+                                    <span className="dash-sub">
+                                      {h.unit} · native
+                                    </span>
+                                    <WalletBadge wallet={h.wallet} />
+                                  </td>
+                                  <td className="dash-num">
+                                    {h.total}{" "}
+                                    <span className="dash-unit">{h.unit}</span>
+                                  </td>
+                                  <td className="dash-num">
+                                    {h.nativeUsd != null ? (
+                                      fmtUsd(h.nativeUsd)
+                                    ) : (
+                                      <span className="dash-muted">—</span>
+                                    )}
+                                  </td>
+                                  <td>
+                                    <span className="dash-muted">—</span>
+                                  </td>
+                                  <td />
+                                </tr>
+                              )}
+                              {h.tokens.map((t) => (
+                                <tr key={t.contract}>
+                                  <td>
+                                    <span className="dash-dot dash-dot-token" />
+                                    {t.name}
+                                    <span className="dash-sub">{t.symbol}</span>
+                                    <WalletBadge wallet={h.wallet} />
+                                  </td>
+                                  <td className="dash-num">
+                                    {t.qty}{" "}
+                                    <span className="dash-unit">
+                                      {t.symbol}
+                                    </span>
+                                  </td>
+                                  <td className="dash-num">
+                                    {t.usd != null ? (
+                                      fmtUsd(t.usd)
+                                    ) : (
+                                      <span
+                                        className="dash-muted"
+                                        title="no price feed for this token"
+                                      >
+                                        unpriced
+                                      </span>
+                                    )}
+                                  </td>
+                                  <td>
+                                    <span className="dash-muted">—</span>
+                                  </td>
+                                  <td>
+                                    {t.chartUrl && (
+                                      <a
+                                        href={t.chartUrl}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="dash-chart-link"
+                                        title={`Open ${t.symbol} chart (most liquid pool)`}
+                                        aria-label={`Open ${t.symbol} chart in a new tab`}
+                                      >
+                                        <svg
+                                          width="14"
+                                          height="14"
+                                          viewBox="0 0 24 24"
+                                          fill="none"
+                                          stroke="currentColor"
+                                          strokeWidth="2"
+                                          strokeLinecap="round"
+                                          strokeLinejoin="round"
+                                          aria-hidden="true"
+                                        >
+                                          <path d="M3 3v18h18" />
+                                          <path d="M7 15l4-6 4 3 5-8" />
+                                        </svg>
+                                      </a>
+                                    )}
+                                  </td>
+                                </tr>
+                              ))}
+                            </Fragment>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                    {!loading && selHoldings.length === 0 && (
+                      <p className="dash-note">
+                        No balances loaded for this chain.
+                      </p>
+                    )}
+                  </div>
+                ) : selHoldings.some((h) => h.nfts.length > 0) ? (
+                  <div className="dash-tablewrap">
+                    <ul className="dash-nftlist">
+                      {selHoldings.flatMap((h) =>
+                        h.nfts.map((n) => (
+                          <li
+                            key={`${h.wallet}:${n.contract}:${n.tokenId}`}
+                            className="dash-nft"
+                          >
+                            <WalletBadge wallet={h.wallet} />
+                            <span className="dash-nft-name">
+                              {n.name ?? "Unknown collection"}
+                            </span>
+                            <span className="dash-sub">#{n.tokenId}</span>
+                            <code title={n.contract}>
+                              {truncate(n.contract)}
+                            </code>
+                          </li>
+                        ))
+                      )}
+                    </ul>
+                  </div>
+                ) : (
+                  <p className="dash-note">
+                    No NFTs found in the recent activity window. Discovery
+                    scans recent inbound transfers — older holdings may not
+                    appear.
+                  </p>
+                )}
 
-            <div className="dash-tablewrap">
-              <table className="dash-table">
-                <thead>
-                  <tr>
-                    <th>Network</th>
-                    <th>Total balance</th>
-                    <th>Addresses</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {visible.map((h, i) => {
-                    const cfg = CHAINS.find((c) => c.id === h.id);
-                    const key = wkey(h.wallet, h.id);
-                    const open = expandedChain === key;
-                    const firstError = h.addresses.find(
-                      (a) => a.error
-                    )?.error;
-                    const assetCount =
-                      h.tokens.length + (h.total !== null ? 1 : 0);
-                    // One labeled header row each time the wallet changes —
-                    // the API returns wallets grouped, in binding order.
-                    const walletHead =
-                      i === 0 || visible[i - 1].wallet !== h.wallet;
-                    return (
-                      <Fragment key={key}>
-                        {walletHead && (
-                          <tr className="dash-walletrow">
-                            <td colSpan={4}>
-                              <WalletBadge wallet={h.wallet} />
-                              <span className="dash-sub dash-walletnote">
-                                {h.wallet.toLowerCase() === "bankr"
-                                  ? "separate Bankr wallet — not a Spellbook wallet"
-                                  : "agent\u2019s Spellbook wallets"}
-                              </span>
-                            </td>
+                {activeId === "robinhood-mainnet" && (
+                  <div className="dash-lpblock">
+                    <div className="dash-lpblock-head">
+                      <div>
+                        <h3>LP positions</h3>
+                        <p>
+                          Uniswap v4 positions on Robinhood Chain, grouped by
+                          wallet · read-only. APR is estimated from trailing
+                          swap volume.
+                        </p>
+                      </div>
+                      <div className="dash-actions">
+                        <button
+                          className="btn ghost dash-refresh"
+                          type="button"
+                          onClick={() => loadLp(depth)}
+                          disabled={lpLoading}
+                        >
+                          {lpLoading ? "Scanning…" : "Rescan"}
+                        </button>
+                        <span className="dash-chip" title="v4 positions held">
+                          {lpWallets
+                            ? `${lpWallets.reduce(
+                                (n, w) => n + w.positions.length,
+                                0
+                              )} positions`
+                            : "—"}
+                        </span>
+                      </div>
+                    </div>
+                    {lpError && <p className="dash-error">{lpError}</p>}
+                    <div className="dash-tablewrap">
+                      <table className="dash-table">
+                        <thead>
+                          <tr>
+                            <th>Pool</th>
+                            <th>Position</th>
+                            <th>Distribution</th>
+                            <th>Value</th>
+                            <th>Fees</th>
+                            <th>APR</th>
+                            <th>Created</th>
                           </tr>
-                        )}
-                        <tr
-                          className={`dash-chainrow${open ? " open" : ""}`}
-                          onClick={() =>
-                            setExpandedChain((cur) =>
-                              cur === key ? null : key
-                            )
-                          }
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter" || e.key === " ") {
-                              e.preventDefault();
-                              setExpandedChain((cur) =>
-                                cur === key ? null : key
+                        </thead>
+                        <tbody>
+                          {(lpWallets ?? []).map((w) => {
+                            if (w.error) {
+                              return (
+                                <tr key={w.wallet}>
+                                  <td colSpan={7}>
+                                    <WalletBadge wallet={w.wallet} />
+                                    <span className="dash-warn">
+                                      {w.error}
+                                    </span>
+                                  </td>
+                                </tr>
                               );
                             }
-                          }}
-                          tabIndex={0}
-                          aria-expanded={open}
-                          title={
-                            open ? "Collapse holdings" : "Expand holdings"
-                          }
-                        >
-                          <td>
-                            <span
-                              className="dash-dot"
-                              style={{ background: cfg?.color ?? "#8b5cf6" }}
-                            />
-                            {h.label}
-                            <span className="dash-sub">{h.detail}</span>
-                          </td>
-                          <td className="dash-num">
-                            {h.totalUsd != null ? (
-                              <>
-                                <span className="dash-usd">
-                                  {fmtUsd(h.totalUsd)}
-                                </span>
-                                <span className="dash-sub">
-                                  {h.total}{" "}
-                                  <span className="dash-unit">{h.unit}</span>
-                                  {assetCount > 1 &&
-                                    ` · ${assetCount} assets`}
-                                </span>
-                              </>
-                            ) : h.total !== null ? (
-                              <>
-                                {h.total}{" "}
-                                <span className="dash-unit">{h.unit}</span>
-                              </>
-                            ) : (
-                              <span className="dash-muted">—</span>
-                            )}
-                          </td>
-                          <td>
-                            <span className="dash-addr-toggle">
-                              <span className="dash-chev">
-                                {open ? "▾" : "▸"}
-                              </span>
-                              {h.addresses.length} of {h.watchAddresses}{" "}
-                              {h.watchAddresses === 1 ? "address" : "addresses"}
-                            </span>
-                          </td>
-                          <td>
-                            {h.total !== null ? (
-                              <span className="dash-ok">● live</span>
-                            ) : (
-                              <span
-                                className="dash-warn"
-                                title={firstError ?? "unavailable"}
-                              >
-                                ● unavailable
-                              </span>
-                            )}
-                          </td>
-                        </tr>
-                        {open && (
-                          <tr className="dash-subrow dash-assetsrow">
-                            <td colSpan={4}>
-                              <div className="dash-assets">
-                                <div
-                                  className="dash-seg"
-                                  role="tablist"
-                                  aria-label={`${h.label} holdings view`}
-                                >
-                                  <button
-                                    type="button"
-                                    role="tab"
-                                    aria-selected={assetsTab === "assets"}
-                                    className={`dash-segbtn${assetsTab === "assets" ? " on" : ""}`}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      setAssetsTab("assets");
-                                    }}
-                                  >
-                                    Assets
-                                    {assetCount > 0 ? ` (${assetCount})` : ""}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    role="tab"
-                                    aria-selected={assetsTab === "nfts"}
-                                    className={`dash-segbtn${assetsTab === "nfts" ? " on" : ""}`}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      setAssetsTab("nfts");
-                                    }}
-                                  >
-                                    NFTs
-                                    {h.nfts.length > 0
-                                      ? ` (${h.nfts.length})`
-                                      : ""}
-                                  </button>
-                                </div>
-                                {assetsTab === "assets" ? (
-                                  <ul className="dash-assetlist">
-                                    {h.total !== null && (
-                                      <li className="dash-asset dash-asset-native">
+                            return (
+                              <Fragment key={w.wallet}>
+                                {w.positions.map((p) => {
+                                  const [base, quote] = lpOrdered(p);
+                                  const lo = fmtPriceSub(p.priceLower);
+                                  const hi = fmtPriceSub(p.priceUpper);
+                                  // pct0/pct1 follow token0/token1; display
+                                  // follows base/quote order (native always
+                                  // quoted second).
+                                  const pBase = p.token0.isNative
+                                    ? p.pct1
+                                    : p.pct0;
+                                  const pQuote = p.token0.isNative
+                                    ? p.pct0
+                                    : p.pct1;
+                                  const hasDist =
+                                    pBase !== null && pQuote !== null;
+                                  const wBase = hasDist ? (pBase as number) : 0;
+                                  const wQuote = hasDist
+                                    ? (pQuote as number)
+                                    : 0;
+                                  return (
+                                    <tr key={`${p.owner}-${p.tokenId}`}>
+                                      <td>
+                                        <span className="dash-num">
+                                          {base.symbol}/{quote.symbol}
+                                        </span>{" "}
+                                        <WalletBadge wallet={w.wallet} />
+                                        <span className="dash-sub">
+                                          v4 · {p.feeLabel}
+                                          {" · "}Robinhood Chain
+                                        </span>
+                                      </td>
+                                      <td>
                                         <span
-                                          className="dash-dot"
-                                          style={{
-                                            background:
-                                              cfg?.color ?? "#8b5cf6",
-                                          }}
-                                        />
-                                        <span className="dash-asset-name">
-                                          {NATIVE_NAMES[h.unit] ?? h.unit}
-                                          <span className="dash-sub">
-                                            {h.unit} · native
-                                          </span>
-                                        </span>
-                                        <span className="dash-asset-qty">
-                                          {h.total}{" "}
-                                          <span className="dash-unit">
-                                            {h.unit}
-                                          </span>
-                                        </span>
-                                        <span className="dash-asset-usd">
-                                          {h.nativeUsd != null ? (
-                                            fmtUsd(h.nativeUsd)
-                                          ) : (
-                                            <span className="dash-muted">—</span>
-                                          )}
-                                        </span>
-                                      </li>
-                                    )}
-                                    {h.tokens.map((t) => (
-                                      <li
-                                        key={t.contract}
-                                        className="dash-asset"
-                                      >
-                                        <span className="dash-dot dash-dot-token" />
-                                        <span className="dash-asset-name">
-                                          {t.name}
-                                          <span className="dash-sub">
-                                            {t.symbol}
-                                          </span>
-                                        </span>
-                                        <span className="dash-asset-qty">
-                                          {t.qty}{" "}
-                                          <span className="dash-unit">
-                                            {t.symbol}
-                                          </span>
-                                        </span>
-                                        <span className="dash-asset-usd">
-                                          {t.usd != null ? (
-                                            fmtUsd(t.usd)
-                                          ) : (
-                                            <span
-                                              className="dash-muted"
-                                              title="no price feed for this token"
-                                            >
-                                              unpriced
-                                            </span>
-                                          )}
-                                        </span>
-                                        {t.chartUrl && (
-                                          <a
-                                            href={t.chartUrl}
-                                            target="_blank"
-                                            rel="noopener noreferrer"
-                                            className="dash-chart-link"
-                                            title={`Open ${t.symbol} chart (most liquid pool)`}
-                                            aria-label={`Open ${t.symbol} chart in a new tab`}
-                                          >
-                                            <svg
-                                              width="14"
-                                              height="14"
-                                              viewBox="0 0 24 24"
-                                              fill="none"
-                                              stroke="currentColor"
-                                              strokeWidth="2"
-                                              strokeLinecap="round"
-                                              strokeLinejoin="round"
-                                              aria-hidden="true"
-                                            >
-                                              <path d="M3 3v18h18" />
-                                              <path d="M7 15l4-6 4 3 5-8" />
-                                            </svg>
-                                          </a>
-                                        )}
-                                      </li>
-                                    ))}
-                                    {h.total === null &&
-                                      h.tokens.length === 0 && (
-                                        <li className="dash-asset-empty">
-                                          No balances loaded for this chain.
-                                        </li>
-                                      )}
-                                  </ul>
-                                ) : h.nfts.length > 0 ? (
-                                  <ul className="dash-nftlist">
-                                    {h.nfts.map((n) => (
-                                      <li
-                                        key={`${n.contract}:${n.tokenId}`}
-                                        className="dash-nft"
-                                      >
-                                        <span className="dash-nft-name">
-                                          {n.name ?? "Unknown collection"}
+                                          className={
+                                            p.inRange
+                                              ? "dash-ok"
+                                              : "dash-warn"
+                                          }
+                                          title={
+                                            p.inRange
+                                              ? "Current price is inside this range"
+                                              : "Current price is outside this range — the position earns no fees"
+                                          }
+                                        >
+                                          ●{" "}
+                                          {p.inRange
+                                            ? "in range"
+                                            : "out of range"}
                                         </span>
                                         <span className="dash-sub">
-                                          #{n.tokenId}
+                                          {lo.head}
+                                          {lo.sub && (
+                                            <sub className="lp-sub">
+                                              {lo.sub}
+                                            </sub>
+                                          )}
+                                          {" → "}
+                                          {hi.head}
+                                          {hi.sub && (
+                                            <sub className="lp-sub">
+                                              {hi.sub}
+                                            </sub>
+                                          )}{" "}
+                                          {quote.symbol}
                                         </span>
-                                        <code title={n.contract}>
-                                          {truncate(n.contract)}
-                                        </code>
-                                      </li>
-                                    ))}
-                                  </ul>
-                                ) : (
-                                  <p className="dash-note">
-                                    No NFTs found in the recent activity
-                                    window. Discovery scans recent inbound
-                                    transfers — older holdings may not
-                                    appear.
-                                  </p>
-                                )}
-                              </div>
-                            </td>
-                          </tr>
+                                        <span className="dash-sub">
+                                          ticks {p.tickLower} → {p.tickUpper}
+                                        </span>
+                                      </td>
+                                      <td>
+                                        {hasDist ? (
+                                          <>
+                                            <span
+                                              className="lp-dist"
+                                              title={`${wBase.toFixed(1)}% ${
+                                                base.symbol
+                                              } · ${wQuote.toFixed(1)}% ${
+                                                quote.symbol
+                                              }`}
+                                            >
+                                              <span
+                                                className="lp-dist-a"
+                                                style={{ width: `${wBase}%` }}
+                                              />
+                                              <span
+                                                className="lp-dist-b"
+                                                style={{ width: `${wQuote}%` }}
+                                              />
+                                            </span>
+                                            <span className="dash-sub">
+                                              {wBase.toFixed(1)}% {base.symbol}{" "}
+                                              · {wQuote.toFixed(1)}%{" "}
+                                              {quote.symbol}
+                                            </span>
+                                          </>
+                                        ) : (
+                                          <span className="dash-sub">—</span>
+                                        )}
+                                      </td>
+                                      <td>
+                                        <span className="dash-num">
+                                          {p.valueUsd !== null
+                                            ? fmtUsd(p.valueUsd)
+                                            : "—"}
+                                        </span>
+                                        <span className="dash-sub">
+                                          {fmtAmt(p.amount0)} {p.token0.symbol}{" "}
+                                          + {fmtAmt(p.amount1)}{" "}
+                                          {p.token1.symbol}
+                                        </span>
+                                      </td>
+                                      <td>
+                                        <span className="dash-num">
+                                          {p.feesUsd !== null
+                                            ? fmtUsd(p.feesUsd)
+                                            : "—"}
+                                        </span>
+                                        <span className="dash-sub">
+                                          {fmtAmt(p.fees0)} {p.token0.symbol} +{" "}
+                                          {fmtAmt(p.fees1)} {p.token1.symbol}
+                                        </span>
+                                        <span className="dash-sub">
+                                          unclaimed
+                                        </span>
+                                      </td>
+                                      <td>
+                                        <span className="dash-num">
+                                          {p.apr !== null
+                                            ? `${p.apr.toFixed(2)}%`
+                                            : "—"}
+                                        </span>
+                                        <span
+                                          className="dash-sub"
+                                          title={
+                                            p.aprBasis
+                                              ? `Estimate — ${p.aprBasis}`
+                                              : undefined
+                                          }
+                                        >
+                                          {p.apr !== null ? (
+                                            <>
+                                              est.
+                                              {p.aprBasis
+                                                ? ` · ${p.aprBasis}`
+                                                : ""}
+                                            </>
+                                          ) : (
+                                            p.aprBasis ?? "—"
+                                          )}
+                                        </span>
+                                      </td>
+                                      <td>
+                                        <span className="dash-num">
+                                          {fmtDate(p.created)}
+                                        </span>
+                                        <span className="dash-sub">
+                                          token #{p.tokenId}
+                                        </span>
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </Fragment>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                      {!lpLoading && (lpWallets ?? []).length === 0 && (
+                        <p className="dash-note">
+                          No Uniswap v4 LP positions found in the configured
+                          dashboard wallets.
+                        </p>
+                      )}
+                      {!lpLoading &&
+                        (lpWallets ?? []).length > 0 &&
+                        (lpWallets ?? []).every(
+                          (w) => w.positions.length === 0
+                        ) && (
+                          <p className="dash-note">
+                            No Uniswap v4 LP positions found in the configured
+                            dashboard wallets.
+                          </p>
                         )}
-                        {open &&
-                          h.addresses.map((a, i) => (
-                            <tr key={`${key}-${i}`} className="dash-subrow">
-                              <td>
-                                <span className="dash-idx">#{a.index}</span>
-                                <span className="dash-sub">
-                                  address #
-                                </span>
-                              </td>
-                              <td className="dash-num">
+                      {lpLoading && lpWallets === null && (
+                        <p className="dash-note">Scanning PositionManager…</p>
+                      )}
+                    </div>
+                    <p className="dash-note">
+                      Positions are discovered from PositionManager Transfer
+                      events and verified by ownerOf · state via StateView ·
+                      APR is an estimate from recent pool swap volume, not a
+                      guarantee.
+                    </p>
+                  </div>
+                )}
+
+                <details className="dash-addrs">
+                  <summary>
+                    Addresses (
+                    {selHoldings.reduce((n, h) => n + h.addresses.length, 0)}{" "}
+                    of{" "}
+                    {selHoldings.reduce((n, h) => n + h.watchAddresses, 0)})
+                  </summary>
+                  {selHoldings.length > 0 && (
+                    <ul className="dash-addrlist">
+                      {selHoldings.flatMap((h) =>
+                        h.addresses.map((a, i) => {
+                          const ck = `addr-${wkey(h.wallet, h.id)}-${i}`;
+                          return (
+                            <li key={ck}>
+                              <WalletBadge wallet={h.wallet} />
+                              <span className="dash-idx">#{a.index}</span>
+                              <code title={a.address}>
+                                {truncate(a.address)}
+                              </code>
+                              <button
+                                className="dash-copy"
+                                type="button"
+                                onClick={() => copy(a.address, ck)}
+                                aria-label={`Copy ${h.wallet} ${h.label} address #${a.index}`}
+                              >
+                                {copied === ck ? "✓" : "⧉"}
+                              </button>
+                              <span className="dash-num">
                                 {a.balance !== null ? (
                                   <>
                                     {a.balance}{" "}
@@ -853,424 +1177,31 @@ export default function DashboardApp({
                                 ) : (
                                   <span className="dash-muted">—</span>
                                 )}
-                              </td>
-                              <td>
-                                <code title={a.address}>
-                                  {truncate(a.address)}
-                                </code>{" "}
-                                <button
-                                  className="dash-copy"
-                                  type="button"
-                                  onClick={() =>
-                                    copy(a.address, `addr-${key}-${i}`)
-                                  }
-                                  aria-label={`Copy ${h.wallet} ${h.label} address #${a.index}`}
-                                >
-                                  {copied === `addr-${key}-${i}` ? "✓" : "⧉"}
-                                </button>
-                              </td>
-                              <td>
-                                {a.balance !== null ? (
-                                  <span className="dash-ok">●</span>
-                                ) : (
-                                  <span
-                                    className="dash-warn"
-                                    title={a.error ?? "unavailable"}
-                                  >
-                                    ●
-                                  </span>
-                                )}
-                              </td>
-                            </tr>
-                          ))}
-                      </Fragment>
-                    );
-                  })}
-                </tbody>
-              </table>
-              {!loading && visible.length === 0 && (
-                <p className="dash-note">
-                  All chains are toggled off — enable at least one in the{" "}
-                  <button
-                    className="dash-linkbtn"
-                    type="button"
-                    onClick={() => setTab("networks")}
-                  >
-                    Networks tab
-                  </button>
-                  .
-                </p>
-              )}
-            </div>
-            <p className="dash-note">
-              Mainnet and testnet balances side by side · strictly
-              read-only. This page cannot approve, sign, or broadcast
-              anything — mainnet rows are live balances, not a spending
-              interface.
-            </p>
-          </div>
-
-          <div className="dash-panel">
-            <div className="dash-panel-head">
-              <div>
-                <h2>LP positions</h2>
-                <p>
-                  Uniswap v4 positions on Robinhood Chain, grouped by
-                  wallet · read-only. APR is estimated from trailing
-                  swap volume.
-                </p>
-              </div>
-              <div className="dash-actions">
-                <button
-                  className="btn ghost dash-refresh"
-                  type="button"
-                  onClick={() => loadLp(depth)}
-                  disabled={lpLoading}
-                >
-                  {lpLoading ? "Scanning…" : "Rescan"}
-                </button>
-                <span className="dash-chip" title="v4 positions held">
-                  {lpWallets
-                    ? `${lpWallets.reduce(
-                        (n, w) => n + w.positions.length,
-                        0
-                      )} positions`
-                    : "—"}
-                </span>
-              </div>
-            </div>
-            {lpError && <p className="dash-error">{lpError}</p>}
-            <div className="dash-tablewrap">
-              <table className="dash-table">
-                <thead>
-                  <tr>
-                    <th>Pool</th>
-                    <th>Position</th>
-                    <th>Distribution</th>
-                    <th>Value</th>
-                    <th>Fees</th>
-                    <th>APR</th>
-                    <th>Created</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(lpWallets ?? []).map((w) => {
-                    if (w.error) {
-                      return (
-                        <Fragment key={w.wallet}>
-                          <tr className="dash-walletrow">
-                            <td colSpan={7}>
-                              <span
-                                className={`dash-wallet ${
-                                  w.wallet === "Bankr"
-                                    ? "dash-wallet-bankr"
-                                    : ""
-                                }`}
-                              >
-                                {w.wallet}
                               </span>
-                              <span className="dash-walletnote">
-                                {w.addresses.length} addresses
-                              </span>
-                            </td>
-                          </tr>
-                          <tr>
-                            <td colSpan={7}>
-                              <span className="dash-warn">{w.error}</span>
-                            </td>
-                          </tr>
-                        </Fragment>
-                      );
-                    }
-                    return (
-                      <Fragment key={w.wallet}>
-                        <tr className="dash-walletrow">
-                          <td colSpan={7}>
-                            <span
-                              className={`dash-wallet ${
-                                w.wallet === "Bankr" ? "dash-wallet-bankr" : ""
-                              }`}
-                            >
-                              {w.wallet}
-                            </span>
-                            <span className="dash-walletnote">
-                              {w.addresses.length} addresses ·{" "}
-                              {w.positions.length} positions
-                            </span>
-                          </td>
-                        </tr>
-                        {w.positions.map((p) => {
-                          const [base, quote] = lpOrdered(p);
-                          const lo = fmtPriceSub(p.priceLower);
-                          const hi = fmtPriceSub(p.priceUpper);
-                          // pct0/pct1 follow token0/token1; display follows
-                          // base/quote order (native always quoted second).
-                          const pBase = p.token0.isNative ? p.pct1 : p.pct0;
-                          const pQuote = p.token0.isNative ? p.pct0 : p.pct1;
-                          const hasDist = pBase !== null && pQuote !== null;
-                          const wBase = hasDist ? (pBase as number) : 0;
-                          const wQuote = hasDist ? (pQuote as number) : 0;
-                          return (
-                            <tr key={`${p.owner}-${p.tokenId}`}>
-                              <td>
-                                <span className="dash-num">
-                                  {base.symbol}/{quote.symbol}
-                                </span>
-                                <span className="dash-sub">
-                                  v4 · {p.feeLabel}
-                                  {" · "}Robinhood Chain
-                                </span>
-                              </td>
-                              <td>
-                                <span
-                                  className={p.inRange ? "dash-ok" : "dash-warn"}
-                                  title={
-                                    p.inRange
-                                      ? "Current price is inside this range"
-                                      : "Current price is outside this range — the position earns no fees"
-                                  }
-                                >
-                                  ● {p.inRange ? "in range" : "out of range"}
-                                </span>
-                                <span className="dash-sub">
-                                  {lo.head}
-                                  {lo.sub && (
-                                    <sub className="lp-sub">{lo.sub}</sub>
-                                  )}
-                                  {" → "}
-                                  {hi.head}
-                                  {hi.sub && (
-                                    <sub className="lp-sub">{hi.sub}</sub>
-                                  )}{" "}
-                                  {quote.symbol}
-                                </span>
-                                <span className="dash-sub">
-                                  ticks {p.tickLower} → {p.tickUpper}
-                                </span>
-                              </td>
-                              <td>
-                                {hasDist ? (
-                                  <>
-                                    <span
-                                      className="lp-dist"
-                                      title={`${wBase.toFixed(1)}% ${base.symbol} · ${wQuote.toFixed(1)}% ${quote.symbol}`}
-                                    >
-                                      <span
-                                        className="lp-dist-a"
-                                        style={{ width: `${wBase}%` }}
-                                      />
-                                      <span
-                                        className="lp-dist-b"
-                                        style={{ width: `${wQuote}%` }}
-                                      />
-                                    </span>
-                                    <span className="dash-sub">
-                                      {wBase.toFixed(1)}% {base.symbol} ·{" "}
-                                      {wQuote.toFixed(1)}% {quote.symbol}
-                                    </span>
-                                  </>
-                                ) : (
-                                  <span className="dash-sub">—</span>
-                                )}
-                              </td>
-                              <td>
-                                <span className="dash-num">
-                                  {p.valueUsd !== null
-                                    ? fmtUsd(p.valueUsd)
-                                    : "—"}
-                                </span>
-                                <span className="dash-sub">
-                                  {fmtAmt(p.amount0)} {p.token0.symbol} +{" "}
-                                  {fmtAmt(p.amount1)} {p.token1.symbol}
-                                </span>
-                              </td>
-                              <td>
-                                <span className="dash-num">
-                                  {p.feesUsd !== null
-                                    ? fmtUsd(p.feesUsd)
-                                    : "—"}
-                                </span>
-                                <span className="dash-sub">
-                                  {fmtAmt(p.fees0)} {p.token0.symbol} +{" "}
-                                  {fmtAmt(p.fees1)} {p.token1.symbol}
-                                </span>
-                                <span className="dash-sub">unclaimed</span>
-                              </td>
-                              <td>
-                                <span className="dash-num">
-                                  {p.apr !== null
-                                    ? `${p.apr.toFixed(2)}%`
-                                    : "—"}
-                                </span>
-                                <span
-                                  className="dash-sub"
-                                  title={
-                                    p.aprBasis
-                                      ? `Estimate — ${p.aprBasis}`
-                                      : undefined
-                                  }
-                                >
-                                  {p.apr !== null ? (
-                                    <>
-                                      est.
-                                      {p.aprBasis ? ` · ${p.aprBasis}` : ""}
-                                    </>
-                                  ) : (
-                                    p.aprBasis ?? "—"
-                                  )}
-                                </span>
-                              </td>
-                              <td>
-                                <span className="dash-num">
-                                  {fmtDate(p.created)}
-                                </span>
-                                <span className="dash-sub">
-                                  token #{p.tokenId}
-                                </span>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </Fragment>
-                    );
-                  })}
-                </tbody>
-              </table>
-              {!lpLoading && (lpWallets ?? []).length === 0 && (
-                <p className="dash-note">
-                  No Uniswap v4 LP positions found in the configured
-                  dashboard wallets.
-                </p>
-              )}
-              {!lpLoading &&
-                (lpWallets ?? []).length > 0 &&
-                (lpWallets ?? []).every((w) => w.positions.length === 0) && (
-                  <p className="dash-note">
-                    No Uniswap v4 LP positions found in the configured
-                    dashboard wallets.
-                  </p>
-                )}
-              {lpLoading && lpWallets === null && (
-                <p className="dash-note">Scanning PositionManager…</p>
-              )}
-            </div>
-            <p className="dash-note">
-              Positions are discovered from PositionManager Transfer
-              events and verified by ownerOf · state via StateView ·
-              APR is an estimate from recent pool swap volume, not a
-              guarantee.
-            </p>
-          </div>
-        </section>
-      )}
-
-      {tab === "networks" && (
-        <section>
-          <div className="dash-panel">
-            <div className="dash-panel-head">
-              <div>
-                <h2>Networks</h2>
-                <p>
-                  Choose which networks the dashboard interacts with and
-                  displays — toggling immediately refilters the Portfolio.
-                </p>
-              </div>
-            </div>
-            <div className="dash-netlist">
-              {NETWORKS.map((net) => {
-                const pair = [ "mainnet", "testnet" ].map(
-                  (env) => net.chains.find((c) => c.env === env)!
-                );
-                const anyOn = pair.some((cfg) => enabled[cfg.id]);
-                return (
-                  <div
-                    key={net.id}
-                    className={`dash-card dash-netrow${anyOn ? "" : " off"}`}
-                  >
-                    <span
-                      className="dash-dot dash-dot-lg"
-                      style={{ background: pair[0].color }}
-                    />
-                    <div className="dash-netinfo">
-                      <strong>{net.label}</strong>
-                      <span className="dash-sub">
-                        {pair[0].detail} · {pair[1].detail}
-                      </span>
-                    </div>
-                    <div className="dash-netenvs">
-                      {pair.map((cfg) => {
-                        const hs = holdingsFor(cfg.id);
-                        const on = enabled[cfg.id];
-                        const firstError = hs
-                          .flatMap((h) => h.addresses)
-                          .find((a) => a.error)?.error;
-                        return (
-                          <div
-                            key={cfg.id}
-                            className={`dash-netenv${on ? "" : " off"}`}
-                          >
-                            <span
-                              className={`dash-envtag dash-env-${cfg.env}`}
-                            >
-                              {cfg.env === "mainnet" ? "Mainnet" : "Testnet"}
-                            </span>
-                            <span
-                              className="dash-netbal"
-                              title={firstError ?? undefined}
-                            >
-                              {hs.length > 0 ? (
-                                hs.map((h) => (
-                                  <span
-                                    key={wkey(h.wallet, h.id)}
-                                    className="dash-netwal"
-                                  >
-                                    <WalletBadge wallet={h.wallet} />
-                                    {h.total != null ? (
-                                      <span className="dash-netbalv">
-                                        {h.total}{" "}
-                                        <span className="dash-unit">
-                                          {h.unit}
-                                        </span>
-                                      </span>
-                                    ) : (
-                                      <span className="dash-muted">
-                                        {holdings ? "unavailable" : "…"}
-                                      </span>
-                                    )}
-                                  </span>
-                                ))
+                              {a.balance !== null ? (
+                                <span className="dash-ok">●</span>
                               ) : (
-                                <span className="dash-muted">
-                                  {holdings ? "unavailable" : "…"}
+                                <span
+                                  className="dash-warn"
+                                  title={a.error ?? "unavailable"}
+                                >
+                                  ●
                                 </span>
                               )}
-                            </span>
-                            <button
-                              role="switch"
-                              aria-checked={on}
-                              aria-label={`Toggle ${net.label} ${cfg.env}`}
-                              className={`dash-switch${on ? " on" : ""}`}
-                              type="button"
-                              onClick={() => toggle(cfg.id)}
-                            >
-                              <span className="dash-knob" />
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-            <p className="dash-note">
-              Each side toggles independently and immediately refilters the
-              Portfolio. Base Sepolia and ETH Sepolia read 0 until funded
-              there. Chia mainnet reads through its own relay — without{" "}
-              <code>SPELLBOOK_RELAY_URL_MAINNET</code> it shows unavailable.
-              Everything here is read-only: the dashboard never signs or
-              broadcasts.
-            </p>
+                            </li>
+                          );
+                        })
+                      )}
+                    </ul>
+                  )}
+                </details>
+              </>
+            ) : (
+              <p className="dash-note">
+                All chains are toggled off — enable at least one from the
+                network list.
+              </p>
+            )}
           </div>
         </section>
       )}
