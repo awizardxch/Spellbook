@@ -1398,40 +1398,46 @@
 }
 
 /* ---------- network quick-switcher: button + dropdown with per-network sliders ---------- */
-/* The button now lives in the global top nav (next to the profile chip);
+/* The button lives in the tab-bar row (Portfolio / Activity), right-aligned;
  * the dropdown carries the per-network slider (toggle) selection. */
 
 .dash-netsel {
   position: relative;
 }
 
-/* In the top nav: keep the button compact and right-align the dropdown so it
- * never overflows the viewport edge. */
-.dash-nav-netsel .dash-netdrop {
+/* In the tab row: push the button to the right edge and right-align the
+ * dropdown so it never overflows the viewport edge. */
+.dash-tabs-netsel {
+  margin-left: auto;
+  align-self: center;
+  flex-shrink: 0;
+}
+
+.dash-tabs-netsel .dash-netdrop {
   left: auto;
   right: 0;
 }
 
-.dash-nav .dash-netbtn {
-  padding: 6px 10px;
+.dash-tabs .dash-netbtn {
+  padding: 7px 12px;
   font-size: 0.85rem;
   gap: 8px;
   border-radius: 10px;
 }
 
-.dash-nav .dash-netbtn-label {
-  max-width: 140px;
+.dash-tabs .dash-netbtn-label {
+  max-width: 160px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 @media (max-width: 640px) {
-  .dash-nav .dash-netbtn .dash-envtag {
+  .dash-tabs .dash-netbtn .dash-envtag {
     display: none;
   }
-  .dash-nav .dash-netbtn-label {
-    max-width: 72px;
+  .dash-tabs .dash-netbtn-label {
+    max-width: 84px;
   }
 }
 
