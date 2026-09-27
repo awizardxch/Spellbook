@@ -526,6 +526,23 @@
   min-width: 0;
 }
 
+/* The network name block doubles as a select button — reset button chrome. */
+button.dash-netinfo {
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 8px;
+}
+
+button.dash-netinfo:hover strong {
+  color: #22d3ee;
+}
+
 .dash-netinfo strong {
   display: block;
   font-size: 0.98rem;
@@ -584,6 +601,19 @@
   display: flex;
   align-items: center;
   gap: 10px;
+  cursor: pointer;
+  border-radius: 8px;
+  padding: 2px 4px;
+  margin: -2px -4px;
+}
+
+.dash-netenv:hover {
+  background: rgba(139, 92, 246, 0.08);
+}
+
+.dash-netenv.sel {
+  background: rgba(139, 92, 246, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(139, 92, 246, 0.4);
 }
 
 .dash-netenv.off {
@@ -1395,219 +1425,4 @@
 
 .dash-addrlist .dash-wallet {
   margin-right: 0;
-}
-
-/* ---------- network quick-switcher: button + dropdown with per-network sliders ---------- */
-/* The button lives in the tab-bar row (Portfolio / Activity), right-aligned;
- * the dropdown carries the per-network slider (toggle) selection. */
-
-.dash-netsel {
-  position: relative;
-}
-
-/* In the tab row: push the button to the right edge and right-align the
- * dropdown so it never overflows the viewport edge. */
-.dash-tabs-netsel {
-  margin-left: auto;
-  align-self: center;
-  flex-shrink: 0;
-}
-
-.dash-tabs-netsel .dash-netdrop {
-  left: auto;
-  right: 0;
-}
-
-.dash-tabs .dash-netbtn {
-  padding: 7px 12px;
-  font-size: 0.85rem;
-  gap: 8px;
-  border-radius: 10px;
-}
-
-.dash-tabs .dash-netbtn-label {
-  max-width: 160px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-@media (max-width: 640px) {
-  .dash-tabs .dash-netbtn .dash-envtag {
-    display: none;
-  }
-  .dash-tabs .dash-netbtn-label {
-    max-width: 84px;
-  }
-}
-
-.dash-netbtn {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  background: rgba(148, 163, 184, 0.07);
-  border: 1px solid var(--card-border);
-  border-radius: 12px;
-  color: var(--text);
-  padding: 8px 14px;
-  font-size: 0.95rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: border-color 0.15s ease;
-}
-
-.dash-netbtn:hover {
-  border-color: #8b5cf6;
-}
-
-.dash-netbtn .dash-dot {
-  margin-right: 0;
-}
-
-.dash-netbtn-chev {
-  color: var(--muted);
-  font-size: 0.78rem;
-  line-height: 1;
-}
-
-.dash-netdrop-backdrop {
-  position: fixed;
-  inset: 0;
-  background: transparent;
-  border: 0;
-  padding: 0;
-  cursor: default;
-  z-index: 41;
-}
-
-.dash-netdrop {
-  position: absolute;
-  top: calc(100% + 8px);
-  left: 0;
-  min-width: 330px;
-  max-width: calc(100vw - 64px);
-  max-height: 400px;
-  overflow-y: auto;
-  list-style: none;
-  margin: 0;
-  padding: 6px;
-  background: #10151d;
-  border: 1px solid var(--card-border);
-  border-radius: 14px;
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
-  z-index: 42;
-}
-
-.dash-netdroprow {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  border-radius: 10px;
-  padding: 4px 6px;
-}
-
-.dash-netdroprow:hover,
-.dash-netdroprow.active {
-  background: rgba(139, 92, 246, 0.12);
-}
-
-.dash-netdroprow-main {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  background: none;
-  border: 0;
-  color: var(--text);
-  cursor: pointer;
-  padding: 7px 8px;
-  text-align: left;
-  border-radius: 8px;
-  min-width: 0;
-}
-
-.dash-netdroprow-name {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  font-size: 0.88rem;
-  font-weight: 600;
-}
-
-.dash-netdroprow .dash-railbal {
-  font-size: 0.84rem;
-}
-
-/* compact slider inside the dropdown rows */
-.dash-netdroprow .dash-switch {
-  width: 38px;
-  height: 22px;
-}
-
-.dash-netdroprow .dash-switch .dash-knob {
-  width: 16px;
-  height: 16px;
-}
-
-.dash-netdroprow .dash-switch.on .dash-knob {
-  left: 18px;
-}
-
-/* Network selection lives in the top-nav button; the holdings header
- * keeps only the controls (Addresses stepper, Refresh, reporting chip,
- * mode chip) in one row. */
-.dash-headrow {
-  margin-bottom: 14px;
-}
-
-.dash-holdings .dash-headrow {
-  flex-wrap: nowrap;
-  align-items: center;
-}
-
-.dash-actions-row {
-  flex-wrap: nowrap;
-  gap: 10px;
-  overflow-x: auto;
-  width: 100%;
-  padding-bottom: 2px;
-}
-
-/* responsive: the rail becomes a horizontal selector above holdings */
-@media (max-width: 960px) {
-  .dash-portfolio {
-    grid-template-columns: 1fr;
-  }
-
-  .dash-rail {
-    position: static;
-  }
-
-  .dash-raillist {
-    flex-direction: row;
-    overflow-x: auto;
-    padding-bottom: 6px;
-  }
-
-  .dash-railitem {
-    flex: 0 0 auto;
-  }
-
-  .dash-railrow {
-    white-space: nowrap;
-  }
-
-  .dash-rail .dash-note {
-    display: none;
-  }
-
-  .dash-netdrop {
-    min-width: 280px;
-  }
-
-  .dash-actions-row {
-    -webkit-overflow-scrolling: touch;
-  }
 }

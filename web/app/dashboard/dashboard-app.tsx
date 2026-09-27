@@ -1,10 +1,10 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useState } from "react";
-import { CHAINS } from "@/lib/chains";
+import { CHAINS, NETWORKS } from "@/lib/chains";
 import "./dashboard.css";
 
-type Tab = "portfolio" | "activity";
+type Tab = "portfolio" | "networks" | "activity";
 
 interface AddressHolding {
   /** 1-based position in the agent's derivation order (#1, #2, …) */
@@ -288,11 +288,9 @@ export default function DashboardApp({
   const [activityError, setActivityError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   // Network rail selection: the chain id shown in the holdings column.
-  const [selectedChain, setSelectedChain] = useState<string>(
-    "robinhood-mainnet"
+  const [selectedChain, setSelectedChain] = useState<string>(    "robinhood-mainnet"
   );
-  // Top-bar network quick-switcher dropdown (mirrors the left rail).
-  const [netDropOpen, setNetDropOpen] = useState(false);
+  // Network rail + Networks tab selection: the chain id shown in the holdings column.
   const [assetsTab, setAssetsTab] = useState<"assets" | "nfts">("assets");
   // How many derivation addresses per chain to query (1–100), persisted
   // per browser. The API defaults to all bound addresses when omitted.
@@ -477,6 +475,7 @@ export default function DashboardApp({
         {(
           [
             ["portfolio", "Portfolio"],
+            ["networks", "Networks"],
             ["activity", "Activity"],
           ] as [Tab, string][]
         ).map(([id, label]) => (
@@ -492,121 +491,6 @@ export default function DashboardApp({
             {id === "activity" && <span className="dash-badge live">live</span>}
           </button>
         ))}
-        <div className="dash-netsel dash-tabs-netsel">
-          <button
-            type="button"
-            className="dash-netbtn"
-            aria-haspopup="listbox"
-            aria-expanded={netDropOpen}
-            aria-label={
-              selCfg
-                ? `Select network, current: ${selCfg.networkLabel} ${selCfg.env}`
-                : "Select network"
-            }
-            onClick={() => setNetDropOpen((v) => !v)}
-          >
-            {selCfg ? (
-              <>
-                <span
-                  className="dash-dot"
-                  style={{ background: selCfg.color }}
-                />
-                <span className="dash-netbtn-label">
-                  {selCfg.networkLabel}
-                </span>
-                <span className={`dash-envtag dash-env-${selCfg.env}`}>
-                  {selCfg.env === "mainnet" ? "Mainnet" : "Testnet"}
-                </span>
-              </>
-            ) : (
-              <span className="dash-netbtn-label">Network</span>
-            )}
-            <span className="dash-netbtn-chev" aria-hidden>
-              ▾
-            </span>
-          </button>
-          {netDropOpen && (
-            <>
-              <button
-                type="button"
-                className="dash-netdrop-backdrop"
-                aria-label="Close network selector"
-                onClick={() => setNetDropOpen(false)}
-              />
-              <ul
-                className="dash-netdrop"
-                role="listbox"
-                aria-label="Select network"
-              >
-                {CHAINS.map((cfg) => {
-                  const hs = holdingsFor(cfg.id);
-                  const on = enabled[cfg.id];
-                  const usdSum = hs.reduce(
-                    (s, h) =>
-                      s +
-                      (h.totalUsd != null ? Number(h.totalUsd) : 0),
-                    0
-                  );
-                  const priced = hs.some((h) => h.totalUsd != null);
-                  const active = activeId === cfg.id;
-                  return (
-                    <li
-                      key={cfg.id}
-                      className={`dash-netdroprow${
-                        active ? " active" : ""
-                      }`}
-                    >
-                      <button
-                        type="button"
-                        role="option"
-                        aria-selected={active}
-                        className="dash-netdroprow-main"
-                        title={`${cfg.networkLabel} ${cfg.env} — view holdings`}
-                        onClick={() => {
-                          if (!enabled[cfg.id]) toggle(cfg.id);
-                          setSelectedChain(cfg.id);
-                          setNetDropOpen(false);
-                        }}
-                      >
-                        <span
-                          className="dash-dot"
-                          style={{ background: cfg.color }}
-                        />
-                        <span className="dash-netdroprow-name">
-                          <span>{cfg.networkLabel}</span>
-                          <span className="dash-sub">
-                            {cfg.env === "mainnet" ? "Mainnet" : "Testnet"}
-                          </span>
-                        </span>
-                        <span className="dash-railbal">
-                          {holdings ? (
-                            priced ? (
-                              fmtUsd(String(usdSum))
-                            ) : (
-                              <span className="dash-muted">—</span>
-                            )
-                          ) : (
-                            <span className="dash-muted">…</span>
-                          )}
-                        </span>
-                      </button>
-                      <button
-                        role="switch"
-                        aria-checked={on}
-                        aria-label={`Toggle ${cfg.networkLabel} ${cfg.env}`}
-                        className={`dash-switch${on ? " on" : ""}`}
-                        type="button"
-                        onClick={() => toggle(cfg.id)}
-                      >
-                        <span className="dash-knob" />
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            </>
-          )}
-        </div>
       </div>
 
       {tab === "portfolio" && (
@@ -1300,6 +1184,150 @@ export default function DashboardApp({
                 network list.
               </p>
             )}
+          </div>
+        </section>
+      )}
+
+      {tab === "networks" && (
+        <section>
+          <div className="dash-panel">
+            <div className="dash-panel-head">
+              <div>
+                <h2>Networks</h2>
+                <p>
+                  Choose which networks the dashboard interacts with and
+                  displays — toggling immediately refilters the Portfolio.
+                </p>
+              </div>
+            </div>
+            <div className="dash-netlist">
+              {NETWORKS.map((net) => {
+                const pair = (["mainnet", "testnet"] as const).map(
+                  (env) => net.chains.find((c) => c.env === env)!
+                );
+                const anyOn = pair.some((cfg) => enabled[cfg.id]);
+                const firstOn =
+                  pair.find((cfg) => enabled[cfg.id]) ?? pair[0];
+                return (
+                  <div
+                    key={net.id}
+                    className={`dash-card dash-netrow${anyOn ? "" : " off"}`}
+                  >
+                    <span
+                      className="dash-dot dash-dot-lg"
+                      style={{ background: pair[0].color }}
+                    />
+                    <button
+                      type="button"
+                      className="dash-netinfo"
+                      title={`View ${net.label} holdings`}
+                      onClick={() => {
+                        if (!enabled[firstOn.id]) toggle(firstOn.id);
+                        setSelectedChain(firstOn.id);
+                        setTab("portfolio");
+                      }}
+                    >
+                      <strong>{net.label}</strong>
+                      <span className="dash-sub">
+                        {pair[0].detail} · {pair[1].detail}
+                      </span>
+                    </button>
+                    <div className="dash-netenvs">
+                      {pair.map((cfg) => {
+                        const hs = holdingsFor(cfg.id);
+                        const on = enabled[cfg.id];
+                        const firstError = hs
+                          .flatMap((h) => h.addresses)
+                          .find((a) => a.error)?.error;
+                        return (
+                          <div
+                            key={cfg.id}
+                            className={`dash-netenv${on ? "" : " off"}${
+                              activeId === cfg.id ? " sel" : ""
+                            }`}
+                            role="button"
+                            tabIndex={0}
+                            title={`View ${net.label} ${cfg.env} holdings`}
+                            aria-label={`View ${net.label} ${cfg.env} holdings`}
+                            onClick={() => {
+                              if (!enabled[cfg.id]) toggle(cfg.id);
+                              setSelectedChain(cfg.id);
+                              setTab("portfolio");
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" || e.key === " ") {
+                                e.preventDefault();
+                                if (!enabled[cfg.id]) toggle(cfg.id);
+                                setSelectedChain(cfg.id);
+                                setTab("portfolio");
+                              }
+                            }}
+                          >
+                            <span
+                              className={`dash-envtag dash-env-${cfg.env}`}
+                            >
+                              {cfg.env === "mainnet" ? "Mainnet" : "Testnet"}
+                            </span>
+                            <span
+                              className="dash-netbal"
+                              title={firstError ?? undefined}
+                            >
+                              {hs.length > 0 ? (
+                                hs.map((h) => (
+                                  <span
+                                    key={wkey(h.wallet, h.id)}
+                                    className="dash-netwal"
+                                  >
+                                    <WalletBadge wallet={h.wallet} />
+                                    {h.total != null ? (
+                                      <span className="dash-netbalv">
+                                        {h.total}{" "}
+                                        <span className="dash-unit">
+                                          {h.unit}
+                                        </span>
+                                      </span>
+                                    ) : (
+                                      <span className="dash-muted">
+                                        {holdings ? "unavailable" : "…"}
+                                      </span>
+                                    )}
+                                  </span>
+                                ))
+                              ) : (
+                                <span className="dash-muted">
+                                  {holdings ? "unavailable" : "…"}
+                                </span>
+                              )}
+                            </span>
+                            <button
+                              role="switch"
+                              aria-checked={on}
+                              aria-label={`Toggle ${net.label} ${cfg.env}`}
+                              className={`dash-switch${on ? " on" : ""}`}
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggle(cfg.id);
+                              }}
+                            >
+                              <span className="dash-knob" />
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="dash-note">
+              Each side toggles independently and immediately refilters the
+              Portfolio. Base Sepolia and ETH Sepolia read 0 until funded
+              there. Chia mainnet reads through its own relay — without{" "}
+              <code>SPELLBOOK_RELAY_URL_MAINNET</code> it shows unavailable.
+              Everything here is read-only: the dashboard never signs or
+              broadcasts.
+            </p>
           </div>
         </section>
       )}
