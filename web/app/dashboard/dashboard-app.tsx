@@ -434,14 +434,7 @@ export default function DashboardApp({
     0
   );
   const selPriced = selHoldings.some((h) => h.totalUsd != null);
-  const selReporting = selHoldings.filter((h) => h.total !== null).length;
   const enabledCount = CHAINS.filter((c) => enabled[c.id]).length;
-  const mainnetOn = CHAINS.filter(
-    (c) => c.env === "mainnet" && enabled[c.id]
-  ).length;
-  const testnetOn = CHAINS.filter(
-    (c) => c.env === "testnet" && enabled[c.id]
-  ).length;
 
   /* ---------------- dashboard ---------------- */
 
@@ -573,64 +566,6 @@ export default function DashboardApp({
           <div className="dash-panel dash-holdings">
             {selCfg ? (
               <>
-                <div className="dash-panel-head dash-headrow">
-                  <div className="dash-actions dash-actions-row">
-                    <div
-                      className="dash-depth"
-                      title="How many derivation addresses per chain to query (1–100)"
-                    >
-                      <span className="dash-depth-label">Addresses</span>
-                      <button
-                        className="dash-depth-btn"
-                        type="button"
-                        onClick={() => changeDepth(depth - 1)}
-                        disabled={loading || depth <= 1}
-                        aria-label="Fewer addresses"
-                      >
-                        −
-                      </button>
-                      <span className="dash-depth-num">{depth}</span>
-                      <button
-                        className="dash-depth-btn"
-                        type="button"
-                        onClick={() => changeDepth(depth + 1)}
-                        disabled={loading || depth >= 100}
-                        aria-label="More addresses"
-                      >
-                        +
-                      </button>
-                    </div>
-                    <button
-                      className="btn ghost dash-refresh"
-                      type="button"
-                      onClick={() => refreshAll(depth)}
-                      disabled={loading || lpLoading}
-                    >
-                      {loading || lpLoading ? "Refreshing…" : "Refresh"}
-                    </button>
-                    <span className="dash-chip" title="Wallets reporting">
-                      {holdings
-                        ? `${selReporting} / ${selHoldings.length}`
-                        : "—"}{" "}
-                      reporting
-                    </span>
-                    <span className="dash-chip" title="Mode">
-                      {mainnetOn > 0 && (
-                        <span className="dash-mainnet">MAINNET</span>
-                      )}
-                      {mainnetOn > 0 && testnetOn > 0 && (
-                        <span className="dash-modesep"> + </span>
-                      )}
-                      {testnetOn > 0 && (
-                        <span className="dash-testnet">TESTNET</span>
-                      )}
-                      {mainnetOn === 0 && testnetOn === 0 && (
-                        <span className="dash-muted">OFF</span>
-                      )}
-                    </span>
-                  </div>
-                </div>
-
                 {loadError && (
                   <p className="dash-error">
                     Couldn&apos;t reach the holdings API: {loadError}
@@ -685,58 +620,95 @@ export default function DashboardApp({
                   </div>
                 </div>
 
-                <div
-                  className="dash-seg"
-                  role="tablist"
-                  aria-label={`${selCfg.networkLabel} holdings view`}
-                >
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={viewTab === "assets"}
-                    className={`dash-segbtn${
-                      viewTab === "assets" ? " on" : ""
-                    }`}
-                    onClick={() => setAssetsTab("assets")}
+                <div className="dash-seg-row">
+                  <div
+                    className="dash-seg"
+                    role="tablist"
+                    aria-label={`${selCfg.networkLabel} holdings view`}
                   >
-                    Tokens
-                  </button>
-                  {activeId === "robinhood-mainnet" && (
                     <button
                       type="button"
                       role="tab"
-                      aria-selected={viewTab === "lp"}
+                      aria-selected={viewTab === "assets"}
                       className={`dash-segbtn${
-                        viewTab === "lp" ? " on" : ""
+                        viewTab === "assets" ? " on" : ""
                       }`}
-                      onClick={() => setAssetsTab("lp")}
+                      onClick={() => setAssetsTab("assets")}
                     >
-                      LP
-                      {(lpWallets ?? []).some((w) => w.positions.length > 0)
-                        ? ` (${(lpWallets ?? []).reduce(
-                            (n, w) => n + w.positions.length,
+                      Tokens
+                    </button>
+                    {activeId === "robinhood-mainnet" && (
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={viewTab === "lp"}
+                        className={`dash-segbtn${
+                          viewTab === "lp" ? " on" : ""
+                        }`}
+                        onClick={() => setAssetsTab("lp")}
+                      >
+                        LP
+                        {(lpWallets ?? []).some((w) => w.positions.length > 0)
+                          ? ` (${(lpWallets ?? []).reduce(
+                              (n, w) => n + w.positions.length,
+                              0
+                            )})`
+                          : ""}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={viewTab === "nfts"}
+                      className={`dash-segbtn${
+                        viewTab === "nfts" ? " on" : ""
+                      }`}
+                      onClick={() => setAssetsTab("nfts")}
+                    >
+                      NFTs
+                      {selHoldings.some((h) => h.nfts.length > 0)
+                        ? ` (${selHoldings.reduce(
+                            (n, h) => n + h.nfts.length,
                             0
                           )})`
                         : ""}
                     </button>
-                  )}
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={viewTab === "nfts"}
-                    className={`dash-segbtn${
-                      viewTab === "nfts" ? " on" : ""
-                    }`}
-                    onClick={() => setAssetsTab("nfts")}
-                  >
-                    NFTs
-                    {selHoldings.some((h) => h.nfts.length > 0)
-                      ? ` (${selHoldings.reduce(
-                          (n, h) => n + h.nfts.length,
-                          0
-                        )})`
-                      : ""}
-                  </button>
+                  </div>
+                  <div className="dash-seg-actions">
+                    <div
+                      className="dash-depth"
+                      title="How many derivation addresses per chain to query (1–100)"
+                    >
+                      <span className="dash-depth-label">Addresses</span>
+                      <button
+                        className="dash-depth-btn"
+                        type="button"
+                        onClick={() => changeDepth(depth - 1)}
+                        disabled={loading || depth <= 1}
+                        aria-label="Fewer addresses"
+                      >
+                        −
+                      </button>
+                      <span className="dash-depth-num">{depth}</span>
+                      <button
+                        className="dash-depth-btn"
+                        type="button"
+                        onClick={() => changeDepth(depth + 1)}
+                        disabled={loading || depth >= 100}
+                        aria-label="More addresses"
+                      >
+                        +
+                      </button>
+                    </div>
+                    <button
+                      className="btn ghost dash-refresh"
+                      type="button"
+                      onClick={() => refreshAll(depth)}
+                      disabled={loading || lpLoading}
+                    >
+                      {loading || lpLoading ? "Refreshing…" : "Refresh"}
+                    </button>
+                  </div>
                 </div>
 
                 {viewTab === "assets" ? (
