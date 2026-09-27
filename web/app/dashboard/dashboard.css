@@ -1224,6 +1224,36 @@ button.dash-netinfo:hover strong {
   color: #22d3ee;
 }
 
+/* Clickable LP rows: simple summary line, detail expands below. */
+.lp-row {
+  cursor: pointer;
+}
+.lp-row:hover td {
+  background: rgba(34, 211, 238, 0.05);
+}
+.lp-row.open td {
+  border-bottom: none;
+}
+.lp-detail td {
+  background: rgba(148, 163, 184, 0.05);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+}
+.lp-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  padding: 6px 0;
+}
+.lp-detail-label {
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin-bottom: 4px;
+}
+
 /* ---------- portfolio: network rail + holdings (Bankr-style) ---------- */
 .dash-portfolio {
   display: grid;
