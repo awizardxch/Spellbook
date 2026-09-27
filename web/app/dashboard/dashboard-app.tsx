@@ -291,6 +291,8 @@ export default function DashboardApp({
   const [selectedChain, setSelectedChain] = useState<string>(
     "robinhood-mainnet"
   );
+  // Top-bar network quick-switcher dropdown (mirrors the left rail).
+  const [netDropOpen, setNetDropOpen] = useState(false);
   const [assetsTab, setAssetsTab] = useState<"assets" | "nfts">("assets");
   // How many derivation addresses per chain to query (1–100), persisted
   // per browser. The API defaults to all bound addresses when omitted.
@@ -580,17 +582,133 @@ export default function DashboardApp({
           <div className="dash-panel dash-holdings">
             {selCfg ? (
               <>
-                <div className="dash-panel-head">
-                  <div>
-                    <h2>
-                      {selCfg.networkLabel}{" "}
-                      <span className={`dash-envtag dash-env-${selCfg.env}`}>
+                <div className="dash-netbar">
+                  <div className="dash-netsel">
+                    <button
+                      type="button"
+                      className="dash-netbtn"
+                      aria-haspopup="listbox"
+                      aria-expanded={netDropOpen}
+                      aria-label={`Select network, current: ${selCfg.networkLabel} ${selCfg.env}`}
+                      onClick={() => setNetDropOpen((v) => !v)}
+                    >
+                      <span
+                        className="dash-dot"
+                        style={{ background: selCfg.color }}
+                      />
+                      <span className="dash-netbtn-label">
+                        {selCfg.networkLabel}
+                      </span>
+                      <span
+                        className={`dash-envtag dash-env-${selCfg.env}`}
+                      >
                         {selCfg.env === "mainnet" ? "Mainnet" : "Testnet"}
                       </span>
-                    </h2>
-                    <p>{selCfg.detail}</p>
+                      <span className="dash-netbtn-chev" aria-hidden>
+                        ▾
+                      </span>
+                    </button>
+                    {netDropOpen && (
+                      <>
+                        <button
+                          type="button"
+                          className="dash-netdrop-backdrop"
+                          aria-label="Close network selector"
+                          onClick={() => setNetDropOpen(false)}
+                        />
+                        <ul
+                          className="dash-netdrop"
+                          role="listbox"
+                          aria-label="Select network"
+                        >
+                          {CHAINS.map((cfg) => {
+                            const hs = holdingsFor(cfg.id);
+                            const on = enabled[cfg.id];
+                            const usdSum = hs.reduce(
+                              (s, h) =>
+                                s +
+                                (h.totalUsd != null
+                                  ? Number(h.totalUsd)
+                                  : 0),
+                              0
+                            );
+                            const priced = hs.some(
+                              (h) => h.totalUsd != null
+                            );
+                            const active = activeId === cfg.id;
+                            return (
+                              <li
+                                key={cfg.id}
+                                className={`dash-netdroprow${
+                                  active ? " active" : ""
+                                }`}
+                              >
+                                <button
+                                  type="button"
+                                  role="option"
+                                  aria-selected={active}
+                                  className="dash-netdroprow-main"
+                                  title={`${cfg.networkLabel} ${cfg.env} — view holdings`}
+                                  onClick={() => {
+                                    if (!enabled[cfg.id])
+                                      toggle(cfg.id);
+                                    setSelectedChain(cfg.id);
+                                    setNetDropOpen(false);
+                                  }}
+                                >
+                                  <span
+                                    className="dash-dot"
+                                    style={{ background: cfg.color }}
+                                  />
+                                  <span className="dash-netdroprow-name">
+                                    <span>{cfg.networkLabel}</span>
+                                    <span className="dash-sub">
+                                      {cfg.env === "mainnet"
+                                        ? "Mainnet"
+                                        : "Testnet"}
+                                    </span>
+                                  </span>
+                                  <span className="dash-railbal">
+                                    {holdings ? (
+                                      priced ? (
+                                        fmtUsd(String(usdSum))
+                                      ) : (
+                                        <span className="dash-muted">
+                                          —
+                                        </span>
+                                      )
+                                    ) : (
+                                      <span className="dash-muted">
+                                        …
+                                      </span>
+                                    )}
+                                  </span>
+                                </button>
+                                <button
+                                  role="switch"
+                                  aria-checked={on}
+                                  aria-label={`Toggle ${cfg.networkLabel} ${cfg.env}`}
+                                  className={`dash-switch${
+                                    on ? " on" : ""
+                                  }`}
+                                  type="button"
+                                  onClick={() => toggle(cfg.id)}
+                                >
+                                  <span className="dash-knob" />
+                                </button>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      </>
+                    )}
                   </div>
-                  <div className="dash-actions">
+                  <span className="dash-sub dash-netbar-detail">
+                    {selCfg.detail}
+                  </span>
+                </div>
+                <div className="dash-panel-head dash-headrow">
+                  <div className="dash-actions dash-actions-row">
                     <div
                       className="dash-depth"
                       title="How many derivation addresses per chain to query (1–100)"
