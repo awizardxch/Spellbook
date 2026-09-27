@@ -20,7 +20,11 @@ steps still pending. No release is published until Speechless tests first.
   that holds secrets or signs. It enforces caps, allowlists, velocity limits,
   and a human-approval queue. Conversational agents only ever call its API.
 - **Agent-agnostic:** the only input is a 32-byte seed. Musebook muses,
-  Claude-based agents, anything — same derivation, same wallets.
+  Claude-based agents, anything — same derivation, same wallets. Any
+  MCP client (Claude Code / Desktop, Cursor, Codex, Gemini CLI, VS Code,
+  OpenAI Agents SDK) plugs in with `spellbook-mcp`; function-calling
+  loops use the same tool schemas; shell agents use the CLI —
+  [docs/AGENT_INTEGRATIONS.md](docs/AGENT_INTEGRATIONS.md).
 
 ## The loop (O10)
 

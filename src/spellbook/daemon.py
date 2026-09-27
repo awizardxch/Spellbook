@@ -417,6 +417,23 @@ def _atomic_write_json(path: str, obj):
     os.rename(tmp, path)
 
 
+def _refuse_if_locked(seed_path: str, std_seed_path: str | None):
+    """A missing seed with a sealed copy present is a LOCKED wallet, not a
+    broken one: say so, so the agent asks its human to unlock instead of
+    re-installing (which would mint a new wallet and strand the old one)."""
+    missing = [p for p in (seed_path, std_seed_path)
+               if p and not os.path.exists(p)]
+    if not missing:
+        return
+    from spellbook import sealed
+    if os.path.exists(sealed.sealed_path()):
+        raise FileNotFoundError(
+            "seed is sealed and not unlocked (" + ", ".join(missing) +
+            " missing): ask the human to unlock it — `spellbook-seed serve`, "
+            "they open the link and enter their seal password. Never "
+            "re-install over a locked wallet.")
+
+
 class Daemon:
     def __init__(self, config_dir):
         self.config_dir = config_dir
@@ -447,6 +464,11 @@ class Daemon:
         # It is never logged, never returned by any route, never leaves this
         # process. Real seeds enter only after the §10 phase-1 authorization.
         seed_path = self.cfg.get("seed_path")
+        if seed_path:
+            _refuse_if_locked(
+                seed_path,
+                self.cfg.get("std_seed_path")
+                if self.cfg.get("key_derivation") == "standard" else None)
         self.seed = load_seed(seed_path) if seed_path else None
         # Standard-recovery wallet (SPEC §2b): the 64-byte BIP-39 seed whose
         # keys derive the way stock wallets do (Sage / MetaMask). Required
