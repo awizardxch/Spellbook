@@ -4,12 +4,15 @@
 # that holds the release key. Agents only ever install what this produces
 # (install.sh verifies the SHA-256 AND this signature before installing).
 #
+#   git checkout main && git pull        # run it ON main, not the tag
 #   bash scripts/cut-release.sh 0.3.0
 #
-# Preconditions it checks: VERSION == tag, the tag exists and points at
-# HEAD, a clean tree, and the release key (docs/RELEASE_KEY.md) available
-# to gpg. Output: releases/<tag>/ with the three files install.sh fetches.
-# It never pushes or publishes — it prints those steps for you.
+# The tarball is built from the TAG (git archive), whatever HEAD is, so the
+# signed files land on main where install.sh's vendored fallback looks.
+# Preconditions it checks: the tag exists and its VERSION == tag, a clean
+# tree, and the release key (docs/RELEASE_KEY.md) available to gpg.
+# Output: releases/<tag>/ with the three files install.sh fetches. It
+# never pushes or publishes — it prints those steps for you.
 
 set -euo pipefail
 
@@ -19,12 +22,13 @@ fail() { printf 'cut-release: %s\n' "$*" >&2; exit 1; }
 
 [[ "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "usage: cut-release.sh X.Y.Z"
 cd "$(git rev-parse --show-toplevel)"
-[ "$(cat VERSION)" = "$TAG" ] || fail "VERSION is $(cat VERSION), not $TAG"
 [ -z "$(git status --porcelain)" ] || fail "working tree not clean"
 git rev-parse -q --verify "refs/tags/$TAG" >/dev/null \
   || fail "tag $TAG missing: git tag -a $TAG -m 'Spellbook $TAG' && git push origin $TAG"
-[ "$(git rev-list -n1 "$TAG")" = "$(git rev-parse HEAD)" ] \
-  || fail "tag $TAG does not point at HEAD — check out the tag first"
+[ "$(git show "$TAG:VERSION" | tr -d '[:space:]')" = "$TAG" ] \
+  || fail "VERSION inside tag $TAG is not $TAG"
+git symbolic-ref -q HEAD >/dev/null \
+  || fail "detached HEAD — run this on main (git checkout main && git pull)"
 gpg --list-secret-keys "$FPR" >/dev/null 2>&1 \
   || fail "release key $FPR not in this gpg keyring"
 
@@ -48,6 +52,7 @@ Signed release $TAG ready in $OUT/ (sha256 + signature verified).
 
 Publish:
   1. git add $OUT && git commit -m "vendor signed $TAG artifacts" && git push
+     (check: git show --stat HEAD must list the three files)
   2. GitHub release "$TAG" (tag $TAG) with these assets — names matter,
      install.sh fetches exactly these:
        $OUT/$TGZ          as  $TGZ
