@@ -212,3 +212,16 @@ def test_schema_exports():
     for t in an:
         assert t["input_schema"]["type"] == "object"
         json.dumps(t)
+
+
+def test_version_tool_points_at_upgrade_notes(monkeypatch):
+    from spellbook import version as ver
+    monkeypatch.setattr(ver, "latest_release_tag", lambda: "99.0.0")
+    ok, text = agent_tools.call_tool("spellbook_version")
+    r = json.loads(text)
+    assert ok and r["upgrade_available"] is True
+    assert r["how"] == "spellbook upgrade 99.0.0"
+    assert r["upgrade_notes"].endswith("/99.0.0/docs/AGENT_LIFECYCLE.md#upgrade-notes")
+    monkeypatch.setattr(ver, "latest_release_tag", lambda: None)
+    ok, text = agent_tools.call_tool("spellbook_version")
+    assert ok and "upgrade_notes" not in json.loads(text)

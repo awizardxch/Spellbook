@@ -16,6 +16,8 @@ unavailable. The tarball is verified by checksum AND by the pinned
 release-key signature before anything is installed — the download URL
 is never the trust anchor.
 
-Do not hand-edit these files. To cut a release: build the tarball from
-the release commit, checksum it, sign it with the release key, and
-drop the three files here.
+Do not hand-edit these files. To cut a release, run
+`bash scripts/cut-release.sh X.Y.Z` on the machine holding the release
+key, from a clean checkout of the tag. It builds the tarball (`git archive`
+of the tag), checksums and signs it, verifies both the way install.sh
+will, and prints the publish steps.

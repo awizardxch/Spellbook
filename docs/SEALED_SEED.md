@@ -24,7 +24,7 @@ human: link → password → Seal                                seed files rewr
 
 | Command | Who | What |
 |---|---|---|
-| `spellbook-seed status [--json]` | agent, every session | Shows the public state and needs no password. Exit codes: 0 unlocked, 3 locked, 4 unsealed, 5 mismatch, 6 empty |
+| `spellbook-seed status [--json]` | agent, every session | Shows the public state and needs no password. Exit codes: 0 unlocked, 3 locked, 4 unsealed, 5 mismatch, 6 empty, 7 no_access (a system install owned by the daemon's user: run as that user) |
 | `spellbook-seed serve [--port 8787]` | agent starts it, human uses it | One-time local page. It shows **Seal** when unsealed and **Unlock** when locked, and exits after one success or 5 wrong passwords |
 | `spellbook-seed seal [--replace]` | human at a terminal | TTY password prompt, entered twice. `--replace` changes the password, but only for the **same** wallet |
 | `spellbook-seed unlock` | human at a terminal | TTY password prompt |

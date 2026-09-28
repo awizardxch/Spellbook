@@ -25,6 +25,11 @@ Two things, both delivered to you at install, out-of-band:
   copies in two places, then confirm receipt and have your agent drop the
   words from its context. SET 1 imports into stock wallets (Sage,
   MetaMask); SET 2 recovers through the Spellbook daemon only.
+- **The seal password** (you choose it; see [SEALED_SEED.md](SEALED_SEED.md)).
+  It locks a copy of the seed that survives your agent's VM being wiped.
+  After a wipe, your agent sends you a one-time link, and you enter the
+  password there. Keep it in your password manager. If you lose it, only
+  the paper backup can recover the wallet.
 
 ## 2. Install-day checklist
 
@@ -36,6 +41,8 @@ Two things, both delivered to you at install, out-of-band:
    not against anything your agent pastes into chat.
 4. Confirm `spellbook doctor` is green before your agent does anything
    else.
+5. Seal the seed: your agent runs `spellbook-seed serve` and gives you a
+   link. Open it and choose your seal password.
 
 ## 3. The approval loop (your daily job)
 
@@ -234,6 +241,10 @@ login UID at install.
   the daemon owns them.
 - Never "pre-approve" — there is no standing approval; every spend is
   its own decision.
+- Never type your seal password or your recovery words into chat, the
+  hosted dashboard, or anything your agent relays. The seal password goes
+  only into the `spellbook-seed serve` page (the one-time link from your
+  agent's own machine) or your own terminal.
 
 ## 10. If something looks wrong
 

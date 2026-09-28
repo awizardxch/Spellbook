@@ -127,6 +127,7 @@ To dump the schemas: `spellbook-mcp --list-tools --format openai|anthropic|mcp`.
 | `spellbook_seed_status` | seed lock state. **Call it first, every session** |
 | `spellbook_seed_viewer` | starts the one-time password page and returns the link for the human |
 | `spellbook_status`, `spellbook_doctor` | daemon status, install health |
+| `spellbook_version` | installed version compared with the latest signed release, and a link to the upgrade notes |
 | `spellbook_addresses`, `spellbook_queue`, `spellbook_ledger` | reads |
 | `spellbook_request_spend` | plain transfer (amount as a digit string in base units) |
 | `spellbook_dex_venues`, `spellbook_dex_swap` | swaps with bounds |
@@ -144,4 +145,6 @@ For any other agent, paste them into its system prompt:
 > `unlocked`, start `spellbook_seed_viewer` (or `spellbook-seed serve`),
 > give your human the link, and wait until it is. You request and your
 > human approves. Never ask for their approve token, seal password or
-> recovery words.
+> recovery words. Once per session, check `spellbook_version` (or
+> `spellbook upgrade --check`). If an upgrade is available, follow its
+> upgrade notes.

@@ -89,7 +89,7 @@ touches your keys, tokens, config, or ledger to do it. Full reference:
 ```bash
 spellbook version          # local vs installed vs daemon version
 spellbook upgrade --check  # latest signed release vs yours
-spellbook upgrade 0.2.0    # self-upgrade (signed release, forward-only)
+spellbook upgrade 0.3.0    # self-upgrade (signed release, forward-only)
 spellbook doctor           # read-only health report
 spellbook doctor --repair  # self-repair CODE problems via signed reinstall
 ```
@@ -292,7 +292,7 @@ brings them back without anyone re-typing words — see
 including after context compaction, run:
 
 ```bash
-spellbook-seed status   # exit 0 unlocked · 3 locked · 4 unsealed · 5 mismatch · 6 empty
+spellbook-seed status   # exit 0 unlocked · 3 locked · 4 unsealed · 5 mismatch · 6 empty · 7 no_access
 ```
 
 - `locked` → run `spellbook-seed serve`, give your human the one-time

@@ -140,6 +140,12 @@ def _status(_a):
     return _client().status()
 
 
+def _version(_a):
+    """Local version vs the latest signed release — no daemon, no token."""
+    from spellbook import version as ver
+    return ver.upgrade_check()
+
+
 def _doctor(_a):
     return _client().doctor()
 
@@ -253,6 +259,12 @@ TOOLS = [
           {"port": {"type": "integer", "description": "Local port (default 8787)."}}),
     _tool("spellbook_status", "Daemon status: version, networks, gates.",
           _status, read_only=True),
+    _tool("spellbook_version",
+          "Installed Spellbook version vs the latest signed release. If "
+          "upgrade_available, read upgrade_notes, then upgrade with the "
+          "`how` command (signed releases only, forward-only, keys never "
+          "touched) and follow the notes' after-upgrade steps.",
+          _version, read_only=True),
     _tool("spellbook_doctor",
           "Install health check (presence/permissions only, never key contents).",
           _doctor, read_only=True),

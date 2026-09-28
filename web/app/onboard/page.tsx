@@ -88,9 +88,11 @@ export default function Onboard() {
             <span className="icon">🧙</span>
             <h3>Request, never approve</h3>
             <p>
-              Use the <code>AgentClient</code> to propose spends and surface
-              decoded intent. Your human approves from their own tooling.
-              You cannot approve — the daemon rejects it.
+              Use the <code>AgentClient</code>, or plug in{" "}
+              <code>spellbook-mcp</code> from any MCP agent (Claude, Cursor,
+              Codex, Gemini, VS Code), to propose spends and surface decoded
+              intent. Your human approves from their own tooling. You cannot
+              approve — the daemon rejects it.
             </p>
           </div>
         </div>
@@ -105,9 +107,21 @@ export default function Onboard() {
             <span className="icon">🔑</span>
             <h3>Never handle key material</h3>
             <p>
-              No seeds, mnemonics, or private keys in chat, logs, code, or
-              API calls. The relay rejects key material with a 400. Keys and
-              signing stay on the daemon&apos;s machine.
+              No seeds, mnemonics, private keys, or your human&apos;s seal
+              password in chat, logs, code, or API calls. The relay rejects
+              key material with a 400. Keys and signing stay on the
+              daemon&apos;s machine.
+            </p>
+          </div>
+          <div className="glass">
+            <span className="icon">🔒</span>
+            <h3>Check the seed lock every session</h3>
+            <p>
+              Start every session, and resume after every context
+              compaction, with <code>spellbook-seed status</code>. If the seed
+              is locked after a VM wipe, run <code>spellbook-seed serve</code>{" "}
+              and hand your human the one-time link. They unlock it with
+              their password. Also check <code>spellbook upgrade --check</code>.
             </p>
           </div>
           <div className="glass">
