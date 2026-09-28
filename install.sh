@@ -231,6 +231,19 @@ elif [ -n "${SAGE_BIN:-}" ]; then
   fail "SAGE_BIN was given without SAGE_PIN_VERIFIED=1 — refusing to trust an unverified binary. Verify it out-of-band and re-run with SAGE_PIN_VERIFIED=1, or unset SAGE_BIN to build from the pinned commit."
 else
   need git; need cargo
+  # The pinned Sage source uses edition2024 — cargo/rustc >= 1.85 is required.
+  # (Distro cargo, e.g. apt's 1.75, dies with "feature `edition2024` is required".)
+  CARGO_VER="$(cargo --version 2>/dev/null | awk '{print $2}')"
+  [ -n "$CARGO_VER" ] && [ "$(printf '1.85.0\n%s\n' "$CARGO_VER" | sort -V | head -n1)" = "1.85.0" ] \
+    || fail "cargo ${CARGO_VER:-unknown} is too old for the Sage build (needs >= 1.85 for edition2024). Install a current stable toolchain: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable"
+  # bindgen (aws-lc-sys and friends) needs libclang at build time.
+  ldconfig -p 2>/dev/null | grep -q libclang \
+    || fail "libclang not found — the Sage build needs it (bindgen). On Debian/Ubuntu: apt-get install -y libclang-dev clang"
+  # The Sage release build needs several GB under $WORK (cargo target dir).
+  # /tmp is often a small tmpfs — set TMPDIR to a roomier filesystem first.
+  WORK_FREE_KB="$(df -k "$WORK" 2>/dev/null | awk 'NR==2 {print $4}')"
+  { [ -n "$WORK_FREE_KB" ] && [ "$WORK_FREE_KB" -ge 5242880 ]; } \
+    || fail "only ${WORK_FREE_KB:-unknown} KB free under $WORK — the Sage build needs ~5 GB. Set TMPDIR to a filesystem with room (e.g. TMPDIR=\$HOME/.spellbuild-tmp) and re-run."
   log "building sage-cli from pinned commit ${SAGE_COMMIT} ..."
   SAGE_SRC="${WORK}/sage-src"
   git init -q "$SAGE_SRC"
@@ -248,10 +261,6 @@ else
   [ -x "${SAGE_SRC}/target/release/sage" ] \
     || fail "sage-cli build produced no target/release/sage binary"
   SAGE_BIN_STAGED="${SAGE_SRC}/target/release/sage"
-fi
-if [ "$CHIA_ENABLED" = true ]; then
-  SAGE_VERSION="$("$SAGE_BIN_STAGED" --version 2>&1 | head -1)" || fail "sage --version failed"
-  log "sage ready: ${SAGE_VERSION}"
 fi
 
 # ---------------------------------------------------------------- 3. OS user + layout (S2)
@@ -293,6 +302,15 @@ if [ "$CHIA_ENABLED" = true ]; then
   chmod 0755 "${PREFIX}/bin/sage"
   SAGE_BIN_FINAL="${PREFIX}/bin/sage"
   log "installed verified sage binary at ${SAGE_BIN_FINAL}"
+  # Smoke-test the installed binary. The pinned sage-cli exposes no --version
+  # flag (clap rejects it), so --help is the test — it still exercises real
+  # startup, including the AWS-LC provider install in main(). Testing the
+  # installed copy (not the staged one) also covers the upgrade fast path
+  # ("KEEP"). Never swallow the output: a bare "failed" cost hours to diagnose.
+  if ! SAGE_SMOKE_OUT="$("$SAGE_BIN_FINAL" --help 2>&1)"; then
+    fail "sage smoke test ('sage --help') failed. Output: ${SAGE_SMOKE_OUT:-<empty>}"
+  fi
+  log "sage ready (smoke test passed)"
   # Sage's data home (DB + mTLS certs live under <home>/com.rigidnetwork.sage).
   # The daemon starts `sage rpc start` with XDG_DATA_HOME pointed here, so a
   # fresh install is ready to drill with no extra steps.
