@@ -1606,3 +1606,15 @@ verify, install locally — per muse, per D1.
   `X-Request-Id` + a `spellbook/<version>` User-Agent (#48); relay quotes
   never cached (#47); approve client waits out the execution window (#49).
   Release tags are bare `X.Y.Z` (what `spellbook-upgrade` accepts).
+
+- 2026-09-28 — release v0.3.0. Sealed seed (`spellbook-seed`): the seed
+  files sealed under a human password (scrypt + AES-256-GCM) into
+  `~/workspace/.spellbook/seed.sealed`, unlocked after a VM wipe from a
+  one-time local page; the daemon names a sealed-but-locked seed instead of
+  failing on a missing file (`docs/SEALED_SEED.md`). Universal agent access:
+  `spellbook-mcp` (MCP stdio) and OpenAI/Anthropic tool schemas over the
+  request-token surface only (`docs/AGENT_INTEGRATIONS.md`). Recovery
+  fixes: config-driven seed paths, live-derivation keys in backup/reveal,
+  `restore --standard`, the install-time 3-word check. Removed: hot wallet,
+  `keymanager.py`, the Vercel key-reveal routes. After-upgrade steps:
+  `docs/AGENT_LIFECYCLE.md` → Upgrade notes.

@@ -272,3 +272,19 @@ def test_locate_fallback_without_config(tmp_path):
     loc = sealed.locate(str(d))
     assert loc["seed_path"] == str(d / "seed.key")
     assert loc["std_seed_path"] is None and loc["key_derivation"] == "kdf"
+
+
+def test_unreadable_system_install_is_no_access(tmp_path, monkeypatch):
+    # A system install's spellbook.json belongs to the daemon user; an agent
+    # user must see "no_access", never a false "empty".
+    cfg_dir, sp = _install(tmp_path)
+    real_open = open
+
+    def guarded(path, *a, **k):
+        if str(path).endswith("spellbook.json"):
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, *a, **k)
+    monkeypatch.setattr(sealed, "open", guarded, raising=False)
+    st = sealed.status(config_dir=cfg_dir, path=sp)
+    assert st["state"] == "no_access"
+    assert sealed.main(["--config-dir", cfg_dir, "--sealed", sp, "status"]) == 7

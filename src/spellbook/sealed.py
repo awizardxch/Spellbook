@@ -91,10 +91,13 @@ def sealed_path(path: str | None = None) -> str:
 def locate(config_dir: str | None = None) -> dict:
     """Where the daemon's seed files live, per its spellbook.json.
 
-    Returns {config_dir, seed_path, std_seed_path, key_derivation}.
-    std_seed_path is None when the config does not use one (kdf mode).
-    Without any readable spellbook.json, falls back to the agent-VM
-    testnet home (~/.spellbook-testnet/seed.key).
+    Returns {config_dir, seed_path, std_seed_path, key_derivation,
+    access_denied}. std_seed_path is None when the config does not use one
+    (kdf mode). Without any spellbook.json, falls back to the agent-VM
+    testnet home (~/.spellbook-testnet/seed.key). A config that exists but
+    this user may not read (a system install owned by the daemon user) is
+    reported as access_denied — never silently skipped, or a live wallet
+    would look "empty".
     """
     explicit = config_dir or os.environ.get("SPELLBOOK_CONFIG_DIR")
     candidates = (explicit,) if explicit else _CONFIG_CANDIDATES
@@ -103,6 +106,17 @@ def locate(config_dir: str | None = None) -> dict:
         try:
             with open(cfg_path) as f:
                 cfg = json.load(f)
+        except PermissionError:
+            return {"config_dir": d, "seed_path": os.path.join(d, "seed.key"),
+                    "std_seed_path": None, "key_derivation": None,
+                    "access_denied": True}
+        except FileNotFoundError:
+            if os.path.isdir(d) and not os.access(d, os.R_OK | os.X_OK):
+                return {"config_dir": d,
+                        "seed_path": os.path.join(d, "seed.key"),
+                        "std_seed_path": None, "key_derivation": None,
+                        "access_denied": True}
+            continue
         except (OSError, ValueError):
             continue
         kd = cfg.get("key_derivation", "kdf")
@@ -112,6 +126,7 @@ def locate(config_dir: str | None = None) -> dict:
             "std_seed_path": cfg.get("std_seed_path") if kd == "standard"
             else None,
             "key_derivation": kd,
+            "access_denied": False,
         }
     d = explicit or _CONFIG_CANDIDATES[0]
     std = os.path.join(d, "std_seed.key")
@@ -120,6 +135,7 @@ def locate(config_dir: str | None = None) -> dict:
         "seed_path": os.path.join(d, "seed.key"),
         "std_seed_path": std if os.path.exists(std) else None,
         "key_derivation": "standard" if os.path.exists(std) else "kdf",
+        "access_denied": False,
     }
 
 
@@ -342,9 +358,16 @@ def status(*, config_dir: str | None = None, path: str | None = None) -> dict:
       unsealed  seed on disk, no seal yet (a wipe now would need paper)
       mismatch  seed on disk differs from the seal (re-seal or investigate)
       empty     neither (fresh machine: install, or restore from paper)
+      no_access the install belongs to another OS user (system install);
+                run as that user or root — never guess
     """
     loc = locate(config_dir)
     p = sealed_path(path)
+    if loc.get("access_denied"):
+        return {"state": "no_access", "sealed_path": p, "sealed": None,
+                "seal_error": None, "sealed_at": None, "fingerprint": None,
+                "seed_path": loc["seed_path"], "std_seed_path": None,
+                "seed_present": None, "config_dir": loc["config_dir"]}
     seed_present = os.path.exists(loc["seed_path"])
     doc = None
     seal_error = None
@@ -392,9 +415,12 @@ STATE_HINT = {
                 "tell your human (re-seal only if the disk seed is the right one)",
     "empty": "no seed and no seal: fresh install, or restore from the paper "
              "backup (python3 -m spellbook.recovery restore)",
+    "no_access": "the wallet belongs to the daemon's own OS user (system "
+                 "install) — this user cannot see it, by design. Ask your "
+                 "human to run spellbook-seed as that user (sudo -u spellbook).",
 }
 STATE_EXIT = {"unlocked": 0, "locked": 3, "unsealed": 4, "mismatch": 5,
-              "empty": 6}
+              "empty": 6, "no_access": 7}
 
 
 # ---------------------------------------------------------------- viewer
@@ -615,7 +641,7 @@ def main(argv=None) -> int:
     ap.add_argument("--sealed", help="sealed file (default: "
                     "$SPELLBOOK_SEALED_PATH or ~/workspace/.spellbook/seed.sealed)")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    s = sub.add_parser("status", help="public state; exit 0 unlocked, "
+    s = sub.add_parser("status", help="public state; exit 0 unlocked, 7 no_access, "
                        "3 locked, 4 unsealed, 5 mismatch, 6 empty")
     s.add_argument("--json", action="store_true")
     for name in ("seal", "unlock"):

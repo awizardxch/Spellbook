@@ -78,9 +78,15 @@ def upgrade_check(prefix_override=None) -> dict:
                      "track the repo via install.sh --upgrade --from-dir"),
         }
     available = parse(latest) > parse(local)
-    return {
+    out = {
         "local": local,
         "latest": latest,
         "upgrade_available": available,
         "note": "upgrade available" if available else "already on the latest release",
     }
+    if available:
+        # What changed and what to do after upgrading, as of the NEW tag.
+        out["upgrade_notes"] = (f"https://github.com/{REPO}/blob/{latest}/"
+                                "docs/AGENT_LIFECYCLE.md#upgrade-notes")
+        out["how"] = f"spellbook upgrade {latest}"
+    return out

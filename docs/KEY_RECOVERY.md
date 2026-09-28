@@ -29,6 +29,7 @@ spellbook-seed status
 | `unsealed` | 4 | seed present, no seal | `spellbook-seed serve` → human seals |
 | `mismatch` | 5 | seed on disk ≠ sealed seed | stop; tell the human |
 | `empty` | 6 | no seed, no seal | fresh install, or paper restore |
+| `no_access` | 7 | system install owned by the daemon's OS user | human runs it as that user (`sudo -u spellbook …`) |
 
 Full design: [SEALED_SEED.md](SEALED_SEED.md).
 

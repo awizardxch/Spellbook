@@ -12,11 +12,29 @@ would reject the attempt anyway (S7).
 pip install spellbook
 ```
 
-(Until the first release is published: `pip install git+https://github.com/awizardxch/Spellbook@v0.1.0`.)
+(Until a release is on PyPI: `pip install git+https://github.com/awizardxch/Spellbook@0.3.0`.)
 
-This gives you the client library and the `spellbook` CLI. The daemon itself
-(`spellbookd`) is installed on the agent's machine by `install.sh` — you talk
+This gives you the client library, the `spellbook` CLI, `spellbook-seed`
+(seed lock) and `spellbook-mcp` (MCP server). The daemon itself
+(`spellbookd`) is installed on the agent's machine by `install.sh`. You talk
 to it over its Unix socket.
+
+**Not a Python agent?** If your agent speaks MCP (Claude Code, Claude
+Desktop, Cursor, Codex, Gemini CLI, VS Code and others), use `spellbook-mcp`.
+It offers the same powers as tools. Setup: [AGENT_INTEGRATIONS.md](AGENT_INTEGRATIONS.md).
+
+## 1b. Every session: seed lock and version
+
+```bash
+spellbook-seed status      # 0 unlocked · 3 locked · 4 unsealed · 7 no_access
+spellbook upgrade --check  # newer signed release? follow its upgrade notes
+```
+
+- `locked` or `unsealed`: run `spellbook-seed serve` and give your human the
+  link. They enter their password there, never in chat.
+  ([SEALED_SEED.md](SEALED_SEED.md))
+- Upgrade available: `spellbook upgrade <tag>`, then do the steps in
+  [AGENT_LIFECYCLE.md → Upgrade notes](AGENT_LIFECYCLE.md#upgrade-notes).
 
 ## 2. Connect
 
@@ -89,6 +107,8 @@ spellbook ledger
 - Never read the seed file, the token files, or the ledger file directly —
   the daemon's OS user owns them, and the API is the only door.
 - Never put key material, tokens, or mnemonics in chat, logs, or tools.
+- Never ask for, handle, or pass along your human's **seal password**. They
+  type it only into the `spellbook-seed serve` page or their own terminal.
 - Nothing goes on-chain without explicit instruction — the daemon itself
   can't submit yet (chain RPC is the next build phase), and when it can,
   testnet needs a go-ahead and mainnet needs a separate one with amounts.

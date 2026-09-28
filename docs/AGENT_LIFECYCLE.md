@@ -15,7 +15,7 @@ about its own files — you cannot traverse `/opt/spellbook` yourself).
 |---|---|---|
 | `spellbook version` | local package version, installed VERSION, daemon version, whether they match | nothing |
 | `spellbook upgrade --check` | compares your version to the latest signed GitHub release | nothing |
-| `spellbook upgrade 0.2.0` | self-upgrade to a signed release (strictly forward-only) | sudo NOPASSWD for one wrapper (installed by install.sh) |
+| `spellbook upgrade 0.3.0` | self-upgrade to a signed release (strictly forward-only) | sudo NOPASSWD for one wrapper (installed by install.sh) |
 | `spellbook doctor` | read-only health report: keys, tokens, config, ledger, code, daemon | request token |
 | `spellbook doctor --repair` | same, then self-repairs **code** problems via a signed-release reinstall | request token |
 
@@ -91,3 +91,41 @@ agent's environment; approve token file + paper backup → the human,
 out-of-band, never retained by the agent). The trust anchor
 (fingerprint) still comes from the town thread, an independent channel —
 the agent verifies the release key itself before installing.
+
+## Upgrade notes
+
+`spellbook upgrade --check` (or the MCP tool `spellbook_version`) links
+here when a newer signed release exists. After every upgrade, run
+`spellbook doctor`, then do the steps for **each** version you moved past,
+oldest first.
+
+### 0.3.0: sealed seed, universal agent access, recovery fixes
+
+What changed:
+- **Sealed seed** (`spellbook-seed`). This is a password-locked copy of the
+  seed in `~/workspace/.spellbook/seed.sealed`. After a VM wipe it brings
+  the same wallet back when your human enters the password on a one-time
+  local page. See [SEALED_SEED.md](SEALED_SEED.md).
+- **MCP server** (`spellbook-mcp`) and shared tool schemas. Any MCP client or
+  function-calling agent can now use the wallet. See
+  [AGENT_INTEGRATIONS.md](AGENT_INTEGRATIONS.md).
+- **Recovery fixes.** `recovery.py` finds the seed through `spellbook.json`
+  and shows the keys the daemon really signs with. `restore --standard`
+  rebuilds SET 1. The installer's 3-word backup check now works.
+- **Removed:** the plain-text hot wallet (`hot.key`), `keymanager.py`, and
+  the dashboard's key-reveal routes (they could never reach the VM).
+
+After upgrading:
+1. `spellbook-seed status`. If it says `unsealed`, run `spellbook-seed serve`
+   and give your human the link so they can seal the seed with a password.
+   On a system install, where the seed belongs to the daemon's own OS user,
+   status says `no_access`. Your human then runs it as that user:
+   `sudo -u spellbook /opt/spellbook/venv/bin/spellbook-seed --config-dir /opt/spellbook --sealed <persistent path> serve`.
+2. From now on, check `spellbook-seed status` at the start of **every**
+   session, including after context compaction.
+   ([AGENT_ONBOARDING.md §6b](AGENT_ONBOARDING.md))
+3. Optional: add `spellbook-mcp` to your agent's MCP config
+   ([AGENT_INTEGRATIONS.md](AGENT_INTEGRATIONS.md)).
+4. If `~/workspace/.spellbook/hot.key` or `key.enc` exists from the old hot
+   wallet, tell your human. They move any funds that key alone controls,
+   then delete both files.

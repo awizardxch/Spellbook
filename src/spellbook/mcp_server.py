@@ -33,7 +33,9 @@ Spellbook is this agent's self-custodied wallet. Rules:
    and you must never ask your human for their approve token, seal password,
    or recovery words — not in chat, not anywhere.
 3. Show queued spends (spellbook_queue) to your human as decoded intent.
-4. Amounts are base units (wei / mojos / lamports) as digit strings."""
+4. Amounts are base units (wei / mojos / lamports) as digit strings.
+5. Once per session, call spellbook_version; if an upgrade is available,
+   read its upgrade_notes and upgrade (signed releases only)."""
 
 
 def _result(msg_id, result):

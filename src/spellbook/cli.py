@@ -6,7 +6,7 @@ Request-token commands (the agent's side):
   spellbook doctor [--repair]            # read-only install health, self-repair
   spellbook version                      # local vs daemon version
   spellbook upgrade --check              # latest release vs local
-  spellbook upgrade 0.2.0                # agent self-upgrade (signed release)
+  spellbook upgrade 0.3.0                # agent self-upgrade (signed release)
   spellbook request-spend --chain evm-4663 --to 0x... --amount-wei N [--purpose ..]
   spellbook offer-make --chain chia-testnet --offered native:1000 --requested <cat>:500
   spellbook offer-take --chain chia-testnet --offer <offer-string>

@@ -545,6 +545,8 @@ UPGRADE COMPLETE.
             submission gates (mainnet_submit_enabled untouched)
   verify:   spellbook doctor          (re-run after every upgrade)
             spellbook version         (local vs daemon)
+  next:     read what changed and do its after-upgrade steps:
+            https://github.com/awizardxch/Spellbook/blob/$(cat "${PREFIX}/VERSION")/docs/AGENT_LIFECYCLE.md#upgrade-notes
 
 If doctor reports a problem the upgrade did not fix, the human re-runs
 install.sh --upgrade (or, for downgrades, runs install.sh directly as root).
