@@ -298,8 +298,30 @@ any import by comparing the shown addresses.
 Agent VMs lose the seed files on a wipe or session reset. The sealed seed
 (`~/workspace/.spellbook/seed.sealed`, password-locked, survives wipes)
 brings them back without anyone re-typing words — see
-[SEALED_SEED.md](SEALED_SEED.md). At the start of **every** session,
-including after context compaction, run:
+[SEALED_SEED.md](SEALED_SEED.md).
+
+**Assume your human can only reach you, the agent** — no terminal, no
+SSH, no machine access. Every step below goes through you: you run the
+commands, you hand them links, they click.
+
+**Seal at install — required, not optional.** Right after the paper
+backup is confirmed, seal the seed before you call the install done:
+
+```bash
+spellbook-seed serve   # prints a one-time link; exits after one success
+```
+
+Get that link to your human in a browser. `serve` binds `127.0.0.1`, so
+arrange the path via your platform: an SSH tunnel, a port-forward /
+preview URL, or a TLS tunnel (e.g.
+`cloudflared tunnel --url http://127.0.0.1:8787`). The page is plain
+HTTP — the path to your human must be TLS, and the URL's one-time token
+is the only auth. They set the password on that page; the sealed file is
+written. **Never** ask for the password in chat, never pass it on a
+command line — you must never see it.
+
+At the start of **every** session, including after context compaction,
+run:
 
 ```bash
 spellbook-seed status   # exit 0 unlocked · 3 locked · 4 unsealed · 5 mismatch · 6 empty · 7 no_access
@@ -336,6 +358,58 @@ sign the exact challenge string locally and POST the signature with your
 public key and addresses. The server verifies the signature against the
 **presented** public key — the signature proves possession of the key,
 not membership in any list.
+
+### Getting your human's viewer token (the 4-step version)
+
+Your human opens `/dashboard`, picks **Human → Viewer token**, and pastes
+a token only you can mint. Do this once per human (rotate anytime by
+repeating it):
+
+1. **Get a challenge:** `GET <dashboard>/api/auth/challenge` →
+   `{ challenge, expiresAt }` (5 minutes, single use).
+2. **Sign it:** sign the `challenge` string verbatim (UTF-8 bytes) with
+   your Ed25519 identity key (`~/.config/spellbook/agent_ed25519.json`).
+   The private key never leaves your machine — only the 128-hex-char
+   signature is sent.
+3. **Verify:** `POST <dashboard>/api/auth/verify` with
+   `{ challenge, signature, pubkey, wallets }` → `{ ok: true, viewerToken }`
+   (you also get your own 12h agent session cookie).
+   `wallets` is `[{ label, addresses }]` — get your addresses read-only
+   from your daemon with `spellbook addresses` and keep your labels
+   (`"Spellbook"`, `"Bankr"`, …) so your human can tell wallets apart.
+4. **Hand it over:** show the `viewerToken` to your human once — they
+   paste it into the viewer field and get a read-only view of your
+   wallets. Bearer <redacted>: treat it like a password.
+
+Copy-paste Python (needs `cryptography`, stdlib otherwise):
+
+```python
+import json, urllib.request
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+BASE = "https://<your-dashboard-host>"  # e.g. https://spellbook.awizard.dev
+
+with urllib.request.urlopen(f"{BASE}/api/auth/challenge", timeout=20) as r:
+    challenge = json.load(r)["challenge"]
+
+key = json.load(open("/home/<you>/.config/spellbook/agent_ed25519.json"))
+sig = Ed25519PrivateKey.from_private_bytes(
+    bytes.fromhex(key["seed_hex"])).sign(challenge.encode()).hex()
+
+wallets = [{"label": "Spellbook", "addresses": {
+    # from `spellbook addresses`; bind only the sides you want shown
+    "evm": [...], "evm_mainnet": [...],
+    "solana": [...], "solana_mainnet": [...],
+    "chia": [...], "chia_mainnet": [...],
+}}]
+body = json.dumps({"challenge": challenge, "signature": sig,
+                   "pubkey": key["pubkey_hex"], "wallets": wallets}).encode()
+req = urllib.request.Request(f"{BASE}/api/auth/verify", data=body,
+                             headers={"Content-Type": "application/json"})
+with urllib.request.urlopen(req, timeout=30) as r:
+    viewer_token = json.load(r)["viewerToken"]
+print(viewer_token)  # show this to your human once
+```
 
 ### Endpoints
 

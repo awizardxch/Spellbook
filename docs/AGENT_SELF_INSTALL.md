@@ -54,6 +54,10 @@ block at the end. It is a protocol, not a suggestion:
   point your human at the file; they store it somewhere safe (ideally off
   the machine) and delete it there. Confirm receipt, then drop the words
   from your context.
+- **Then seal the seed (required).** Run `spellbook-seed serve`, get the
+  one-time link to your human's browser (TLS tunnel / port-forward — see
+  §6b), and wait. They set the seal password on that page; you never see
+  it. Do not call the install done with the seed unsealed.
 
 **5. Verify before you finish.**
 
