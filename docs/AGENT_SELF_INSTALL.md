@@ -118,6 +118,12 @@ fix the cause and re-run; nothing half-installed needs cleaning first.
   `SPELLBOOK_SAGE_TARGET_BASE=/roomy/path` (or `CARGO_TARGET_DIR` directly).
   The target dir is namespaced by Sage pin and persists across runs, so a
   killed build resumes instead of recompiling from zero.
+- **Build dies silently (OOM).** Release rustc jobs can hold ~2 GB each; on a
+  small box the kernel OOM-killer can take the build out with no error. The
+  installer caps cargo parallelism at available-RAM/2GB (and at nproc) —
+  override with `CARGO_BUILD_JOBS=N`. A heartbeat line lands in the install
+  log every 60s (`SPELLBOOK_BUILD_HEARTBEAT_SECS` to change it), so a death
+  shows up as a heartbeat that simply stops, with the last crate named.
 - **Sage smoke test.** The pinned `sage-cli` exposes no `--version` flag
   (clap rejects it), so the installer smoke-tests with `sage --help` against
   the *installed* binary — this also covers the upgrade fast path. If it

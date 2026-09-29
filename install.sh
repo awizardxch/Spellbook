@@ -266,8 +266,47 @@ else
   [ "$HEAD" = "$SAGE_COMMIT" ] \
     || fail "Sage checkout is ${HEAD}, not the pinned ${SAGE_COMMIT} — refusing to build"
   log "Sage source verified at pinned commit ${HEAD}"
-  ( cd "$SAGE_SRC" && cargo build --release -p sage-cli ) \
-    || fail "sage-cli build failed — needs a Rust toolchain plus the Tauri prerequisites (https://v2.tauri.app/start/prerequisites/)"
+  # Memory-aware cargo parallelism: a release rustc job can hold ~2 GB, so
+  # cap jobs at available-RAM/2GB (and at nproc). An explicit CARGO_BUILD_JOBS
+  # from the operator is always honored. This keeps the build alive on small
+  # boxes instead of dying silently to the OOM killer mid-compile.
+  if [ -z "${CARGO_BUILD_JOBS:-}" ]; then
+    MEM_MB="$(awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null)"
+    [ -n "$MEM_MB" ] || MEM_MB="$(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null)"
+    NPROC="$(nproc 2>/dev/null || echo 2)"
+    if [ -n "$MEM_MB" ] && [ "$MEM_MB" -gt 0 ] 2>/dev/null; then
+      MEM_JOBS=$(( MEM_MB / 2048 ))
+      [ "$MEM_JOBS" -ge 1 ] || MEM_JOBS=1
+      [ "$NPROC" -lt "$MEM_JOBS" ] && MEM_JOBS="$NPROC"
+      export CARGO_BUILD_JOBS="$MEM_JOBS"
+      log "cargo build jobs: $MEM_JOBS (cpus=$NPROC, available RAM=${MEM_MB}MB)"
+    else
+      log "could not read available RAM — leaving cargo parallelism at its default"
+    fi
+  else
+    log "cargo build jobs: ${CARGO_BUILD_JOBS} (operator override)"
+  fi
+  # Build with a heartbeat. The release compile runs 20+ minutes with no
+  # output, so log progress every minute: elapsed time plus the crate
+  # currently compiling. A silent death (OOM kill, lost session) then shows
+  # up as a heartbeat that simply stops, instead of a mystery.
+  SAGE_BUILD_LOG="${WORK}/sage-build.log"
+  case "${SPELLBOOK_BUILD_HEARTBEAT_SECS:-60}" in
+    ''|*[!0-9]*|0) HEARTBEAT_SECS=60 ;;
+    *)             HEARTBEAT_SECS="${SPELLBOOK_BUILD_HEARTBEAT_SECS}" ;;
+  esac
+  ( cd "$SAGE_SRC" && cargo build --release -p sage-cli >"$SAGE_BUILD_LOG" 2>&1 ) &
+  SAGE_BUILD_PID=$!
+  SAGE_BUILD_START="$(date +%s)"
+  while kill -0 "$SAGE_BUILD_PID" 2>/dev/null; do
+    sleep "$HEARTBEAT_SECS"
+    kill -0 "$SAGE_BUILD_PID" 2>/dev/null || break
+    SAGE_ELAPSED=$(( $(date +%s) - SAGE_BUILD_START ))
+    SAGE_LAST_CRATE="$(grep -o 'Compiling [^ ]*' "$SAGE_BUILD_LOG" 2>/dev/null | tail -1)"
+    log "sage build running (${SAGE_ELAPSED}s elapsed${SAGE_LAST_CRATE:+, $SAGE_LAST_CRATE} ...) ..."
+  done
+  wait "$SAGE_BUILD_PID" \
+    || fail "sage-cli build failed — last 30 lines of the build log:$(tail -30 "$SAGE_BUILD_LOG" 2>/dev/null | sed 's/^/  /')"
   SAGE_BIN_STAGED="${CARGO_TARGET_DIR}/release/sage"
   [ -x "$SAGE_BIN_STAGED" ] \
     || fail "sage-cli build produced no binary at $SAGE_BIN_STAGED"
