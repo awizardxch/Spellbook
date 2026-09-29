@@ -239,12 +239,22 @@ else
   # bindgen (aws-lc-sys and friends) needs libclang at build time.
   ldconfig -p 2>/dev/null | grep -q libclang \
     || fail "libclang not found — the Sage build needs it (bindgen). On Debian/Ubuntu: apt-get install -y libclang-dev clang"
-  # The Sage release build needs several GB under $WORK (cargo target dir).
-  # /tmp is often a small tmpfs — set TMPDIR to a roomier filesystem first.
-  WORK_FREE_KB="$(df -k "$WORK" 2>/dev/null | awk 'NR==2 {print $4}')"
-  { [ -n "$WORK_FREE_KB" ] && [ "$WORK_FREE_KB" -ge 5242880 ]; } \
-    || fail "only ${WORK_FREE_KB:-unknown} KB free under $WORK — the Sage build needs ~5 GB. Set TMPDIR to a filesystem with room (e.g. TMPDIR=\$HOME/.spellbuild-tmp) and re-run."
-  log "building sage-cli from pinned commit ${SAGE_COMMIT} ..."
+  # Persistent target dir, namespaced by Sage pin: a killed or re-run build
+  # resumes instead of recompiling from zero (the bulk of the time is
+  # pin-stable registry deps). Safe to delete at any time; the operator's own
+  # CARGO_TARGET_DIR is honored when set.
+  SAGE_TARGET_BASE="${SPELLBOOK_SAGE_TARGET_BASE:-/var/cache/spellbook/sage-target}"
+  SAGE_TARGET_DIR="${CARGO_TARGET_DIR:-${SAGE_TARGET_BASE}/${SAGE_COMMIT}}"
+  mkdir -p "$SAGE_TARGET_DIR" \
+    || fail "could not create Sage target dir at $SAGE_TARGET_DIR"
+  export CARGO_TARGET_DIR="$SAGE_TARGET_DIR"
+  # The Sage release build needs several GB in the target dir. /tmp is often
+  # a small tmpfs — if the target base lives somewhere tight, move it:
+  # SPELLBOOK_SAGE_TARGET_BASE=/roomy/path (or CARGO_TARGET_DIR directly).
+  TARGET_FREE_KB="$(df -k "$SAGE_TARGET_DIR" 2>/dev/null | awk 'NR==2 {print $4}')"
+  { [ -n "$TARGET_FREE_KB" ] && [ "$TARGET_FREE_KB" -ge 5242880 ]; } \
+    || fail "only ${TARGET_FREE_KB:-unknown} KB free under $SAGE_TARGET_DIR — the Sage build needs ~5 GB. Set SPELLBOOK_SAGE_TARGET_BASE (or CARGO_TARGET_DIR) to a roomier filesystem and re-run."
+  log "building sage-cli from pinned commit ${SAGE_COMMIT} (target dir: $SAGE_TARGET_DIR) ..."
   SAGE_SRC="${WORK}/sage-src"
   git init -q "$SAGE_SRC"
   git -C "$SAGE_SRC" remote add origin "$SAGE_REPO"
@@ -258,9 +268,9 @@ else
   log "Sage source verified at pinned commit ${HEAD}"
   ( cd "$SAGE_SRC" && cargo build --release -p sage-cli ) \
     || fail "sage-cli build failed — needs a Rust toolchain plus the Tauri prerequisites (https://v2.tauri.app/start/prerequisites/)"
-  [ -x "${SAGE_SRC}/target/release/sage" ] \
-    || fail "sage-cli build produced no target/release/sage binary"
-  SAGE_BIN_STAGED="${SAGE_SRC}/target/release/sage"
+  SAGE_BIN_STAGED="${CARGO_TARGET_DIR}/release/sage"
+  [ -x "$SAGE_BIN_STAGED" ] \
+    || fail "sage-cli build produced no binary at $SAGE_BIN_STAGED"
 fi
 
 # ---------------------------------------------------------------- 3. OS user + layout (S2)

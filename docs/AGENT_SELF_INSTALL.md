@@ -113,8 +113,11 @@ fix the cause and re-run; nothing half-installed needs cleaning first.
   `apt-get install -y libclang-dev clang`.
 - **`/tmp` too small.** The Sage release build needs several GB for the cargo
   target dir, and `/tmp` is often a 512M tmpfs — the build dies mid-compile
-  (`aws-lc-sys`) with "No space left on device". Fix: point the build at room:
-  `mkdir -p ~/.spellbuild-tmp && TMPDIR=~/.spellbuild-tmp bash install.sh …`.
+  (`aws-lc-sys`) with "No space left on device". The installer fails fast if
+  the target dir's filesystem is tight; point it at room with
+  `SPELLBOOK_SAGE_TARGET_BASE=/roomy/path` (or `CARGO_TARGET_DIR` directly).
+  The target dir is namespaced by Sage pin and persists across runs, so a
+  killed build resumes instead of recompiling from zero.
 - **Sage smoke test.** The pinned `sage-cli` exposes no `--version` flag
   (clap rejects it), so the installer smoke-tests with `sage --help` against
   the *installed* binary — this also covers the upgrade fast path. If it
