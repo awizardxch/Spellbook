@@ -367,7 +367,7 @@ else
     SAGE_BUILD_LOG="${WORK}/sage-build.log"
     case "${SPELLBOOK_BUILD_HEARTBEAT_SECS:-60}" in
       ''|*[!0-9]*|0) HEARTBEAT_SECS=60 ;;
-      *)             HEARTBEAT_SECS="${SPELLBOOK_BUILD_HEARTBEAT_SECS}" ;;
+      *)             HEARTBEAT_SECS="${SPELLBOOK_BUILD_HEARTBEAT_SECS:-60}" ;;
     esac
     ( cd "$SAGE_SRC" && cargo build --release -p sage-cli >"$SAGE_BUILD_LOG" 2>&1 ) &
     SAGE_BUILD_PID=$!
