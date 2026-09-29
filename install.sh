@@ -424,6 +424,11 @@ chmod 0700 "${PREFIX}"
 SAGE_BIN_FINAL=""
 if [ "$CHIA_ENABLED" = true ]; then
   mkdir -p "${PREFIX}/bin"
+  # The daemon runs as SPELLBOOK_USER and must traverse bin/ to exec sage —
+  # the dir inherits root ownership/umask from mkdir, so fix it explicitly
+  # (the binary alone being 0755 is not enough).
+  chown "${SPELLBOOK_USER}:${SPELLBOOK_USER}" "${PREFIX}/bin"
+  chmod 0755 "${PREFIX}/bin"
   if [ "$SAGE_BIN_STAGED" = "KEEP" ]; then
     log "keeping installed sage binary (pin unchanged)"
     SAGE_BIN_FINAL="${PREFIX}/bin/sage"
