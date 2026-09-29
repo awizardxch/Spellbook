@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Spellbook Seal Ceremony (minimal)</title>
+<style>
+body{background:#0e1210;color:#eef4f0;font-family:system-ui,sans-serif;max-width:600px;margin:0 auto;padding:24px 16px 60px;line-height:1.5}
+h1{font-size:1.4rem} .sub{color:#9fb0a6}
+.warn{background:#2a1f0d;border:1px solid #ffb454;border-radius:8px;padding:12px;color:#ffd9a0;margin:16px 0}
+.card{background:#161c19;border:1px solid #2c3831;border-radius:12px;padding:18px;margin:16px 0}
+.card h2{margin:0 0 8px;font-size:1.05rem}
+textarea,input{width:100%;background:#0c100e;color:#eef4f0;border:1px solid #2c3831;border-radius:8px;padding:12px;font-family:monospace;font-size:13px;margin:8px 0}
+textarea{min-height:100px}
+button{background:#5fd39a;color:#06130c;border:none;border-radius:8px;padding:12px 18px;font-weight:700;cursor:pointer;margin:6px 6px 6px 0}
+button:disabled{opacity:.45} button.ghost{background:transparent;color:#5fd39a;border:1px solid #5fd39a}
+.err{color:#ff8c86;min-height:1.2em;font-size:.9em} .ok{color:#5fd39a;font-size:.9em}
+.doc{background:#0c100e;border:1px solid #2c3831;border-radius:8px;padding:12px;white-space:pre-wrap;font-family:monospace;font-size:12px;max-height:380px;overflow:auto}
+ol{padding-left:20px} li{margin:4px 0}
+</style>
+</head>
+<body>
+<h1>🔐 Spellbook Seal Ceremony <span style="font-size:.8em;color:#9fb0a6">(minimal)</span></h1>
+<p class="sub">Fallback page — same 3 steps, stripped down. Fully offline.</p>
+<div class="warn"><b>⚠️ DO NOT RELOAD THIS PAGE.</b> Your reveal private key lives only in this page's memory.</div>
+
+<div class="card">
+<h2>1 — Reveal key → agent</h2>
+<ol>
+<li>Click <b>Generate</b>, then <b>Copy</b>.</li>
+<li>Paste the public key into chat for the agent.</li>
+<li>The agent sends back an encrypted <b>envelope</b> as a copy-paste block.</li>
+</ol>
+<button id="g1">Generate reveal key</button>
+<button id="c1" class="ghost" disabled>Copy public key</button>
+<textarea id="pub" readonly placeholder="Public key…"></textarea>
+<div class="err" id="e1"></div>
+</div>
+
+<div class="card">
+<h2>2 — Envelope → decrypt → paper</h2>
+<ol>
+<li>Paste the agent's <b>envelope</b> below, click <b>Decrypt</b>.</li>
+<li><b>Verify</b> both 24-word sets + the SET 1 EVM address the agent gave you.</li>
+<li><b>Write everything on paper.</b> Tell the agent <i>"backup recorded"</i>.</li>
+</ol>
+<textarea id="env" placeholder="Paste envelope…"></textarea>
+<button id="d2">Decrypt backup</button>
+<div class="err" id="e2"></div><div class="ok" id="o2"></div>
+<div class="doc" id="doc" hidden></div>
+<button id="c2" class="ghost" hidden>Copy document</button>
+</div>
+
+<div class="card">
+<h2>3 — Seal password → agent</h2>
+<ol>
+<li>Enter a <b>new</b> password (12+ chars). <b>Write it on paper first.</b></li>
+<li>Click <b>Encrypt</b>, then <b>Copy</b>.</li>
+<li>Paste the ciphertext into chat. The agent seals your keys.</li>
+</ol>
+<input type="password" id="p1" placeholder="New seal password" autocomplete="new-password">
+<input type="password" id="p2" placeholder="Confirm" autocomplete="new-password">
+<button id="g3" class="ghost">Generate (8 words)</button>
+<button id="t3" class="ghost">Show</button>
+<div class="err" id="e3"></div>
+<button id="en3">Encrypt password</button>
+<textarea id="ct" readonly hidden placeholder="Ciphertext…"></textarea>
+<button id="c3" class="ghost" hidden>Copy ciphertext</button>
+<div class="ok" id="o3"></div>
+</div>
+
+<script>
+"use strict";
+/* AGENT SETUP: replace __SEAL_PUB_B64__ with base64 DER SPKI RSA-2048 public key. Keep private.pem secret. */
+var SEAL_PUB_B64="__SEAL_PUB_B64__";
+var priv=null;
+function b2b(b){var s="";for(var i=0;i<b.length;i++)s+=String.fromCharCode(b[i]);return btoa(s);}
+function b642b(s){s=s.replace(/\s+/g,"");var b=atob(s);var u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u;}
+async function cp(v,n,m){try{await navigator.clipboard.writeText(v);n.textContent=m;}catch(e){n.textContent="Select and copy manually.";}}
+
+document.getElementById("g1").onclick=async function(){
+  var e=document.getElementById("e1");e.textContent="";
+  try{
+    var kp=await crypto.subtle.generateKey({name:"RSA-OAEP",modulusLength:2048,publicExponent:new Uint8Array([1,0,1]),hash:"SHA-256"},false,["encrypt","decrypt"]);
+    priv=kp.privateKey;
+    document.getElementById("pub").value=b2b(new Uint8Array(await crypto.subtle.exportKey("spki",kp.publicKey)));
+    document.getElementById("c1").disabled=false;
+  }catch(x){e.textContent=x.message;}
+};
+document.getElementById("c1").onclick=function(){cp(document.getElementById("pub").value,document.getElementById("e1"),"Copied — paste into chat.");};
+
+document.getElementById("d2").onclick=async function(){
+  var e=document.getElementById("e2"),o=document.getElementById("o2");e.textContent="";o.textContent="";
+  document.getElementById("doc").hidden=true;document.getElementById("c2").hidden=true;
+  if(!priv){e.textContent="Generate the reveal key first.";return;}
+  try{
+    var env=JSON.parse(atob(document.getElementById("env").value.trim().replace(/\s+/g,"")));
+    var ak=await crypto.subtle.decrypt({name:"RSA-OAEP"},priv,b642b(env.k));
+    var pt=await crypto.subtle.decrypt({name:"AES-GCM",iv:b642b(env.n)},await crypto.subtle.importKey("raw",ak,"AES-GCM",false,["decrypt"]),b642b(env.c));
+    var d=document.getElementById("doc");d.textContent=new TextDecoder().decode(pt);d.hidden=false;
+    document.getElementById("c2").hidden=false;
+    o.textContent="Decrypted — verify, then write EVERYTHING on paper.";
+  }catch(x){e.textContent="Failed: "+x.message;}
+};
+document.getElementById("c2").onclick=function(){cp(document.getElementById("doc").textContent,document.getElementById("o2"),"Copied.");};
+
+var W=["abandon","ability","able","about","above","absent","absorb","abstract","absurd","abuse","access","accident","account","accuse","achieve","acid","acoustic","acquire","across","act","action","actor","actress","actual","adapt","add","addict","address","adjust","admit","adult","advance","advice","aerobic","affair","afford","afraid","again","age","agent","agree","ahead","aim","air","airport","aisle","alarm","album","alcohol","alert","alien","all","alley","allow","almost","alone","alpha","already","also","alter","always","amateur","amazing","among","amount","amused","analyst","anchor","ancient","anger","angle","angry","animal","ankle","announce","annual","another","answer","antenna","antique","anxiety","any","apart","apology","appear","apple","approve","april","arch","arctic","area","arena","argue","arm","armed","armor","army","around","arrange","arrest","arrive","arrow","art","artefact","artist","artwork","ask","aspect","assault","asset","assist","assume","asthma","athlete","atom","attack","attend","attitude","attract","auction","audit","august","aunt","author","auto","autumn","average","avocado","avoid","awake","aware","away","awesome","awful","awkward","axis","baby","bachelor","bacon","badge","bag","balance","balcony","ball","bamboo","banana","banner","bar","barely","bargain","barrel","base","basic","basket","battle","beach","bean","beauty","because","become","beef","before","begin","behave","behind","believe","below","belt","bench","benefit","best","betray","better","between","beyond","bicycle","bid","bike","bind","biology","bird","birth","bitter","black","blade","blame","blanket","blast","bleak","bless","blind","blood","blossom","blouse","blue","blur","blush","board","boat","body","boil","bomb","bone","bonus","book","boost","border","boring","borrow","boss","bottom","bounce","box","boy","bracket","brain","brand","brass","brave","bread","breeze","brick","bridge","brief","bright","bring","brisk","broccoli","broken","bronze","broom","brother","brown","brush","bubble","buddy","budget","buffalo","build","bulb","bulk","bullet","bundle","bunker","burden","burger","burst","bus","business","busy","butter","buyer","buzz","cabbage","cabin","cable","cactus","cage","cake","call","calm","camera","camp","can","canal","cancel","candy","cannon","canoe","canvas","canyon","capable","capital","captain","car","carbon","card","cargo","carpet","carry","cart","case","cash","casino","castle","casual","cat","catalog","catch","category","cattle","caught","cause","caution","cave","ceiling","celery","cement","census","century","cereal","certain","chair","chalk","champion","change","chaos","chapter","charge","chase","chat","cheap","check","cheese","chef","cherry","chest","chicken","chief","child","chimney","choice","choose","chronic","chuckle","chunk","churn","cigar","cinnamon","circle","citizen","city","civil","claim","clap","clarify","claw","clay","clean","clerk","clever","click","client","cliff","climb","clinic","clip","clock","clog","close","cloth","cloud","clown","club","clump","cluster","clutch","coach","coast","coconut","code","coffee","coil","coin","collect","color","column","combine","come","comfort","comic","common","company","concert","conduct","confirm","congress","connect","consider","control","convince","cook","cool","copper","copy","coral","core","corn","correct","cost","cotton","couch","country","couple","course","cousin","cover","coyote","crack","cradle","craft","cram","crane","crash","crater","crawl","crazy","cream","credit","creek","crew","cricket","crime","crisp","critic","crop","cross","crouch","crowd","crucial","cruel","cruise","crumble","crunch","crush","cry","crystal","cube","culture","cup","cupboard","curious","current","curtain","curve","cushion","custom","cute","cycle","dad","damage","damp","dance","danger","daring","dash","daughter","dawn","day","deal","debate","debris","decade","december","decide","decline","decorate","decrease","deer","defense","define","defy","degree","delay","deliver","demand","demise","denim","dense","dentist","deny","depart","depend","deposit","depth","deputy","derive","describe","desert","design","desk","despair","destroy","detail","detect","develop","device","devote","diagram","dial","diamond","diary","dice","diesel","diet","differ","digital","dignity","dilemma","dinner","dinosaur","direct","dirt","disagree","discover","disease","dish","dismiss","disorder","display","distance","divert","divide","divorce","dizzy","doctor","document","dog","doll","dolphin","domain","donate","donkey","donor","door","dose","double","dove","draft","dragon","drama","drastic","draw","dream","dress","drift","drill","drink","drip","drive","drop","drum","dry","duck","dumb","dune","during","dust","dutch","duty","dwarf","dynamic","eager","eagle","early","earn","earth","easily","east","easy","echo","ecology","economy","edge","edit","educate","effort","egg","eight","either","elbow","elder","electric","elegant","element","elephant","elevator","elite","else","embark","embody","embrace","emerge","emotion","employ","empower","empty","enable","enact","end","endless","endorse","enemy","energy","enforce","engage","engine","enhance","enjoy","enlist","enough","enrich","enroll","ensure","enter","entire","entry","envelope","episode","equal","equip","era","erase","erode","erosion","error","erupt","escape","essay","essence","estate","eternal","ethics","evidence","evil","evoke","evolve","exact","example","excess","exchange","excite","exclude","excuse","execute","exercise","exhaust","exhibit","exile","exist","exit","exotic","expand","expect","expire","explain","expose","express","extend","extra","eye","eyebrow","fabric","face","faculty","fade","faint","faith","fall","false","fame","family","famous","fan","fancy","fantasy","farm","fashion","fat","fatal","father","fatigue","fault","favorite","feature","february","federal","fee","feed","feel","female","fence","festival","fetch","fever","few","fiber","fiction","field","figure","file","film","filter","final","find","fine","finger","finish","fire","firm","first","fiscal","fish","fit","fitness","fix","flag","flame","flash","flat","flavor","flee","flight","flip","float","flock","floor","flower","fluid","flush","fly","foam","focus","fog","foil","fold","follow","food","foot","force","forest","forget","fork","fortune","forum","forward","fossil","foster","found","fox","fragile","frame","frequent","fresh","friend","fringe","frog","front","frost","frown","frozen","fruit","fuel","fun","funny","furnace","fury","future","gadget","gain","galaxy","gallery","game","gap","garage","garbage","garden","garlic","garment","gas","gasp","gate","gather","gauge","gaze","general","genius","genre","gentle","genuine","geography","gesture","ghost","giant","gift","giggle","ginger","giraffe","girl","give","glad","glance","glare","glass","glide","glimpse","globe","gloom","glory","glove","glow","glue","goat","goddess","gold","good","goose","gorilla","gospel","gossip","govern","gown","grab","grace","grain","grant","grape","grass","gravity","great","green","grid","grief","grit","grocery","group","grove","grow","grunt","guard","guess","guide","guilt","guitar","gun","gym","habit","hair","half","hammer","hamster","hand","happy","harbor","hard","harsh","harvest","hat","have","hawk","hazard","head","health","heart","heavy","hedgehog","height","hello","helmet","help","hen","hero","hidden","high","hill","hint","hip","hire","history","hobby","hockey","hold","hole","holiday","hollow","home","honey","hood","hope","horn","horror","horse","hospital","host","hotel","hour","hover","hub","huge","human","humble","humor","hundred","hungry","hunt","hurdle","hurry","hurt","husband","hybrid","ice","icon","idea","identify","idle","ignore","ill","illegal","illness","image","imitate","immense","immune","impact","impose","improve","impulse","inch","include","income","increase","index","indicate","indoor","industry","infant","inflict","inform","inhale","inherit","initial","inject","injury","inmate","inner","innocent","input","inquiry","insane","insect","inside","inspire","install","intact","interest","into","invest","invite","involve","iron","island","isolate","issue","item","ivory","jacket","jaguar","jar","jazz","jealous","jeans","jelly","jewel","job","join","joke","journey","joy","judge","juice","jump","jungle","junior","junk","just","kangaroo","keen","keep","ketchup","key","kick","kid","kidney","kind","kingdom","kiss","kit","kitchen","kite","kitten","kiwi","knee","knife","knock","know","lab","label","labor","ladder","lady","lake","lamp","language","laptop","large","later","latin","laugh","laundry","lava","law","lawn","lawyer","layer","lazy","leader","leaf","learn","leave","lecture","left","leg","legal","legend","leisure","lemon","lend","length","lens","leopard","lesson","letter","level","liar","liberty","library","license","life","lift","light","like","limb","limit","link","lion","liquid","list","little","live","lizard","load","loan","lobster","local","lock","logic","lonely","long","loop","lottery","loud","lounge","love","loyal","lucky","luggage","lumber","lunar","lunch","luxury","lyrics","machine","mad","magic","magnet","maid","mail","main","major","make","mammal","man","manage","mandate","mango","mansion","manual","maple","marble","march","margin","marine","market","marriage","mask","mass","master","match","material","math","matrix","matter","maximum","maze","meadow","mean","measure","meat","mechanic","medal","media","melody","melt","member","memory","mention","menu","mercy","merge","merit","merry","mesh","message","metal","method","middle","midnight","milk","million","mimic","mind","minimum","minor","minute","miracle","mirror","misery","miss","mistake","mix","mixed","mixture","mobile","model","modify","mom","moment","monitor","monkey","monster","month","moon","moral","more","morning","mosquito","mother","motion","motor","mountain","mouse","move","movie","much","muffin","mule","multiply","muscle","museum","mushroom","music","must","mutual","myself","mystery","myth","naive","name","napkin","narrow","nasty","nation","nature","near","neck","need","negative","neglect","neither","nephew","nerve","nest","net","network","neutral","never","news","next","nice","night","noble","noise","nominee","noodle","normal","north","nose","notable","note","nothing","notice","novel","now","nuclear","number","nurse","nut","oak","obey","object","oblige","obscure","observe","obtain","obvious","occur","ocean","october","odor","off","offer","office","often","oil","okay","old","olive","olympic","omit","once","one","onion","online","only","open","opera","opinion","oppose","option","orange","orbit","orchard","order","ordinary","organ","orient","original","orphan","ostrich","other","outdoor","outer","output","outside","oval","oven","over","own","owner","oxygen","oyster","ozone","pact","paddle","page","pair","palace","palm","panda","panel","panic","panther","paper","parade","parent","park","parrot","party","pass","patch","path","patient","patrol","pattern","pause","pave","payment","peace","peanut","pear","peasant","pelican","pen","penalty","pencil","people","pepper","perfect","permit","person","pet","phone","photo","phrase","physical","piano","picnic","picture","piece","pig","pigeon","pill","pilot","pink","pioneer","pipe","pistol","pitch","pizza","place","planet","plastic","plate","platform","play","please","pledge","pluck","plug","plunge","poem","poet","poetry","point","polar","pole","police","pond","pony","pool","popular","portion","position","possible","post","potato","pottery","poverty","powder","power","practice","praise","predict","prefer","prepare","present","pretty","prevent","price","pride","primary","print","priority","prison","private","prize","problem","process","produce","profit","program","project","promote","proof","property","prosper","protect","proud","provide","public","pudding","pull","pulp","pulse","pumpkin","punch","pupil","puppy","purchase","purity","purpose","purse","push","put","puzzle","pyramid","qualify","quality","quantum","quarter","question","quick","quit","quiz","quote","rabbit","raccoon","race","rack","radar","radio","rail","rain","raise","rally","ramp","ranch","random","range","rapid","rare","rate","rather","raven","raw","razor","ready","real","reason","rebel","rebuild","recall","receive","recipe","record","recycle","reduce","reflect","reform","refuse","region","regret","regular","reject","relax","release","relief","rely","remain","remember","remind","remove","render","renew","rent","reopen","repair","repeat","replace","report","require","rescue","resemble","resist","resource","response","result","retire","retreat","return","reunion","reveal","review","reward","rhythm","rib","ribbon","rice","rich","ride","ridge","rifle","right","rigid","ring","riot","ripple","risk","ritual","rival","river","road","roast","robot","robust","rocket","romance","roof","rookie","room","rose","rotate","rough","round","route","royal","rubber","rude","rug","rule","run","runway","rural","sad","saddle","sadness","safe","sail","salad","salmon","salon","salt","salute","same","sample","sand","satisfy","satoshi","sauce","sausage","save","say","scale","scan","scare","scatter","scene","scheme","school","science","scissors","scorpion","scout","scrap","screen","script","scrub","sea","search","season","seat","second","secret","section","security","seed","seek","segment","select","sell","seminar","senior","sense","sentence","series","service","session","settle","setup","seven","shadow","shaft","shallow","share","shed","shell","sheriff","shield","shift","shine","ship","shiver","shock","shoe","shoot","shop","short","shoulder","shove","shrimp","shrug","shuffle","shy","sibling","sick","side","siege","sight","sign","silent","silk","silly","silver","similar","simple","since","sing","siren","sister","situate","six","size","skate","sketch","ski","skill","skin","skirt","skull","slab","slam","sleep","slender","slice","slide","slight","slim","slogan","slot","slow","slush","small","smart","smile","smoke","smooth","snack","snake","snap","sniff","snow","soap","soccer","social","sock","soda","soft","solar","soldier","solid","solution","solve","someone","song","soon","sorry","sort","soul","sound","soup","source","south","space","spare","spatial","spawn","speak","special","speed","spell","spend","sphere","spice","spider","spike","spin","spirit","split","spoil","sponsor","spoon","sport","spot","spray","spread","spring","spy","square","squeeze","squirrel","stable","stadium","stairs","stamp","stand","start","state","static","statue","status","stay","steak","steel","stem","step","stereo","stick","still","sting","stock","stomach","stone","stool","story","stove","strategy","street","strike","strong","struggle","student","stuff","stumble","style","subject","submit","subway","success","such","sudden","suffer","sugar","suggest","suit","summer","sun","sunny","sunset","super","supply","supreme","sure","surface","surge","surprise","surround","survey","suspect","sustain","swallow","swamp","swap","swarm","swear","sweet","swift","swim","swing","switch","sword","symbol","symptom","syrup","system","table","tackle","tag","tail","talent","talk","tank","tape","target","task","taste","tattoo","taxi","teach","team","tell","ten","tenant","tennis","tent","term","test","text","thank","that","theme","then","theory","there","they","thing","this","thought","three","thrive","throw","thumb","thunder","ticket","tide","tiger","tilt","timber","time","tiny","tip","tired","tissue","title","toast","tobacco","today","toddler","toe","together","toilet","token","tomato","tomorrow","tone","tongue","tonight","tool","tooth","top","topic","topple","torch","tornado","tortoise","toss","total","tourist","toward","tower","town","toy","track","trade","traffic","tragic","trail","train","transfer","trap","trash","travel","tray","treat","tree","trend","trial","tribe","trick","trigger","trim","trip","trophy","trouble","truck","true","truly","trumpet","trust","truth","try","tube","tuition","tumble","tuna","tunnel","turkey","turn","turtle","twelve","twenty","twice","twin","twist","two","type","typical","ugly","umbrella","unable","unaware","uncle","uncover","under","undo","unfair","unfold","unhappy","uniform","unique","unit","universe","unknown","unlock","until","unusual","unveil","update","upgrade","uphold","upon","upper","upset","urban","urge","usage","use","used","useful","useless","usual","utility","vacant","vacuum","vague","valid","valley","valve","van","vanish","vapor","various","vast","vault","vehicle","velvet","vendor","venture","venue","verb","verify","version","very","vessel","veteran","viable","vibrant","vicious","victory","video","view","village","vintage","violin","virtual","virus","visa","visit","visual","vital","vivid","vocal","voice","void","volcano","volume","vote","voyage","wage","wagon","wait","walk","wall","walnut","want","warfare","warm","warrior","wash","wasp","waste","water","wave","way","wealth","weapon","wear","weasel","weather","web","wedding","weekend","weird","welcome","west","wet","whale","what","wheat","wheel","when","where","whip","whisper","wide","width","wife","wild","will","win","window","wine","wing","wink","winner","winter","wire","wisdom","wise","wish","witness","wolf","woman","wonder","wood","wool","word","work","world","worry","worth","would","wound","wrap","wreck","wrestle","wrist","write","wrong","yard","year","yellow","you","young","youth","zebra","zero","zone","zoo"];
+document.getElementById("g3").onclick=function(){
+  var r=new Uint32Array(8);crypto.getRandomValues(r);var w=[];
+  for(var i=0;i<8;i++)w.push(W[r[i]%2048]);
+  var p=w.join(" ");document.getElementById("p1").value=p;document.getElementById("p2").value=p;
+  document.getElementById("e3").textContent="";
+};
+document.getElementById("t3").onclick=function(){
+  var a=document.getElementById("p1"),b=document.getElementById("p2");
+  var s=a.type==="password";a.type=s?"text":"password";b.type=s?"text":"password";
+  this.textContent=s?"Hide":"Show";
+};
+document.getElementById("en3").onclick=async function(){
+  var e=document.getElementById("e3"),o=document.getElementById("o3");e.textContent="";o.textContent="";
+  var a=document.getElementById("p1").value,b=document.getElementById("p2").value;
+  var ct=document.getElementById("ct");ct.hidden=true;document.getElementById("c3").hidden=true;
+  if(a.length<12){e.textContent="Use at least 12 characters.";return;}
+  if(a!==b){e.textContent="Passwords do not match.";return;}
+  if(new TextEncoder().encode(a).length>190){e.textContent="Too long — under 190 bytes.";return;}
+  var btn=this;btn.disabled=true;btn.textContent="Encrypting…";
+  try{
+    if(SEAL_PUB_B64.indexOf("__SEAL_PUB_B64__")===0)throw new Error("Seal public key not set — agent must embed it first.");
+    var k=await crypto.subtle.importKey("spki",b642b(SEAL_PUB_B64),{name:"RSA-OAEP",hash:"SHA-256"},false,["encrypt"]);
+    var c=await crypto.subtle.encrypt({name:"RSA-OAEP"},k,new TextEncoder().encode(a));
+    ct.value=b2b(new Uint8Array(c));ct.hidden=false;
+    document.getElementById("c3").hidden=false;
+    document.getElementById("p1").value="";document.getElementById("p2").value="";
+    o.textContent="Encrypted — copy the ciphertext and paste it into chat.";
+  }catch(x){e.textContent="Failed: "+x.message;}
+  btn.disabled=false;btn.textContent="Encrypt password";
+};
+document.getElementById("c3").onclick=function(){cp(document.getElementById("ct").value,document.getElementById("o3"),"Copied — paste into chat.");};
+</script>
+</body>
+</html>
