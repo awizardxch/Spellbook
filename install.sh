@@ -14,11 +14,19 @@
 #
 # What it does:
 #   1. Verifies the release tarball (checksum + release-key signature) — fail closed.
-#   2. Builds the Sage CLI from the pinned commit (SPEC §3/D4, §10 step 1):
-#      clones the Sage repo, checks out the exact pinned commit, asserts
-#      `git rev-parse HEAD` equals the pin, then compiles the `sage-cli`
-#      crate. The pinned commit IS the verification — the artifact is built
-#      from pinned source, so no release-artifact checksum is needed.
+#   2. Installs the Sage CLI for the pinned commit (SPEC §3/D4, §10 step 1).
+#      Prefers a release-signed prebuilt binary (checksum + release-key
+#      signature verified exactly like the release tarball, plus a
+#      .sage-pin sidecar proving it was built from the pinned commit), so a
+#      quick install never needs the ~20-minute source compile. Local
+#      prebuilts are tried before the network: $SPELLBOOK_SAGE_PREBUILT, then
+#      repo-vendored releases/ under the source tree (this is what makes
+#      --from-dir installs quick). Only when no signed, pin-compatible
+#      prebuilt exists does it clone the Sage repo, check out the exact
+#      pinned commit, assert `git rev-parse HEAD` equals the pin, and compile
+#      the `sage-cli` crate. The pinned commit IS the verification for the
+#      source build — the artifact is built from pinned source, so no
+#      release-artifact checksum is needed.
 #      (Override: an operator-supplied $SAGE_BIN is accepted only with
 #      SAGE_PIN_VERIFIED=1, i.e. verified out-of-band by the operator.)
 #   3. Creates the dedicated `spellbook` OS user (S2), the client group, and the
@@ -93,7 +101,74 @@ verify_release_sig() {
   [ "$(norm_fpr "$sig_fpr")" = "$(norm_fpr "$RELEASE_KEY_FPR")" ]
 }
 
-# Try the release-published prebuilt Sage binary for $1 (platform).
+# Copy a local prebuilt Sage tarball + its sidecar files into the staging dir.
+# $1 = source tarball path, $2 = staging dir. Sidecars (.sha256, .asc,
+# .sage-pin) are copied when present; a missing sidecar is decided by the
+# verifier, not here. Always returns 0.
+stage_local_prebuilt() {
+  local src="$1" dir="$2" base
+  base="$(basename "$src")"
+  cp -p "$src" "${dir}/${base}"
+  [ -f "${src}.sha256" ]  && cp -p "${src}.sha256"  "${dir}/${base}.sha256"
+  [ -f "${src}.asc" ]     && cp -p "${src}.asc"     "${dir}/${base}.asc"
+  [ -f "${src}.sage-pin" ] && cp -p "${src}.sage-pin" "${dir}/${base}.sage-pin"
+  return 0
+}
+
+# Verify + stage a prebuilt Sage tarball already present as $1/$2 (dir/file).
+# $3 is the pin-check mode:
+#   strict   — explicit operator path ($SPELLBOOK_SAGE_PREBUILT): a missing
+#              .sage-pin sidecar or a pin mismatch fails hard.
+#   lenient  — auto-discovered candidate: a missing sidecar or pin mismatch
+#              just skips it (return 1) so the next candidate can be tried.
+#   network  — downloaded for the release being installed: the filename's
+#              version already binds it to this release's pin, so a missing
+#              sidecar is accepted (logged); a present-but-mismatched sidecar
+#              fails hard.
+# A FAILED checksum or signature fails hard in every mode — a bad binary is
+# never quietly skipped over. On success sets SAGE_BIN_STAGED and returns 0.
+use_prebuilt_sage() {
+  local dir="$1" tgz="$2" mode="$3" pin
+  if [ ! -f "${dir}/${tgz}.sha256" ]; then
+    case "$mode" in
+      strict|network) fail "prebuilt ${tgz} has no checksum file (${tgz}.sha256) — refusing to continue" ;;
+      lenient)        log "skipping prebuilt ${tgz}: no checksum file"; return 1 ;;
+    esac
+  fi
+  ( cd "$dir" && sha256sum -c "${tgz}.sha256" >/dev/null ) \
+    || fail "prebuilt ${tgz} checksum mismatch — refusing to install"
+  [ -f "${dir}/${tgz}.asc" ] \
+    || fail "prebuilt ${tgz} is present but its signature is missing — refusing to continue"
+  verify_release_sig "${dir}/${tgz}.asc" "${dir}/${tgz}" \
+    || fail "prebuilt ${tgz} signature is not from the pinned release key — refusing to install"
+  # Pin compatibility: the binary must have been built from the Sage commit
+  # this installer pins. The release process records it in a <tgz>.sage-pin
+  # sidecar next to the tarball (see releases/0.3.2/ for the convention).
+  if [ ! -f "${dir}/${tgz}.sage-pin" ]; then
+    case "$mode" in
+      strict)  fail "prebuilt ${tgz} has no .sage-pin sidecar — cannot confirm it was built from the pinned Sage commit ${SAGE_COMMIT}" ;;
+      lenient) log "skipping prebuilt ${tgz}: no .sage-pin record (this install pins ${SAGE_COMMIT})"; return 1 ;;
+      network) log "prebuilt ${tgz}: no .sage-pin sidecar; pin compatibility by release version match" ;;
+    esac
+  else
+    pin="$(cat "${dir}/${tgz}.sage-pin")"
+    if [ "$pin" != "$SAGE_COMMIT" ]; then
+      case "$mode" in
+        strict|network) fail "prebuilt ${tgz} was built from Sage commit ${pin}, but this install pins ${SAGE_COMMIT} — refusing to install" ;;
+        lenient)        log "skipping prebuilt ${tgz}: built from Sage commit ${pin}, want ${SAGE_COMMIT}"; return 1 ;;
+      esac
+    fi
+  fi
+  log "prebuilt sage ${tgz}: checksum + release-key signature + Sage pin OK"
+  tar xzf "${dir}/${tgz}" -C "$dir" \
+    || fail "prebuilt ${tgz} would not extract"
+  [ -x "${dir}/sage" ] \
+    || fail "prebuilt ${tgz} contains no executable sage binary"
+  SAGE_BIN_STAGED="${dir}/sage"
+  log "using prebuilt sage ${tgz} — skipping the source build"
+}
+
+# Try a prebuilt Sage binary for $1 (platform), local sources before network.
 # On success sets SAGE_BIN_STAGED and returns 0.
 # A missing prebuilt (not published for this release/platform) warns and
 # returns 1 so the caller falls back to the source build. A FAILED checksum
@@ -103,6 +178,36 @@ try_prebuilt_sage() {
   local tgz="sage-${TAG}-${platform}.tar.gz"
   local dir="${WORK}/sage-prebuilt"
   mkdir -p "$dir" || return 1
+
+  # 1. Explicit operator path: $SPELLBOOK_SAGE_PREBUILT -> a sage-*.tar.gz.
+  if [ -n "${SPELLBOOK_SAGE_PREBUILT:-}" ]; then
+    [ -f "$SPELLBOOK_SAGE_PREBUILT" ] \
+      || fail "SPELLBOOK_SAGE_PREBUILT=${SPELLBOOK_SAGE_PREBUILT} is not a file"
+    stage_local_prebuilt "$SPELLBOOK_SAGE_PREBUILT" "$dir"
+    use_prebuilt_sage "$dir" "$(basename "$SPELLBOOK_SAGE_PREBUILT")" strict
+    return 0
+  fi
+
+  # 2. Repo-vendored prebuilts under ${SRC}/releases/. This is what makes
+  #    --from-dir installs quick: TAG is empty there, so the network lookup
+  #    below can never hit, and without this step every local install pays
+  #    the ~20-minute source compile. Prefer the tarball matching the source
+  #    tree's own version, then the newest pin-compatible one (e.g. a 0.3.3
+  #    tree reusing the signed 0.3.2 binary while the Sage pin is unchanged).
+  if [ -n "${SRC:-}" ] && [ -d "${SRC}/releases" ]; then
+    local srcver cand
+    srcver="$(cat "${SRC}/VERSION" 2>/dev/null || true)"
+    for cand in "${SRC}/releases/${srcver}/sage-${srcver}-${platform}.tar.gz" \
+                $(ls "${SRC}/releases/"*/sage-*-"${platform}".tar.gz 2>/dev/null | sort -Vr); do
+      [ -f "$cand" ] || continue
+      stage_local_prebuilt "$cand" "$dir"
+      if use_prebuilt_sage "$dir" "$(basename "$cand")" lenient; then
+        return 0
+      fi
+    done
+  fi
+
+  # 3. Network: GitHub Release assets, then the repo-vendored copy.
   if ! curl -fsSL -o "${dir}/${tgz}" "${REPO}/releases/download/${TAG}/${tgz}" 2>/dev/null \
       && ! curl -fsSL -o "${dir}/${tgz}" "${VENDORED_BASE}/${TAG}/${tgz}" 2>/dev/null; then
     warn "no prebuilt sage ${tgz} for release ${TAG} — building from source"
@@ -116,17 +221,8 @@ try_prebuilt_sage() {
       && ! curl -fsSL -o "${dir}/${tgz}.asc" "${VENDORED_BASE}/${TAG}/${tgz}.asc" 2>/dev/null; then
     fail "prebuilt ${tgz} is published but its signature is missing — refusing to continue"
   fi
-  ( cd "$dir" && sha256sum -c "${tgz}.sha256" >/dev/null ) \
-    || fail "prebuilt ${tgz} checksum mismatch — refusing to install"
-  verify_release_sig "${dir}/${tgz}.asc" "${dir}/${tgz}" \
-    || fail "prebuilt ${tgz} signature is not from the pinned release key — refusing to install"
-  log "prebuilt sage ${tgz}: checksum + release-key signature OK"
-  tar xzf "${dir}/${tgz}" -C "$dir" \
-    || fail "prebuilt ${tgz} would not extract"
-  [ -x "${dir}/sage" ] \
-    || fail "prebuilt ${tgz} contains no executable sage binary"
-  SAGE_BIN_STAGED="${dir}/sage"
-  log "using prebuilt sage ${TAG}/${platform} — skipping the source build"
+  use_prebuilt_sage "$dir" "$tgz" network
+  return 0
 }
 
 usage() {
@@ -260,11 +356,16 @@ log "source: $SRC"
 
 # ---------------------------------------------------------------- 2. Sage CLI, pinned commit
 # SPEC §3/D4 + §10 step 1 (P9): the Sage CLI comes from the pinned commit —
-# preferably as a release-published prebuilt binary (SHA-256 + release-key
-# signature verified exactly like the release tarball), with the source
-# build as the fallback. The source build clones the repo, checks out the
-# exact commit, and asserts `git rev-parse HEAD` equals the pin before
-# compiling; a version string is never trusted on its own.
+# preferably as a release-signed prebuilt binary (SHA-256 + release-key
+# signature verified exactly like the release tarball, plus a .sage-pin
+# sidecar proving it was built from the pinned commit), with the source
+# build as the fallback. Prebuilt lookup order: $SPELLBOOK_SAGE_PREBUILT
+# (explicit operator path), repo-vendored releases/ under the source tree
+# (this is what keeps --from-dir installs quick), then the network
+# (GitHub Release assets, then the repo-vendored copy). The source build
+# clones the repo, checks out the exact commit, and asserts
+# `git rev-parse HEAD` equals the pin before compiling; a version string is
+# never trusted on its own.
 # SPELLBOOK_SAGE_SOURCE=1 forces the source build.
 #
 # Upgrade fast path: if the pin in this release equals the pin the machine
