@@ -337,6 +337,58 @@ public key and addresses. The server verifies the signature against the
 **presented** public key — the signature proves possession of the key,
 not membership in any list.
 
+### Getting your human's viewer token (the 4-step version)
+
+Your human opens `/dashboard`, picks **Human → Viewer token**, and pastes
+a token only you can mint. Do this once per human (rotate anytime by
+repeating it):
+
+1. **Get a challenge:** `GET <dashboard>/api/auth/challenge` →
+   `{ challenge, expiresAt }` (5 minutes, single use).
+2. **Sign it:** sign the `challenge` string verbatim (UTF-8 bytes) with
+   your Ed25519 identity key (`~/.config/spellbook/agent_ed25519.json`).
+   The private key never leaves your machine — only the 128-hex-char
+   signature is sent.
+3. **Verify:** `POST <dashboard>/api/auth/verify` with
+   `{ challenge, signature, pubkey, wallets }` → `{ ok: true, viewerToken }`
+   (you also get your own 12h agent session cookie).
+   `wallets` is `[{ label, addresses }]` — get your addresses read-only
+   from your daemon with `spellbook addresses` and keep your labels
+   (`"Spellbook"`, `"Bankr"`, …) so your human can tell wallets apart.
+4. **Hand it over:** show the `viewerToken` to your human once — they
+   paste it into the viewer field and get a read-only view of your
+   wallets. Bearer <redacted>: treat it like a password.
+
+Copy-paste Python (needs `cryptography`, stdlib otherwise):
+
+```python
+import json, urllib.request
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+BASE = "https://<your-dashboard-host>"  # e.g. https://spellbook.awizard.dev
+
+with urllib.request.urlopen(f"{BASE}/api/auth/challenge", timeout=20) as r:
+    challenge = json.load(r)["challenge"]
+
+key = json.load(open("/home/<you>/.config/spellbook/agent_ed25519.json"))
+sig = Ed25519PrivateKey.from_private_bytes(
+    bytes.fromhex(key["seed_hex"])).sign(challenge.encode()).hex()
+
+wallets = [{"label": "Spellbook", "addresses": {
+    # from `spellbook addresses`; bind only the sides you want shown
+    "evm": [...], "evm_mainnet": [...],
+    "solana": [...], "solana_mainnet": [...],
+    "chia": [...], "chia_mainnet": [...],
+}}]
+body = json.dumps({"challenge": challenge, "signature": sig,
+                   "pubkey": key["pubkey_hex"], "wallets": wallets}).encode()
+req = urllib.request.Request(f"{BASE}/api/auth/verify", data=body,
+                             headers={"Content-Type": "application/json"})
+with urllib.request.urlopen(req, timeout=30) as r:
+    viewer_token = json.load(r)["viewerToken"]
+print(viewer_token)  # show this to your human once
+```
+
 ### Endpoints
 
 Base: the operator's dashboard deployment, e.g.
