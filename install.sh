@@ -731,7 +731,11 @@ print('  Solana KDF keys differ per network by design (P9) and recover through')
 print('  the daemon only - stock wallets derive unrelated keys from these words.')
 ")"
 
-cat <<EOF
+# First creation: save the displayed backup to a txt file as well, then show
+# it — the human moves it somewhere safe (ideally off this machine) and
+# removes it here. Fresh installs only; upgrades print no key material.
+PAPER_TXT="${PREFIX}/paper-backup.txt"
+cat > "${PAPER_TXT}" <<EOF
 
 ================================================================
 INSTALL COMPLETE — off-chain drill green.
@@ -773,6 +777,13 @@ HUMAN APPROVAL (approve token — NEVER shown, NEVER in the agent's env):
 
 DERIVED ADDRESSES (labels: default):
 EOF
+chmod 600 "${PAPER_TXT}"
+# Display the txt just created for the first time, then tell the human to
+# store it somewhere safe.
+cat "${PAPER_TXT}"
+echo ""
+echo "Paper backup also saved to ${PAPER_TXT} — store it somewhere safe"
+echo "(ideally off this machine), then delete it here."
 # As the agent's user: proves the socket, group, token, and peer-UID wiring
 # all work end to end for the exact principal that will use it.
 runuser -u "${AGENT_USER}" -- env "SPELLBOOK_SOCKET=${SOCK_PATH}" \
