@@ -64,7 +64,7 @@ def _show(obj):
 
 
 def cmd_status(a, client):
-    _show(client.status())
+    _show(client.status(balances=bool(getattr(a, "balances", False))))
 
 
 def cmd_queue(a, client):
@@ -625,7 +625,9 @@ def main(argv=None):
     ap.add_argument("--muse-id")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("status")
+    status_p = sub.add_parser("status")
+    status_p.add_argument("--balances", action="store_true",
+                          help="include live on-chain balances (slow; can exceed the client timeout)")
     sub.add_parser("queue")
     sub.add_parser("ledger")
     sub.add_parser("addresses")

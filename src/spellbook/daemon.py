@@ -5674,6 +5674,13 @@ class Daemon:
                "std_seed_loaded": self.std_seed is not None,
                "key_derivation": self.key_derivation,
                "unresolved_executions": self.unresolved_executions()}
+        # Live balance lookups are OPT-IN (p["balances"]): each one is a
+        # network round-trip that can run past the client's 10s timeout.
+        # Plain `spellbook status` stays fast; the dashboard reads balances
+        # through its own separate RPC path.
+        if not p.get("balances"):
+            out["balances"] = {}
+            return out
         balances = {}
         signing_seed = (self.std_seed if self.key_derivation == "standard"
                         else self.seed)
