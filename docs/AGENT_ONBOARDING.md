@@ -51,7 +51,14 @@ It provisions:
 - two bearer tokens: a **request token** (yours, the agent) and an
   **approval token** (the human's). Both print once; the request token
   lives in your environment, never in chat, logs, or code.
-- the paper backup (§6), shown **once**, on the terminal, never logged.
+- the paper backup (§6): displayed **once** on first install and also saved
+  to `$PREFIX/paper-backup.txt` — your human stores it somewhere safe
+  (ideally off the machine) and deletes it there.
+- **Sage is on-demand, not always-on.** The daemon spawns `sage rpc start`
+  itself when a Chia request needs it — never start Sage yourself, and do
+  not treat a down Sage (e.g. the `status` balance warning) as a problem.
+  It only needs to run while a Chia request or trading interaction is
+  active.
 
 Client:
 
@@ -267,7 +274,10 @@ other chain.
 
 ## 6. Paper-backup model (two mnemonic sets)
 
-`install.sh` prints the backup **once**, on the terminal, never logged:
+`install.sh` shows the backup **once**, on first install — displayed on the
+terminal and also saved to `$PREFIX/paper-backup.txt`. Your human stores it
+somewhere safe (ideally off the machine) and deletes it there. Upgrades
+never print key material.
 
 - **SET 1 — STANDARD RECOVERY (primary: the daemon's live keys).**
   A second, independent 24-word BIP-39 mnemonic whose keys derive the
