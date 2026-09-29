@@ -12,7 +12,7 @@ would reject the attempt anyway (S7).
 pip install spellbook
 ```
 
-(Until a release is on PyPI: `pip install git+https://github.com/awizardxch/Spellbook@0.3.1`.)
+(Until a release is on PyPI: `pip install git+https://github.com/awizardxch/Spellbook@0.3.2`.)
 
 This gives you the client library, the `spellbook` CLI, `spellbook-seed`
 (seed lock) and `spellbook-mcp` (MCP server). The daemon itself

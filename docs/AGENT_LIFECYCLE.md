@@ -99,6 +99,17 @@ here when a newer signed release exists. After every upgrade, run
 `spellbook doctor`, then do the steps for **each** version you moved past,
 oldest first.
 
+### 0.3.2: prebuilt Sage binary (no agent action needed)
+
+What changed: fresh installs on linux-x86_64 now download a release-signed
+prebuilt `sage` binary — SHA-256 and release-key signature verified exactly
+like the release tarball — instead of compiling from source (20+ minutes →
+about a minute). A missing prebuilt (older releases, other platforms) falls
+back to the source build with a warning; a failed checksum or signature
+fails the install hard. `SPELLBOOK_SAGE_SOURCE=1` forces the source build.
+After upgrading: nothing — the Sage pin is unchanged, so the upgrade fast
+path keeps your existing binary.
+
 ### 0.3.1: installer robustness (no agent action needed)
 
 What changed: the fresh-install path only. Sage preflight checks (Rust
