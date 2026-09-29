@@ -271,8 +271,8 @@ class AgentClient(_BaseClient):
                            "contract": contract, "method": method,
                            "method_abi": method_abi, "args": args or []})
 
-    def status(self) -> dict:
-        return self._call("status")
+    def status(self, balances: bool = False) -> dict:
+        return self._call("status", {"balances": balances})
 
     def doctor(self) -> dict:
         """Read-only install health, computed daemon-side (SPEC §12b item 4).
@@ -589,8 +589,8 @@ class HumanClient(_BaseClient):
     def queue(self) -> list[dict]:
         return self._call("queue_read")["queue"]
 
-    def status(self) -> dict:
-        return self._call("status")
+    def status(self, balances: bool = False) -> dict:
+        return self._call("status", {"balances": balances})
 
     def addresses(self) -> dict:
         return self._call("addresses")["addresses"]
