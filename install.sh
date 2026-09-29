@@ -734,6 +734,16 @@ mkdir -p "${PREFIX}/lib"
 # relative and no longer resolves from here.
 cp "$INSTALLER_SRC" "${PREFIX}/lib/install.sh"
 chown root:root "${PREFIX}/lib/install.sh"; chmod 0755 "${PREFIX}/lib/install.sh"
+# Seal ceremony HTML pages — offline human/agent handoff for fresh installs.
+# The agent embeds a per-ceremony seal public key before handing to the human.
+# See ceremony/README.md.
+if [ -d "${STAGE}/ceremony" ]; then
+  mkdir -p "${PREFIX}/share/ceremony"
+  cp "${STAGE}/ceremony/"*.html "${STAGE}/ceremony/README.md" "${PREFIX}/share/ceremony/" 2>/dev/null || true
+  chown -R root:root "${PREFIX}/share/ceremony"; chmod 0755 "${PREFIX}/share/ceremony"
+  chmod 0644 "${PREFIX}"/share/ceremony/*
+  log "installed seal ceremony pages to ${PREFIX}/share/ceremony/"
+fi
 cat > "${PREFIX}/install.env" <<EOF
 # written by install.sh — root-owned; the spellbook-upgrade wrapper sources this
 SPELLBOOK_AGENT_USER="${AGENT_USER}"
