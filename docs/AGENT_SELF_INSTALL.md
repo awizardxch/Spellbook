@@ -98,6 +98,31 @@ account you know (age, followers, history), not a fresh lookalike. Then the
 install steps are identical — the installer still verifies the release
 itself.
 
+## Troubleshooting (fresh-machine issues seen cutting/installing 0.3.0)
+
+The installer fails closed with an actionable message for each of these —
+fix the cause and re-run; nothing half-installed needs cleaning first.
+
+- **Rust toolchain too old.** The pinned Sage source uses edition2024, which
+  needs cargo/rustc >= 1.85. Distro packages lag (apt gives 1.75, which dies
+  with ``feature `edition2024` is required``). Fix:
+  `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable`
+  and make sure `$HOME/.cargo/bin` is on PATH.
+- **libclang missing.** The Sage build's `bindgen` step (aws-lc-sys and
+  friends) needs it: `Unable to find libclang`. Fix on Debian/Ubuntu:
+  `apt-get install -y libclang-dev clang`.
+- **`/tmp` too small.** The Sage release build needs several GB for the cargo
+  target dir, and `/tmp` is often a 512M tmpfs — the build dies mid-compile
+  (`aws-lc-sys`) with "No space left on device". The installer fails fast if
+  the target dir's filesystem is tight; point it at room with
+  `SPELLBOOK_SAGE_TARGET_BASE=/roomy/path` (or `CARGO_TARGET_DIR` directly).
+  The target dir is namespaced by Sage pin and persists across runs, so a
+  killed build resumes instead of recompiling from zero.
+- **Sage smoke test.** The pinned `sage-cli` exposes no `--version` flag
+  (clap rejects it), so the installer smoke-tests with `sage --help` against
+  the *installed* binary — this also covers the upgrade fast path. If it
+  fails, the installer prints the binary's actual output; don't guess, read it.
+
 ## From here
 
 You self-serve for life: `spellbook upgrade --check`, `spellbook upgrade
