@@ -49,9 +49,11 @@ block at the end. It is a protocol, not a suggestion:
   device with *their own* machine access. **Never read it into your
   environment.** The daemon verifies approvals against it; you must not be
   able to approve your own spends.
-- **Your human's:** the paper backup (two 24-word sets). Read them to your
-  human; they write them down on paper, offline, two copies in two places.
-  Confirm receipt, then drop the words from your context.
+- **Your human's:** the paper backup (two 24-word sets). The installer
+  displays it once and saves it to `/opt/spellbook/paper-backup.txt` —
+  point your human at the file; they store it somewhere safe (ideally off
+  the machine) and delete it there. Confirm receipt, then drop the words
+  from your context.
 
 **5. Verify before you finish.**
 
