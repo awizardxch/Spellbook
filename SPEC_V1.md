@@ -1607,6 +1607,15 @@ verify, install locally — per muse, per D1.
   never cached (#47); approve client waits out the execution window (#49).
   Release tags are bare `X.Y.Z` (what `spellbook-upgrade` accepts).
 
+- 2026-09-28 — release v0.3.1. Installer robustness (fresh-install path
+  only; no agent action needed after upgrading): Sage preflight checks fail
+  fast on Rust <1.85, missing libclang, or <~5 GB disk; the cargo target dir
+  persists across runs (namespaced by Sage pin) so a killed build resumes;
+  cargo parallelism is capped by available RAM with a per-minute build
+  heartbeat; the Sage smoke test uses `sage --help` (the pinned `sage-cli`
+  has no `--version`). `docs/AGENT_SELF_INSTALL.md` gains a troubleshooting
+  section from the 0.3.0 install lessons.
+
 - 2026-09-28 — release v0.3.0. Sealed seed (`spellbook-seed`): the seed
   files sealed under a human password (scrypt + AES-256-GCM) into
   `~/workspace/.spellbook/seed.sealed`, unlocked after a VM wipe from a
