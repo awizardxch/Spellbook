@@ -34,6 +34,27 @@ page to the human:
 `install.sh` copies this directory to `${PREFIX}/share/ceremony/`
 (e.g. `/opt/spellbook/share/ceremony/`).
 
+## Restore from backup
+
+If the human has backed-up keys (from a previous install's paper backup):
+
+1. **Human:** Opens the page, fills in **Step 0** with their SET 1 and SET 2
+   mnemonics (24 words each), encrypts to the agent's seal key, pastes the
+   ciphertext into chat. Skips Steps 1–2, does Step 3 (seal password) next.
+2. **Agent:** Decrypts the restore blob with the seal private key, then runs:
+   ```
+   scripts/restore_from_mnemonics.py "<set1>" "<set2>" /tmp/restore.keys
+   bash install.sh <tag> --restore /tmp/restore.keys --agent-user ... --human-user ...
+   ```
+   `install.sh --restore` validates the two hex keys (64 + 128 chars),
+   installs them as `seed.key` / `std_seed.key` (0600), and shreds the
+   restore file. No fresh keys are generated; no new mnemonic is displayed
+   (the human already has these words on paper).
+3. The agent confirms the derived addresses match the human's backup before
+   sealing with the Step 3 password.
+
+`--restore` and `--upgrade` are mutually exclusive.
+
 ## Permanent direction
 
 These pages are a bridge. The permanent implementation belongs inside
