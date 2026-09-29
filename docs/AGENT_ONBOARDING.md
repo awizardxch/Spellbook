@@ -298,8 +298,30 @@ any import by comparing the shown addresses.
 Agent VMs lose the seed files on a wipe or session reset. The sealed seed
 (`~/workspace/.spellbook/seed.sealed`, password-locked, survives wipes)
 brings them back without anyone re-typing words — see
-[SEALED_SEED.md](SEALED_SEED.md). At the start of **every** session,
-including after context compaction, run:
+[SEALED_SEED.md](SEALED_SEED.md).
+
+**Assume your human can only reach you, the agent** — no terminal, no
+SSH, no machine access. Every step below goes through you: you run the
+commands, you hand them links, they click.
+
+**Seal at install — required, not optional.** Right after the paper
+backup is confirmed, seal the seed before you call the install done:
+
+```bash
+spellbook-seed serve   # prints a one-time link; exits after one success
+```
+
+Get that link to your human in a browser. `serve` binds `127.0.0.1`, so
+arrange the path via your platform: an SSH tunnel, a port-forward /
+preview URL, or a TLS tunnel (e.g.
+`cloudflared tunnel --url http://127.0.0.1:8787`). The page is plain
+HTTP — the path to your human must be TLS, and the URL's one-time token
+is the only auth. They set the password on that page; the sealed file is
+written. **Never** ask for the password in chat, never pass it on a
+command line — you must never see it.
+
+At the start of **every** session, including after context compaction,
+run:
 
 ```bash
 spellbook-seed status   # exit 0 unlocked · 3 locked · 4 unsealed · 5 mismatch · 6 empty · 7 no_access
