@@ -5744,7 +5744,17 @@ class Daemon:
         state problems (keys/tokens/config/ledger) fail closed.
         """
         checks = doctor_mod.run_checks(prefix=self.config_dir)
-        return {"ok": True, **doctor_mod.summary(checks)}
+        report = doctor_mod.summary(checks)
+        # The RPC envelope's "ok" means the report was produced; check
+        # outcomes live in the report itself. (Previously a failed check
+        # flipped the envelope "ok" to False with no "error" key, surfacing
+        # client-side as a misleading "unknown daemon error".)
+        return {"ok": True,
+                "all_checks_passed": report["ok"],
+                "passed": report["passed"],
+                "failed": report["failed"],
+                "skipped": report["skipped"],
+                "checks": report["checks"]}
 
     def rt_addresses(self, p: dict, muse_id: str) -> dict:
         signing_seed = (self.std_seed if self.key_derivation == "standard"

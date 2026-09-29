@@ -197,7 +197,12 @@ def cmd_doctor(a, client=None):
             except Exception as e:
                 report["daemon_after_repair"] = {"error": str(e)}
     _show(report)
-    ok = (report["daemon"] or {}).get("ok", False) and not pkg_err
+    # "ok" here means the install is healthy: the RPC envelope "ok" only says
+    # the report was produced, so health comes from "all_checks_passed"
+    # (absent when the RPC itself failed, e.g. no token).
+    ok = (report["daemon"] or {}).get("all_checks_passed",
+                                      (report["daemon"] or {}).get("ok", False)) \
+        and not pkg_err
     if a.repair:
         ok = (report.get("daemon_after_repair") or {}).get("ok", ok)
     raise SystemExit(0 if ok else 1)
