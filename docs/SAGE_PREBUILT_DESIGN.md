@@ -1,7 +1,15 @@
 # Prebuilt Sage binaries — design proposal
 
-**Status:** proposal, awaiting Speechless's decision.
+**Status:** approved by Speechless 2026-09-28; implemented in 0.3.2.
 **Date:** 2026-09-28
+
+## Decisions (Speechless, 2026-09-28)
+
+1. **Platforms for the first cut:** `linux-x86_64` only.
+2. **Built where:** key machine via `scripts/cut-release.sh` (part of the
+   existing signing ceremony).
+3. **Source build:** permanent fallback — the trust anchor for anyone who
+   wants to verify the prebuilt.
 
 ## Problem
 
@@ -75,15 +83,32 @@ release tarball.
 - The release tarball, its checksum/signature flow, and the installer's
   release-verification logic are untouched.
 
-## Open questions (Speechless decides)
+## Open questions (Speechless decides) — all decided 2026-09-28
 
-1. **Platforms for the first cut?** Recommendation: `linux-x86_64` only.
+1. **Platforms for the first cut?** ~~Recommendation: `linux-x86_64` only.~~
+   → `linux-x86_64` only.
 2. **Built where — key machine via `cut-release.sh`, or GitHub Actions CI?**
-   CI is auditable and doesn't need the signing key on a build host; key
+   ~~CI is auditable and doesn't need the signing key on a build host; key
    machine keeps everything behind the existing signing ceremony. Either way
-   the artifacts are GPG-signed by the release key before publication.
-3. **Keep the source build as a permanent fallback?** Recommendation: yes —
-   it's the trust anchor for anyone who wants to verify the prebuilt.
+   the artifacts are GPG-signed by the release key before publication.~~
+   → key machine via `cut-release.sh`.
+3. **Keep the source build as a permanent fallback?** ~~Recommendation: yes —
+   it's the trust anchor for anyone who wants to verify the prebuilt.~~
+   → yes, permanent.
+
+## Implementation (0.3.2)
+
+- `scripts/cut-release.sh` builds `sage-cli` from the pinned commit (read
+  from `install.sh`'s `SAGE_COMMIT`/`SAGE_REPO`; checkout asserted), packages
+  `sage-<tag>-linux-x86_64.tar.gz` + `.sha256` + `.asc` (release-key signed,
+  self-verified like the tarball), and lists them in the publish steps.
+  `SPELLBOOK_SKIP_SAGE_PREBUILT=1` skips it.
+- `install.sh` tries the prebuilt first (GitHub release asset, then the
+  repo-vendored copy): SHA-256 + VALIDSIG-from-pinned-key verified exactly
+  like the release tarball. Missing prebuilt (any release before 0.3.2, or
+  an unsupported platform) warns and falls back to the source build; a
+  FAILED checksum/signature fails hard. `SPELLBOOK_SAGE_SOURCE=1` forces
+  the source build.
 
 ## Estimated effect
 

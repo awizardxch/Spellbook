@@ -1607,6 +1607,17 @@ verify, install locally — per muse, per D1.
   never cached (#47); approve client waits out the execution window (#49).
   Release tags are bare `X.Y.Z` (what `spellbook-upgrade` accepts).
 
+- 2026-09-28 — release v0.3.2. Prebuilt Sage binary: on linux-x86_64,
+  install.sh downloads a release-signed `sage` binary (SHA-256 + release-key
+  signature verified exactly like the release tarball) instead of the 20+
+  minute source compile; a missing prebuilt warns and falls back to the
+  source build, a failed checksum/signature fails hard.
+  `SPELLBOOK_SAGE_SOURCE=1` forces the source build. `scripts/cut-release.sh`
+  builds, packages, and signs the prebuilt from the pinned Sage commit
+  (pin read from install.sh, checkout asserted). After-upgrade steps: none —
+  the Sage pin is unchanged, so the upgrade fast path keeps the existing
+  binary.
+
 - 2026-09-28 — release v0.3.1. Installer robustness (fresh-install path
   only; no agent action needed after upgrading): Sage preflight checks fail
   fast on Rust <1.85, missing libclang, or <~5 GB disk; the cargo target dir

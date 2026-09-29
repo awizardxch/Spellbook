@@ -103,6 +103,12 @@ itself.
 The installer fails closed with an actionable message for each of these —
 fix the cause and re-run; nothing half-installed needs cleaning first.
 
+- **Sage compile skipped entirely (0.3.2+).** On `linux-x86_64` the installer
+  downloads a release-signed prebuilt `sage` binary (checksum + release-key
+  signature verified exactly like the release tarball) instead of compiling
+  from source — a ~1 min download replaces the 20+ min build. Set
+  `SPELLBOOK_SAGE_SOURCE=1` to force the source build (e.g. to audit the
+  prebuilt against the pinned commit).
 - **Rust toolchain too old.** The pinned Sage source uses edition2024, which
   needs cargo/rustc >= 1.85. Distro packages lag (apt gives 1.75, which dies
   with ``feature `edition2024` is required``). Fix:

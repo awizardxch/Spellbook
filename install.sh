@@ -69,6 +69,143 @@ log()  { printf '[spellbook-install] %s\n' "$*"; }
 warn() { printf '[spellbook-install] WARNING: %s\n' "$*" >&2; }
 fail() { printf '[spellbook-install] FATAL: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || fail "missing required tool: $1"; }
+norm_fpr() { echo "$1" | tr -d ' ' | tr 'a-f' 'A-F'; }   # canonical fingerprint form
+
+# Canonical platform string for prebuilt Sage binaries (empty = unsupported).
+detect_sage_platform() {
+  case "$(uname -s)/$(uname -m)" in
+    Linux/x86_64)  echo "linux-x86_64" ;;
+    Linux/aarch64) echo "linux-aarch64" ;;
+    Darwin/arm64)  echo "darwin-arm64" ;;
+    Darwin/x86_64) echo "darwin-x86_64" ;;
+    *)             echo "" ;;
+  esac
+}
+
+# $1 = .asc file, $2 = data file. Returns 0 iff gpg reports VALIDSIG from
+# the pinned release key — the same trust rule as the release tarball.
+verify_release_sig() {
+  [ -n "${RELEASE_KEY_FPR:-}" ] || return 1
+  local sig_fpr
+  sig_fpr="$(gpg --status-fd 1 --verify "$1" "$2" 2>/dev/null \
+    | awk '/^\[GNUPG:\] VALIDSIG /{print $3}' | tail -1)"
+  [ -n "$sig_fpr" ] || return 1
+  [ "$(norm_fpr "$sig_fpr")" = "$(norm_fpr "$RELEASE_KEY_FPR")" ]
+}
+
+# Try the release-published prebuilt Sage binary for $1 (platform).
+# On success sets SAGE_BIN_STAGED and returns 0.
+# A missing prebuilt (not published for this release/platform) warns and
+# returns 1 so the caller falls back to the source build. A FAILED checksum
+# or signature fails hard — a bad binary is never quietly skipped over.
+try_prebuilt_sage() {
+  local platform="$1"
+  local tgz="sage-${TAG}-${platform}.tar.gz"
+  local dir="${WORK}/sage-prebuilt"
+  mkdir -p "$dir" || return 1
+  if ! curl -fsSL -o "${dir}/${tgz}" "${REPO}/releases/download/${TAG}/${tgz}" 2>/dev/null \
+      && ! curl -fsSL -o "${dir}/${tgz}" "${VENDORED_BASE}/${TAG}/${tgz}" 2>/dev/null; then
+    warn "no prebuilt sage ${tgz} for release ${TAG} — building from source"
+    return 1
+  fi
+  if ! curl -fsSL -o "${dir}/${tgz}.sha256" "${REPO}/releases/download/${TAG}/${tgz}.sha256" 2>/dev/null \
+      && ! curl -fsSL -o "${dir}/${tgz}.sha256" "${VENDORED_BASE}/${TAG}/${tgz}.sha256" 2>/dev/null; then
+    fail "prebuilt ${tgz} is published but its checksum file is missing — refusing to continue"
+  fi
+  if ! curl -fsSL -o "${dir}/${tgz}.asc" "${REPO}/releases/download/${TAG}/${tgz}.asc" 2>/dev/null \
+      && ! curl -fsSL -o "${dir}/${tgz}.asc" "${VENDORED_BASE}/${TAG}/${tgz}.asc" 2>/dev/null; then
+    fail "prebuilt ${tgz} is published but its signature is missing — refusing to continue"
+  fi
+  ( cd "$dir" && sha256sum -c "${tgz}.sha256" >/dev/null ) \
+    || fail "prebuilt ${tgz} checksum mismatch — refusing to install"
+  verify_release_sig "${dir}/${tgz}.asc" "${dir}/${tgz}" \
+    || fail "prebuilt ${tgz} signature is not from the pinned release key — refusing to install"
+  log "prebuilt sage ${tgz}: checksum + release-key signature OK"
+  tar xzf "${dir}/${tgz}" -C "$dir" \
+    || fail "prebuilt ${tgz} would not extract"
+  [ -x "${dir}/sage" ] \
+    || fail "prebuilt ${tgz} contains no executable sage binary"
+  SAGE_BIN_STAGED="${dir}/sage"
+  log "using prebuilt sage ${TAG}/${platform} — skipping the source build"
+}
+
+usage() {
+  echo "usage: bash install.sh <tag> [--upgrade] [--no-sage] [--agent-user NAME] [--human-user NAME]"
+  echo "       bash install.sh --from-dir DIR [--upgrade] [--no-sage] [--agent-user NAME] [--human-user NAME]"
+  echo ""
+  echo "  --upgrade        key-preserving upgrade of an existing install: replaces"
+  echo "                   code/venv/systemd assets only. Never touches seed.key /"
+  echo "                   std_seed.key / tokens / config / ledger / Sage data."
+  echo "                   With a signed <tag> this is the agent self-serve path"
+  echo "                   (via the spellbook-upgrade wrapper); --from-dir with"
+  echo "                   --upgrade is human-driven (no signature to verify)."
+  echo "                   Downgrades are the human's call — the agent wrapper"
+  echo "                   refuses them, install.sh obeys."
+  echo "  --no-sage        install EVM-only (Chia/Sage skipped; SPEC primary deliverable)"
+  echo "  --agent-user     OS user the conversational agent runs as (required; in"
+  echo "                   --upgrade mode defaults to the value in install.env)"
+  echo "  --human-user     OS user whose tooling holds the approve token (default: \$SUDO_USER;"
+  echo "                   in --upgrade mode defaults to the value in install.env)"
+  echo "  --as-agent       the agent is running this install itself (self-install"
+  echo "                   on the agent's own machine). Prints a structured HANDOFF"
+  echo "                   block at the end: what the agent keeps (request token)"
+  echo "                   vs what must go to the human out-of-band (approve token"
+  echo "                   file location, paper backup). The agent must deliver the"
+  echo "                   human's material and never retain it."
+  exit 2
+}
+
+TAG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-sage) NO_SAGE=1; NO_SAGE_SET=1; shift ;;
+    --upgrade) UPGRADE=1; shift ;;
+    --from-dir) FROM_DIR="${2:-}"; shift 2 ;;
+    --agent-user) AGENT_USER="${2:-}"; shift 2 ;;
+    --human-user) HUMAN_USER="${2:-}"; shift 2 ;;
+    --as-agent) AS_AGENT=1; shift ;;
+    -h|--help) usage ;;
+    *) [ -z "$TAG" ] && [ -z "$FROM_DIR" ] && TAG="$1" || usage; shift ;;
+  esac
+done
+[ -n "$TAG" ] || [ -n "$FROM_DIR" ] || usage
+
+# --upgrade: fill user flags from the install record (flags still win), and
+# require an existing healthy install. Everything below treats --upgrade as
+# "replace code, never identity".
+if [ "$UPGRADE" = "1" ]; then
+  [ -f "${PREFIX}/VERSION" ] \
+    || fail "no install at ${PREFIX} — run a fresh install first (no --upgrade)"
+  [ -f "${PREFIX}/install.env" ] \
+    || fail "${PREFIX}/install.env missing — install record lost; human-driven reinstall needed"
+  env_val() { grep -E "^${1}=" "${PREFIX}/install.env" | cut -d= -f2- | tr -d '"'; }
+  [ -n "$AGENT_USER" ] || AGENT_USER="$(env_val SPELLBOOK_AGENT_USER)"
+  [ -n "$HUMAN_USER" ] || HUMAN_USER="$(env_val SPELLBOOK_HUMAN_USER)"
+  [ "$NO_SAGE_SET" = "1" ] || NO_SAGE="$(env_val SPELLBOOK_NO_SAGE)"
+  ENV_SAGE_COMMIT="$(env_val SPELLBOOK_SAGE_COMMIT)"
+  log "upgrade mode: installed version $(cat "${PREFIX}/VERSION"), identity will be preserved"
+fi
+[ -n "$AGENT_USER" ] || fail "--agent-user is required (the OS user your agent runs as)"
+[ "$(id -u)" = "0" ] || fail "run as root (it creates the ${SPELLBOOK_USER} user)"
+id "$AGENT_USER" >/dev/null 2>&1 || fail "agent user '$AGENT_USER' does not exist"
+if [ -n "$HUMAN_USER" ]; then
+  id "$HUMAN_USER" >/dev/null 2>&1 || fail "human user '$HUMAN_USER' does not exist"
+else
+  fail "cannot determine the human user: pass --human-user NAME"
+fi
+if [ "$AGENT_USER" = "$HUMAN_USER" ]; then
+  warn "agent and human share one OS user. S2/S7 are weakened: the approve token"
+  warn "must NEVER be at rest here (P5) — the human's tooling must prompt per use,"
+  warn "ideally from a separate device (O5)."
+fi
+
+need curl; need sha256sum; need gpg; need tar; need useradd; need runuser
+need systemctl; need python3; need id; need getent
+
+WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+chmod 755 "$WORK"   # the spellbook user must traverse it (pip install runs as spellbook)
+cd "$WORK"
+
 
 usage() {
   echo "usage: bash install.sh <tag> [--upgrade] [--no-sage] [--agent-user NAME] [--human-user NAME]"
@@ -176,7 +313,6 @@ else
     # fingerprint yourself). We trust the signature ONLY if gpg reports a
     # valid signature AND the signer's fingerprint equals the pinned value.
     # A valid signature from any other key is refused.
-    norm_fpr() { echo "$1" | tr -d ' ' | tr 'a-f' 'A-F'; }
     SIG_FPR="$(gpg --status-fd 1 --verify "spellbook-${TAG}.tar.gz.asc" \
       "spellbook-${TAG}.tar.gz" 2>/dev/null \
       | awk '/^\[GNUPG:\] VALIDSIG /{print $3}' | tail -1)"
@@ -195,12 +331,13 @@ fi
 log "source: $SRC"
 
 # ---------------------------------------------------------------- 2. Sage CLI, pinned commit
-# SPEC §3/D4 + §10 step 1 (P9): the Sage CLI is BUILT FROM SOURCE at the
-# pinned commit. The pinned commit hash IS the verification: we clone the
-# repo, check out the exact commit, and assert `git rev-parse HEAD` equals
-# the pin before compiling. The artifact is produced from pinned source, so
-# there is no release-artifact checksum to chase — and a version string is
-# never trusted on its own.
+# SPEC §3/D4 + §10 step 1 (P9): the Sage CLI comes from the pinned commit —
+# preferably as a release-published prebuilt binary (SHA-256 + release-key
+# signature verified exactly like the release tarball), with the source
+# build as the fallback. The source build clones the repo, checks out the
+# exact commit, and asserts `git rev-parse HEAD` equals the pin before
+# compiling; a version string is never trusted on its own.
+# SPELLBOOK_SAGE_SOURCE=1 forces the source build.
 #
 # Upgrade fast path: if the pin in this release equals the pin the machine
 # was installed with AND the installed binary is executable, the Sage build
@@ -230,86 +367,102 @@ elif [ -n "${SAGE_BIN:-}" ] && [ "$SAGE_PIN_VERIFIED" = "1" ]; then
 elif [ -n "${SAGE_BIN:-}" ]; then
   fail "SAGE_BIN was given without SAGE_PIN_VERIFIED=1 — refusing to trust an unverified binary. Verify it out-of-band and re-run with SAGE_PIN_VERIFIED=1, or unset SAGE_BIN to build from the pinned commit."
 else
-  need git; need cargo
-  # The pinned Sage source uses edition2024 — cargo/rustc >= 1.85 is required.
-  # (Distro cargo, e.g. apt's 1.75, dies with "feature `edition2024` is required".)
-  CARGO_VER="$(cargo --version 2>/dev/null | awk '{print $2}')"
-  [ -n "$CARGO_VER" ] && [ "$(printf '1.85.0\n%s\n' "$CARGO_VER" | sort -V | head -n1)" = "1.85.0" ] \
-    || fail "cargo ${CARGO_VER:-unknown} is too old for the Sage build (needs >= 1.85 for edition2024). Install a current stable toolchain: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable"
-  # bindgen (aws-lc-sys and friends) needs libclang at build time.
-  ldconfig -p 2>/dev/null | grep -q libclang \
-    || fail "libclang not found — the Sage build needs it (bindgen). On Debian/Ubuntu: apt-get install -y libclang-dev clang"
-  # Persistent target dir, namespaced by Sage pin: a killed or re-run build
-  # resumes instead of recompiling from zero (the bulk of the time is
-  # pin-stable registry deps). Safe to delete at any time; the operator's own
-  # CARGO_TARGET_DIR is honored when set.
-  SAGE_TARGET_BASE="${SPELLBOOK_SAGE_TARGET_BASE:-/var/cache/spellbook/sage-target}"
-  SAGE_TARGET_DIR="${CARGO_TARGET_DIR:-${SAGE_TARGET_BASE}/${SAGE_COMMIT}}"
-  mkdir -p "$SAGE_TARGET_DIR" \
-    || fail "could not create Sage target dir at $SAGE_TARGET_DIR"
-  export CARGO_TARGET_DIR="$SAGE_TARGET_DIR"
-  # The Sage release build needs several GB in the target dir. /tmp is often
-  # a small tmpfs — if the target base lives somewhere tight, move it:
-  # SPELLBOOK_SAGE_TARGET_BASE=/roomy/path (or CARGO_TARGET_DIR directly).
-  TARGET_FREE_KB="$(df -k "$SAGE_TARGET_DIR" 2>/dev/null | awk 'NR==2 {print $4}')"
-  { [ -n "$TARGET_FREE_KB" ] && [ "$TARGET_FREE_KB" -ge 5242880 ]; } \
-    || fail "only ${TARGET_FREE_KB:-unknown} KB free under $SAGE_TARGET_DIR — the Sage build needs ~5 GB. Set SPELLBOOK_SAGE_TARGET_BASE (or CARGO_TARGET_DIR) to a roomier filesystem and re-run."
-  log "building sage-cli from pinned commit ${SAGE_COMMIT} (target dir: $SAGE_TARGET_DIR) ..."
-  SAGE_SRC="${WORK}/sage-src"
-  git init -q "$SAGE_SRC"
-  git -C "$SAGE_SRC" remote add origin "$SAGE_REPO"
-  # Shallow-fetch just the pinned commit: less to download, hash still exact.
-  git -C "$SAGE_SRC" fetch --depth 1 origin "$SAGE_COMMIT" \
-    || fail "could not fetch Sage commit ${SAGE_COMMIT} from ${SAGE_REPO}"
-  git -C "$SAGE_SRC" checkout -q FETCH_HEAD
-  HEAD="$(git -C "$SAGE_SRC" rev-parse HEAD)"
-  [ "$HEAD" = "$SAGE_COMMIT" ] \
-    || fail "Sage checkout is ${HEAD}, not the pinned ${SAGE_COMMIT} — refusing to build"
-  log "Sage source verified at pinned commit ${HEAD}"
-  # Memory-aware cargo parallelism: a release rustc job can hold ~2 GB, so
-  # cap jobs at available-RAM/2GB (and at nproc). An explicit CARGO_BUILD_JOBS
-  # from the operator is always honored. This keeps the build alive on small
-  # boxes instead of dying silently to the OOM killer mid-compile.
-  if [ -z "${CARGO_BUILD_JOBS:-}" ]; then
-    MEM_MB="$(awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null)"
-    [ -n "$MEM_MB" ] || MEM_MB="$(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null)"
-    NPROC="$(nproc 2>/dev/null || echo 2)"
-    if [ -n "$MEM_MB" ] && [ "$MEM_MB" -gt 0 ] 2>/dev/null; then
-      MEM_JOBS=$(( MEM_MB / 2048 ))
-      [ "$MEM_JOBS" -ge 1 ] || MEM_JOBS=1
-      [ "$NPROC" -lt "$MEM_JOBS" ] && MEM_JOBS="$NPROC"
-      export CARGO_BUILD_JOBS="$MEM_JOBS"
-      log "cargo build jobs: $MEM_JOBS (cpus=$NPROC, available RAM=${MEM_MB}MB)"
-    else
-      log "could not read available RAM — leaving cargo parallelism at its default"
+  # Prebuilt sage first (release-signed; verified exactly like the release
+  # tarball). Missing prebuilt -> warn + source build. SPELLBOOK_SAGE_SOURCE=1
+  # forces the source build.
+  SAGE_WANT_SOURCE=1
+  if [ -z "${SPELLBOOK_SAGE_SOURCE:-}" ]; then
+    SAGE_PLATFORM="$(detect_sage_platform)"
+    if [ -z "$SAGE_PLATFORM" ]; then
+      warn "no prebuilt sage for $(uname -s)/$(uname -m) — building from source"
+    elif try_prebuilt_sage "$SAGE_PLATFORM"; then
+      SAGE_WANT_SOURCE=0
     fi
   else
-    log "cargo build jobs: ${CARGO_BUILD_JOBS} (operator override)"
+    log "SPELLBOOK_SAGE_SOURCE=1: building sage from the pinned commit"
   fi
-  # Build with a heartbeat. The release compile runs 20+ minutes with no
-  # output, so log progress every minute: elapsed time plus the crate
-  # currently compiling. A silent death (OOM kill, lost session) then shows
-  # up as a heartbeat that simply stops, instead of a mystery.
-  SAGE_BUILD_LOG="${WORK}/sage-build.log"
-  case "${SPELLBOOK_BUILD_HEARTBEAT_SECS:-60}" in
-    ''|*[!0-9]*|0) HEARTBEAT_SECS=60 ;;
-    *)             HEARTBEAT_SECS="${SPELLBOOK_BUILD_HEARTBEAT_SECS}" ;;
-  esac
-  ( cd "$SAGE_SRC" && cargo build --release -p sage-cli >"$SAGE_BUILD_LOG" 2>&1 ) &
-  SAGE_BUILD_PID=$!
-  SAGE_BUILD_START="$(date +%s)"
-  while kill -0 "$SAGE_BUILD_PID" 2>/dev/null; do
-    sleep "$HEARTBEAT_SECS"
-    kill -0 "$SAGE_BUILD_PID" 2>/dev/null || break
-    SAGE_ELAPSED=$(( $(date +%s) - SAGE_BUILD_START ))
-    SAGE_LAST_CRATE="$(grep -o 'Compiling [^ ]*' "$SAGE_BUILD_LOG" 2>/dev/null | tail -1)"
-    log "sage build running (${SAGE_ELAPSED}s elapsed${SAGE_LAST_CRATE:+, $SAGE_LAST_CRATE} ...) ..."
-  done
-  wait "$SAGE_BUILD_PID" \
-    || fail "sage-cli build failed — last 30 lines of the build log:$(tail -30 "$SAGE_BUILD_LOG" 2>/dev/null | sed 's/^/  /')"
-  SAGE_BIN_STAGED="${CARGO_TARGET_DIR}/release/sage"
-  [ -x "$SAGE_BIN_STAGED" ] \
-    || fail "sage-cli build produced no binary at $SAGE_BIN_STAGED"
+  if [ "$SAGE_WANT_SOURCE" = "1" ]; then
+    need git; need cargo
+    # The pinned Sage source uses edition2024 — cargo/rustc >= 1.85 is required.
+    # (Distro cargo, e.g. apt's 1.75, dies with "feature `edition2024` is required".)
+    CARGO_VER="$(cargo --version 2>/dev/null | awk '{print $2}')"
+    [ -n "$CARGO_VER" ] && [ "$(printf '1.85.0\n%s\n' "$CARGO_VER" | sort -V | head -n1)" = "1.85.0" ] \
+      || fail "cargo ${CARGO_VER:-unknown} is too old for the Sage build (needs >= 1.85 for edition2024). Install a current stable toolchain: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable"
+    # bindgen (aws-lc-sys and friends) needs libclang at build time.
+    ldconfig -p 2>/dev/null | grep -q libclang \
+      || fail "libclang not found — the Sage build needs it (bindgen). On Debian/Ubuntu: apt-get install -y libclang-dev clang"
+    # Persistent target dir, namespaced by Sage pin: a killed or re-run build
+    # resumes instead of recompiling from zero (the bulk of the time is
+    # pin-stable registry deps). Safe to delete at any time; the operator's own
+    # CARGO_TARGET_DIR is honored when set.
+    SAGE_TARGET_BASE="${SPELLBOOK_SAGE_TARGET_BASE:-/var/cache/spellbook/sage-target}"
+    SAGE_TARGET_DIR="${CARGO_TARGET_DIR:-${SAGE_TARGET_BASE}/${SAGE_COMMIT}}"
+    mkdir -p "$SAGE_TARGET_DIR" \
+      || fail "could not create Sage target dir at $SAGE_TARGET_DIR"
+    export CARGO_TARGET_DIR="$SAGE_TARGET_DIR"
+    # The Sage release build needs several GB in the target dir. /tmp is often
+    # a small tmpfs — if the target base lives somewhere tight, move it:
+    # SPELLBOOK_SAGE_TARGET_BASE=/roomy/path (or CARGO_TARGET_DIR directly).
+    TARGET_FREE_KB="$(df -k "$SAGE_TARGET_DIR" 2>/dev/null | awk 'NR==2 {print $4}')"
+    { [ -n "$TARGET_FREE_KB" ] && [ "$TARGET_FREE_KB" -ge 5242880 ]; } \
+      || fail "only ${TARGET_FREE_KB:-unknown} KB free under $SAGE_TARGET_DIR — the Sage build needs ~5 GB. Set SPELLBOOK_SAGE_TARGET_BASE (or CARGO_TARGET_DIR) to a roomier filesystem and re-run."
+    log "building sage-cli from pinned commit ${SAGE_COMMIT} (target dir: $SAGE_TARGET_DIR) ..."
+    SAGE_SRC="${WORK}/sage-src"
+    git init -q "$SAGE_SRC"
+    git -C "$SAGE_SRC" remote add origin "$SAGE_REPO"
+    # Shallow-fetch just the pinned commit: less to download, hash still exact.
+    git -C "$SAGE_SRC" fetch --depth 1 origin "$SAGE_COMMIT" \
+      || fail "could not fetch Sage commit ${SAGE_COMMIT} from ${SAGE_REPO}"
+    git -C "$SAGE_SRC" checkout -q FETCH_HEAD
+    HEAD="$(git -C "$SAGE_SRC" rev-parse HEAD)"
+    [ "$HEAD" = "$SAGE_COMMIT" ] \
+      || fail "Sage checkout is ${HEAD}, not the pinned ${SAGE_COMMIT} — refusing to build"
+    log "Sage source verified at pinned commit ${HEAD}"
+    # Memory-aware cargo parallelism: a release rustc job can hold ~2 GB, so
+    # cap jobs at available-RAM/2GB (and at nproc). An explicit CARGO_BUILD_JOBS
+    # from the operator is always honored. This keeps the build alive on small
+    # boxes instead of dying silently to the OOM killer mid-compile.
+    if [ -z "${CARGO_BUILD_JOBS:-}" ]; then
+      MEM_MB="$(awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null)"
+      [ -n "$MEM_MB" ] || MEM_MB="$(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null)"
+      NPROC="$(nproc 2>/dev/null || echo 2)"
+      if [ -n "$MEM_MB" ] && [ "$MEM_MB" -gt 0 ] 2>/dev/null; then
+        MEM_JOBS=$(( MEM_MB / 2048 ))
+        [ "$MEM_JOBS" -ge 1 ] || MEM_JOBS=1
+        [ "$NPROC" -lt "$MEM_JOBS" ] && MEM_JOBS="$NPROC"
+        export CARGO_BUILD_JOBS="$MEM_JOBS"
+        log "cargo build jobs: $MEM_JOBS (cpus=$NPROC, available RAM=${MEM_MB}MB)"
+      else
+        log "could not read available RAM — leaving cargo parallelism at its default"
+      fi
+    else
+      log "cargo build jobs: ${CARGO_BUILD_JOBS} (operator override)"
+    fi
+    # Build with a heartbeat. The release compile runs 20+ minutes with no
+    # output, so log progress every minute: elapsed time plus the crate
+    # currently compiling. A silent death (OOM kill, lost session) then shows
+    # up as a heartbeat that simply stops, instead of a mystery.
+    SAGE_BUILD_LOG="${WORK}/sage-build.log"
+    case "${SPELLBOOK_BUILD_HEARTBEAT_SECS:-60}" in
+      ''|*[!0-9]*|0) HEARTBEAT_SECS=60 ;;
+      *)             HEARTBEAT_SECS="${SPELLBOOK_BUILD_HEARTBEAT_SECS}" ;;
+    esac
+    ( cd "$SAGE_SRC" && cargo build --release -p sage-cli >"$SAGE_BUILD_LOG" 2>&1 ) &
+    SAGE_BUILD_PID=$!
+    SAGE_BUILD_START="$(date +%s)"
+    while kill -0 "$SAGE_BUILD_PID" 2>/dev/null; do
+      sleep "$HEARTBEAT_SECS"
+      kill -0 "$SAGE_BUILD_PID" 2>/dev/null || break
+      SAGE_ELAPSED=$(( $(date +%s) - SAGE_BUILD_START ))
+      SAGE_LAST_CRATE="$(grep -o 'Compiling [^ ]*' "$SAGE_BUILD_LOG" 2>/dev/null | tail -1)"
+      log "sage build running (${SAGE_ELAPSED}s elapsed${SAGE_LAST_CRATE:+, $SAGE_LAST_CRATE} ...) ..."
+    done
+    wait "$SAGE_BUILD_PID" \
+      || fail "sage-cli build failed — last 30 lines of the build log:$(tail -30 "$SAGE_BUILD_LOG" 2>/dev/null | sed 's/^/  /')"
+    SAGE_BIN_STAGED="${CARGO_TARGET_DIR}/release/sage"
+    [ -x "$SAGE_BIN_STAGED" ] \
+      || fail "sage-cli build produced no binary at $SAGE_BIN_STAGED"
+  fi
 fi
 
 # ---------------------------------------------------------------- 3. OS user + layout (S2)
