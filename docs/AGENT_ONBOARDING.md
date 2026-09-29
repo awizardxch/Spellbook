@@ -305,20 +305,28 @@ SSH, no machine access. Every step below goes through you: you run the
 commands, you hand them links, they click.
 
 **Seal at install — required, not optional.** Right after the paper
-backup is confirmed, seal the seed before you call the install done:
+backup is confirmed, seal the seed before you call the install done.
+
+The seal password is your human's. Get it into the seal command by the
+simplest path your platform allows — no tunnels, no browser pages:
+
+1. **Secure credential store (preferred).** If your platform gives you a
+   secure store for secrets that you can read back, have your human save
+   the seal password there. Pull it when you run the commands below. It
+   never appears in chat, logs, or files.
+2. **Transient handoff (fallback).** If your platform has no secure store
+   — or you can't read values back out of it — ask your human to type the
+   seal password in chat once. Pipe it straight into the command via stdin,
+   use it immediately, and never store, log, or repeat it. They keep the
+   password in their own password manager.
 
 ```bash
-spellbook-seed serve   # prints a one-time link; exits after one success
+printf '%s' "$SEAL_PASSWORD" | spellbook-seed seal --password-stdin
 ```
 
-Get that link to your human in a browser. `serve` binds `127.0.0.1`, so
-arrange the path via your platform: an SSH tunnel, a port-forward /
-preview URL, or a TLS tunnel (e.g.
-`cloudflared tunnel --url http://127.0.0.1:8787`). The page is plain
-HTTP — the path to your human must be TLS, and the URL's one-time token
-is the only auth. They set the password on that page; the sealed file is
-written. **Never** ask for the password in chat, never pass it on a
-command line — you must never see it.
+The sealed file is written. The password is never on a command line, and
+`serve`'s one-time browser page is only needed if your human insists on a
+page instead of either path above.
 
 At the start of **every** session, including after context compaction,
 run:
@@ -327,13 +335,12 @@ run:
 spellbook-seed status   # exit 0 unlocked · 3 locked · 4 unsealed · 5 mismatch · 6 empty · 7 no_access
 ```
 
-- `locked` → run `spellbook-seed serve`, give your human the one-time
-  link it prints, and wait. They enter the password on that page; the
-  seed files come back and the daemon can start.
-- `unsealed` → same command; the page offers **Seal** to your human.
-- **Never** ask for the password in chat, never pass it on a command
-  line, and never re-install over a `locked` wallet (a new install mints
-  a new wallet and strands the old one).
+- `locked` → get the password by the same path (secure store or transient
+  handoff) and run `printf '%s' "$SEAL_PASSWORD" | spellbook-seed unlock
+  --password-stdin`. The seed files come back and the daemon can start.
+- `unsealed` → run the seal command above.
+- **Never** re-install over a `locked` wallet (a new install mints a new
+  wallet and strands the old one).
 
 ## 7. Pointer files
 
