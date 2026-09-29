@@ -667,6 +667,21 @@ cfg = {
         "relay_urls": {"testnet11": "", "mainnet": ""},
         "mainnet_submit_enabled": False,
     } if chia else {}),
+    # EVM wiring (§10): the daemon signs EVM transfers through these
+    # per-chain RPC endpoints. Chain entries are plumbing only — mainnet
+    # submission stays gated behind evm.mainnet_submit_enabled (default
+    # off, D9; the human flips it when they authorize mainnet sends).
+    # Without a chain entry, approved spends fail closed with
+    # "chain submission not configured".
+    "evm": {
+        "chains": {
+            "evm-4663": {
+                "rpc_url": "https://rpc.mainnet.chain.robinhood.com",
+                "enabled": True,
+            },
+        },
+        "mainnet_submit_enabled": False,
+    },
     # Solana wiring (direct HTTPS JSON-RPC — no relay, no Sage needed):
     # `network` is the active network — "devnet" default; "mainnet-beta" is
     # gated behind solana.mainnet_submit_enabled (separate authorization,
@@ -766,6 +781,17 @@ fi
 log "install record written (version ${NEW_VERSION}; self-serve upgrade ready)"
 
 log "installing the systemd unit ..."
+# The daemon makes its own HTTPS RPC calls (EVM/Solana); on hosts whose
+# egress goes through a proxy, the daemon must inherit the proxy env or
+# its RPC calls die with SSL WRONG_VERSION_NUMBER. Capture whatever proxy
+# vars the install environment carries into the unit.
+PROXY_ENV=""
+for v in https_proxy HTTPS_PROXY http_proxy HTTP_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY; do
+  if [ -n "${!v:-}" ]; then
+    PROXY_ENV="${PROXY_ENV}Environment=${v}=${!v}
+"
+  fi
+done
 cat > /etc/systemd/system/spellbookd.service <<EOF
 [Unit]
 Description=Spellbook policy daemon (per-agent wallet custody)
@@ -776,10 +802,11 @@ Type=simple
 User=${SPELLBOOK_USER}
 Group=${SPELLBOOK_USER}
 RuntimeDirectory=spellbook
-ExecStart=${VENV}/bin/spellbookd --socket ${SOCK_PATH} --config ${PREFIX}
+${PROXY_ENV}ExecStart=${VENV}/bin/spellbookd --socket ${SOCK_PATH} --config ${PREFIX}
 Restart=on-failure
 RestartSec=5
-# No auto-update, no network egress needed. Secrets never leave this host.
+# No auto-update. Secrets never leave this host.
+# Outbound RPC egress uses the proxy env above when the install host needs it.
 
 [Install]
 WantedBy=multi-user.target
