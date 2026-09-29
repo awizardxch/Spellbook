@@ -23,8 +23,23 @@ ol{padding-left:20px} li{margin:4px 0}
 </head>
 <body>
 <h1>🔐 Spellbook Seal Ceremony <span style="font-size:.8em;color:#9fb0a6">(minimal)</span></h1>
-<p class="sub">Fallback page — same 3 steps, stripped down. Fully offline.</p>
+<p class="sub">Fallback page — same steps, stripped down. Fully offline.</p>
 <div class="warn"><b>⚠️ DO NOT RELOAD THIS PAGE.</b> Your reveal private key lives only in this page's memory.</div>
+
+<div class="card">
+<h2>0 — Restore from backup (optional, skip for fresh)</h2>
+<ol>
+<li>Paste your <b>SET 1</b> and <b>SET 2</b> mnemonics (24 words each).</li>
+<li>Click <b>Encrypt</b>, then <b>Copy</b>. Paste into chat for the agent.</li>
+<li>Skip steps 1–2, do step 3 (seal password) next.</li>
+</ol>
+<textarea id="r1" placeholder="SET 1 — 24 words…" rows="2"></textarea>
+<textarea id="r2" placeholder="SET 2 — 24 words…" rows="2"></textarea>
+<button id="re">Encrypt restore keys</button>
+<button id="cr" class="ghost" disabled>Copy ciphertext</button>
+<textarea id="rc" readonly placeholder="Ciphertext…"></textarea>
+<div class="err" id="er"></div><div class="ok" id="or"></div>
+</div>
 
 <div class="card">
 <h2>1 — Reveal key → agent</h2>
@@ -138,6 +153,26 @@ document.getElementById("en3").onclick=async function(){
   btn.disabled=false;btn.textContent="Encrypt password";
 };
 document.getElementById("c3").onclick=function(){cp(document.getElementById("ct").value,document.getElementById("o3"),"Copied — paste into chat.");};
+/* ---- Step 0: restore ---- */
+document.getElementById("re").onclick=async function(){
+  var e=document.getElementById("er"),o=document.getElementById("or");e.textContent="";o.textContent="";
+  var s1=document.getElementById("r1").value.trim().toLowerCase().split(/\s+/);
+  var s2=document.getElementById("r2").value.trim().toLowerCase().split(/\s+/);
+  if(s1.length!==24||s2.length!==24){e.textContent="Enter 24 words for each set.";return;}
+  var btn=this;btn.disabled=true;btn.textContent="Encrypting…";
+  try{
+    if(SEAL_PUB_B64.indexOf("__SEAL_PUB_B64__")===0)throw new Error("Seal public key not set — agent must embed it first.");
+    var payload=JSON.stringify({set1:s1.join(" "),set2:s2.join(" ")});
+    var k=await crypto.subtle.importKey("spki",b642b(SEAL_PUB_B64),{name:"RSA-OAEP",hash:"SHA-256"},false,["encrypt"]);
+    var c=await crypto.subtle.encrypt({name:"RSA-OAEP"},k,new TextEncoder().encode(payload));
+    document.getElementById("rc").value=b2b(new Uint8Array(c));
+    document.getElementById("cr").disabled=false;
+    document.getElementById("r1").value="";document.getElementById("r2").value="";
+    o.textContent="Encrypted — copy and paste into chat. Skip steps 1–2, do step 3 next.";
+  }catch(x){e.textContent="Failed: "+x.message;}
+  btn.disabled=false;btn.textContent="Encrypt restore keys";
+};
+document.getElementById("cr").onclick=function(){cp(document.getElementById("rc").value,document.getElementById("or"),"Copied — paste into chat.");};
 </script>
 </body>
 </html>

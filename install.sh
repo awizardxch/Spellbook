@@ -237,6 +237,11 @@ usage() {
   echo "                   --upgrade is human-driven (no signature to verify)."
   echo "                   Downgrades are the human's call — the agent wrapper"
   echo "                   refuses them, install.sh obeys."
+  echo "  --restore FILE   restore from backup: FILE has two lines — seed.key hex"
+  echo "                   (64 chars) then std_seed.key hex (128 chars). Uses these"
+  echo "                   instead of generating fresh keys. The agent obtains them"
+  echo "                   by decrypting the human's restore blob from the ceremony"
+  echo "                   HTML page. FILE is shredded after use."
   echo "  --no-sage        install EVM-only (Chia/Sage skipped; SPEC primary deliverable)"
   echo "  --agent-user     OS user the conversational agent runs as (required; in"
   echo "                   --upgrade mode defaults to the value in install.env)"
@@ -256,6 +261,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --no-sage) NO_SAGE=1; NO_SAGE_SET=1; shift ;;
     --upgrade) UPGRADE=1; shift ;;
+    --restore) RESTORE_FILE="${2:-}"; shift 2 ;;
     --from-dir) FROM_DIR="${2:-}"; shift 2 ;;
     --agent-user) AGENT_USER="${2:-}"; shift 2 ;;
     --human-user) HUMAN_USER="${2:-}"; shift 2 ;;
@@ -265,6 +271,15 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$TAG" ] || [ -n "$FROM_DIR" ] || usage
+
+# --restore and --upgrade are mutually exclusive: restore loads backed-up keys
+# into a FRESH install; upgrade preserves the keys already on disk.
+if [ -n "$RESTORE_FILE" ] && [ "$UPGRADE" = "1" ]; then
+  fail "--restore and --upgrade are mutually exclusive"
+fi
+if [ -n "$RESTORE_FILE" ]; then
+  [ -f "$RESTORE_FILE" ] || fail "--restore file not found: $RESTORE_FILE"
+fi
 
 # --upgrade: fill user flags from the install record (flags still win), and
 # require an existing healthy install. Everything below treats --upgrade as
@@ -601,6 +616,32 @@ if [ "$UPGRADE" = "1" ]; then
     [ -f "${PREFIX}/$k" ] || fail "${PREFIX}/$k missing — broken wallet identity; refusing to re-key (recovery is the human's call)"
   done
   log "key material present (untouched by upgrade)"
+elif [ -n "$RESTORE_FILE" ]; then
+  # Restore from backup: the agent decrypted the human's restore blob (from the
+  # ceremony HTML) and wrote the two hex keys to RESTORE_FILE. Validate and
+  # install them instead of generating fresh keys.
+  [ ! -e "${PREFIX}/seed.key" ] || fail "${PREFIX}/seed.key already exists — this machine looks installed. Refusing to overwrite; uninstall first."
+  [ ! -e "${PREFIX}/std_seed.key" ] || fail "${PREFIX}/std_seed.key already exists — this machine looks installed. Refusing to overwrite; uninstall first."
+  log "restoring keys from backup ..."
+  RESTORE_SEED_HEX="$(sed -n '1p' "$RESTORE_FILE" | tr -d ' \t\r\n')"
+  RESTORE_STD_HEX="$(sed -n '2p' "$RESTORE_FILE" | tr -d ' \t\r\n')"
+  case "$RESTORE_SEED_HEX" in
+    *[!0-9a-fA-F]*) fail "restore file line 1: not hex" ;;
+  esac
+  case "$RESTORE_STD_HEX" in
+    *[!0-9a-fA-F]*) fail "restore file line 2: not hex" ;;
+  esac
+  [ "${#RESTORE_SEED_HEX}" = "64" ] || fail "restore file line 1: expected 64 hex chars (32-byte seed), got ${#RESTORE_SEED_HEX}"
+  [ "${#RESTORE_STD_HEX}" = "128" ] || fail "restore file line 2: expected 128 hex chars (64-byte std seed), got ${#RESTORE_STD_HEX}"
+  printf '%s' "$RESTORE_SEED_HEX" > "${PREFIX}/seed.key"
+  printf '%s' "$RESTORE_STD_HEX" > "${PREFIX}/std_seed.key"
+  chown "${SPELLBOOK_USER}:${SPELLBOOK_USER}" "${PREFIX}/seed.key" "${PREFIX}/std_seed.key"
+  chmod 0600 "${PREFIX}/seed.key" "${PREFIX}/std_seed.key"
+  # Shred the restore file — the keys now live only in ${PREFIX} (0600).
+  shred -u "$RESTORE_FILE" 2>/dev/null || rm -f "$RESTORE_FILE"
+  log "keys restored from backup (restore file shredded)"
+  # No fresh backup to display — the human already has these words on paper.
+  STD_BACKUP="(restored from backup — no new mnemonic generated)"
 else
 [ ! -e "${PREFIX}/seed.key" ] || fail "${PREFIX}/seed.key already exists — this machine looks installed. Refusing to overwrite; uninstall first."
 log "generating the wallet seed (once) ..."
@@ -667,21 +708,6 @@ cfg = {
         "relay_urls": {"testnet11": "", "mainnet": ""},
         "mainnet_submit_enabled": False,
     } if chia else {}),
-    # EVM wiring (§10): the daemon signs EVM transfers through these
-    # per-chain RPC endpoints. Chain entries are plumbing only — mainnet
-    # submission stays gated behind evm.mainnet_submit_enabled (default
-    # off, D9; the human flips it when they authorize mainnet sends).
-    # Without a chain entry, approved spends fail closed with
-    # "chain submission not configured".
-    "evm": {
-        "chains": {
-            "evm-4663": {
-                "rpc_url": "https://rpc.mainnet.chain.robinhood.com",
-                "enabled": True,
-            },
-        },
-        "mainnet_submit_enabled": False,
-    },
     # Solana wiring (direct HTTPS JSON-RPC — no relay, no Sage needed):
     # `network` is the active network — "devnet" default; "mainnet-beta" is
     # gated behind solana.mainnet_submit_enabled (separate authorization,
@@ -781,17 +807,6 @@ fi
 log "install record written (version ${NEW_VERSION}; self-serve upgrade ready)"
 
 log "installing the systemd unit ..."
-# The daemon makes its own HTTPS RPC calls (EVM/Solana); on hosts whose
-# egress goes through a proxy, the daemon must inherit the proxy env or
-# its RPC calls die with SSL WRONG_VERSION_NUMBER. Capture whatever proxy
-# vars the install environment carries into the unit.
-PROXY_ENV=""
-for v in https_proxy HTTPS_PROXY http_proxy HTTP_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY; do
-  if [ -n "${!v:-}" ]; then
-    PROXY_ENV="${PROXY_ENV}Environment=${v}=${!v}
-"
-  fi
-done
 cat > /etc/systemd/system/spellbookd.service <<EOF
 [Unit]
 Description=Spellbook policy daemon (per-agent wallet custody)
@@ -802,11 +817,10 @@ Type=simple
 User=${SPELLBOOK_USER}
 Group=${SPELLBOOK_USER}
 RuntimeDirectory=spellbook
-${PROXY_ENV}ExecStart=${VENV}/bin/spellbookd --socket ${SOCK_PATH} --config ${PREFIX}
+ExecStart=${VENV}/bin/spellbookd --socket ${SOCK_PATH} --config ${PREFIX}
 Restart=on-failure
 RestartSec=5
-# No auto-update. Secrets never leave this host.
-# Outbound RPC egress uses the proxy env above when the install host needs it.
+# No auto-update, no network egress needed. Secrets never leave this host.
 
 [Install]
 WantedBy=multi-user.target
