@@ -99,6 +99,15 @@ here when a newer signed release exists. After every upgrade, run
 `spellbook doctor`, then do the steps for **each** version you moved past,
 oldest first.
 
+### 0.3.1: installer robustness (no agent action needed)
+
+What changed: the fresh-install path only. Sage preflight checks (Rust
+≥1.85, libclang, ~5 GB disk) fail fast instead of dying 20 minutes into the
+compile; the cargo target dir persists across runs so a killed build resumes;
+cargo jobs are capped by available RAM with a per-minute build heartbeat; the
+Sage smoke test was fixed. After upgrading: nothing — run `spellbook doctor`
+as usual; these fixes apply to new installs.
+
 ### 0.3.0: sealed seed, universal agent access, recovery fixes
 
 What changed:
