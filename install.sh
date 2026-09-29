@@ -311,7 +311,10 @@ else
     [ -n "$CARGO_VER" ] && [ "$(printf '1.85.0\n%s\n' "$CARGO_VER" | sort -V | head -n1)" = "1.85.0" ] \
       || fail "cargo ${CARGO_VER:-unknown} is too old for the Sage build (needs >= 1.85 for edition2024). Install a current stable toolchain: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable"
     # bindgen (aws-lc-sys and friends) needs libclang at build time.
-    ldconfig -p 2>/dev/null | grep -q libclang \
+    # NOTE: no `grep -q` here — under `set -o pipefail`, grep -q exits on the
+    # first match and ldconfig can die of SIGPIPE, failing this check ~10% of
+    # runs. Plain grep drains the pipe, so the exit status is real.
+    [ -n "$(ldconfig -p 2>/dev/null | grep libclang || true)" ] \
       || fail "libclang not found — the Sage build needs it (bindgen). On Debian/Ubuntu: apt-get install -y libclang-dev clang"
     # Persistent target dir, namespaced by Sage pin: a killed or re-run build
     # resumes instead of recompiling from zero (the bulk of the time is
