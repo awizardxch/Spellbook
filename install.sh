@@ -203,6 +203,12 @@ need curl; need sha256sum; need gpg; need tar; need useradd; need runuser
 need systemctl; need python3; need id; need getent
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+# Resolve the installer's own path BEFORE cd "$WORK" below: $0 may be a
+# relative path (e.g. `bash install.sh`), which stops resolving once we
+# leave the invocation directory. The pinned copy for the upgrade wrapper
+# needs the real file.
+INSTALLER_SRC="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+[ -f "$INSTALLER_SRC" ] || fail "cannot locate installer source at $INSTALLER_SRC"
 chmod 755 "$WORK"   # the spellbook user must traverse it (pip install runs as spellbook)
 cd "$WORK"
 
@@ -618,7 +624,8 @@ chmod 0644 "${PREFIX}/VERSION"
 [ -f "${STAGE}/scripts/spellbook-upgrade" ] \
   || fail "release tree has no scripts/spellbook-upgrade — refusing to install a build without the self-serve path"
 mkdir -p "${PREFIX}/lib"
-INSTALLER_SRC="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+# INSTALLER_SRC was resolved before cd "$WORK" (see above) — $0 may be
+# relative and no longer resolves from here.
 cp "$INSTALLER_SRC" "${PREFIX}/lib/install.sh"
 chown root:root "${PREFIX}/lib/install.sh"; chmod 0755 "${PREFIX}/lib/install.sh"
 cat > "${PREFIX}/install.env" <<EOF
