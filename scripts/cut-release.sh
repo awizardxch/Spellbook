@@ -67,7 +67,10 @@ elif [ -z "$SAGE_PLATFORM" ]; then
 else
   command -v cargo >/dev/null 2>&1 \
     || fail "cargo not found — the prebuilt Sage needs a Rust toolchain"
-  ldconfig -p 2>/dev/null | grep -q libclang \
+  # NOTE: no `grep -q` here — under `set -o pipefail`, grep -q exits on the
+  # first match and ldconfig can die of SIGPIPE, failing this check ~10% of
+  # runs. Plain grep drains the pipe, so the exit status is real.
+  [ -n "$(ldconfig -p 2>/dev/null | grep libclang || true)" ] \
     || fail "libclang not found — the prebuilt Sage build needs it (bindgen)"
   SAGE_COMMIT_PIN="$(awk -F'\"' '/^SAGE_COMMIT="/ {print $2; exit}' install.sh)"
   # SAGE_REPO in install.sh is SAGE_REPO="${SAGE_REPO:-<url>}"; unwrap the default.
