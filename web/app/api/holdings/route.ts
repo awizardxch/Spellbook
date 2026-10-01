@@ -930,37 +930,29 @@ async function discoverEvmNfts(
     const latest = await evmLatestBlock(cfg);
     if (latest === null) return out;
     const windowStart = Math.max(0, latest - 20000);
-    // Chunked like discoverEvmTokenContracts: a busy wallet can exceed
-    // the RPC's per-query log cap, which errors the query and silently
-    // yields zero discoveries.
-    const CHUNK = 5000;
     for (const address of addresses) {
       const padded = "0x" + abiPadAddress(address);
       let logs: unknown[] = [];
-      for (let start = windowStart; start <= latest; start += CHUNK) {
-        const end = Math.min(start + CHUNK - 1, latest);
-        try {
-          const json = (await fetchJson(cfg.rpcUrl as string, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              jsonrpc: "2.0",
-              id: 1,
-              method: "eth_getLogs",
-              params: [
-                {
-                  fromBlock: "0x" + start.toString(16),
-                  toBlock: "0x" + end.toString(16),
-                  topics: [[TRANSFER_TOPIC, null, padded]],
-                },
-              ],
-            }),
-          })) as RpcResultItem;
-          if (Array.isArray(json.result))
-            logs = logs.concat(json.result as unknown[]);
-        } catch {
-          continue;
-        }
+      try {
+        const json = (await fetchJson(cfg.rpcUrl as string, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "eth_getLogs",
+            params: [
+              {
+                fromBlock: "0x" + windowStart.toString(16),
+                toBlock: "0x" + latest.toString(16),
+                topics: [[TRANSFER_TOPIC, null, padded]],
+              },
+            ],
+          }),
+        })) as RpcResultItem;
+        if (Array.isArray(json.result)) logs = json.result as unknown[];
+      } catch {
+        continue;
       }
       const contracts = new Set<string>();
       for (const l of logs) {
@@ -1042,38 +1034,29 @@ async function discoverEvmTokenContracts(
     const latest = await evmLatestBlock(cfg);
     if (latest === null) return out;
     const windowStart = Math.max(0, latest - 20000);
-    // Chunk the window: a busy wallet's inbound Transfers can exceed the
-    // RPC's per-query log cap (10k on Robinhood), which errors the whole
-    // query and silently yields zero discoveries. 5k-block chunks stay
-    // well under the cap.
-    const CHUNK = 5000;
     for (const address of addresses) {
       const padded = "0x" + abiPadAddress(address);
       let logs: unknown[] = [];
-      for (let start = windowStart; start <= latest; start += CHUNK) {
-        const end = Math.min(start + CHUNK - 1, latest);
-        try {
-          const json = (await fetchJson(cfg.rpcUrl as string, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              jsonrpc: "2.0",
-              id: 1,
-              method: "eth_getLogs",
-              params: [
-                {
-                  fromBlock: "0x" + start.toString(16),
-                  toBlock: "0x" + end.toString(16),
-                  topics: [[TRANSFER_TOPIC, null, padded]],
-                },
-              ],
-            }),
-          })) as RpcResultItem;
-          if (Array.isArray(json.result))
-            logs = logs.concat(json.result as unknown[]);
-        } catch {
-          continue;
-        }
+      try {
+        const json = (await fetchJson(cfg.rpcUrl as string, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "eth_getLogs",
+            params: [
+              {
+                fromBlock: "0x" + windowStart.toString(16),
+                toBlock: "0x" + latest.toString(16),
+                topics: [[TRANSFER_TOPIC, null, padded]],
+              },
+            ],
+          }),
+        })) as RpcResultItem;
+        if (Array.isArray(json.result)) logs = json.result as unknown[];
+      } catch {
+        continue;
       }
       for (const l of logs) {
         const c = (l as { address?: unknown }).address;
