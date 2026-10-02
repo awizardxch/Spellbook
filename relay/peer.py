@@ -33,7 +33,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 import aiohttp
 
-from .fallback import FallbackChain, build_sources
+from fallback import FallbackChain, build_sources
 
 from streamable import (
     CoinState,
