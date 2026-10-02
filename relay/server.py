@@ -378,6 +378,9 @@ async def handle_status(request: web.Request) -> web.Response:
         "peers_connected": manager.connected_count() if manager else 0,
         "watched_puzzle_hashes": snap.get("watched_puzzle_hashes", 0),
         "cached_coins": snap.get("cached_coins", 0),
+        "last_peak_at": snap.get("last_peak_at"),
+        "peak_stale_after_s": snap.get("peak_stale_after_s"),
+        "peak_stale": snap.get("peak_stale", False),
         "uptime_s": int(time.time() - state.started_at),
     })
 
@@ -628,6 +631,7 @@ async def on_startup(app: web.Application) -> None:
             introducer_host=net_cfg.get("introducer_host", cfg.get("introducer_host", "")),
             peers_override=net_cfg.get("peers_override", cfg.get("peers_override")),
             max_peers=net_cfg.get("max_peers", cfg.get("max_peers", 3)),
+            peak_stale_after_s=float(os.environ.get("RELAY_PEAK_STALE_S", "600")),
         )
         manager = PeerManager(mgr_cfg, ssl_ctx, state.session)
         await manager.start()
