@@ -60,3 +60,41 @@ If the human has backed-up keys (from a previous install's paper backup):
 These pages are a bridge. The permanent implementation belongs inside
 Spellbook itself (likely `spellbook-seed serve`), portable across LLM
 environments with no Muse-specific dependency.
+
+## Passwordless ceremony (current)
+
+**`seed-to-addresses.html`** — the current ceremony page. No passwords, no
+chat secrets. The human pastes one of:
+
+- 24 BIP-39 recovery words (standard wallet — the set that imports into
+  Sage/MetaMask), validated with checksum in-page, or
+- 128-hex standard seed, or
+- 64-hex custom (32-byte) seed.
+
+The page derives EVM / Solana / Chia addresses entirely offline and seals
+the seed into a `SPELLBOOK-SEED-ENC2` envelope (AES-256-GCM, key wrapped by
+RSA-OAEP-SHA256 to the ceremony public key). The envelope is the only thing
+that leaves the browser — the seed and words never do.
+
+The page ships with `__SEED_PUB_B64__` as a placeholder and **refuses to
+seal until stamped**. Before handing it to the human:
+
+1. Run `python3 ceremony/new_seed_ceremony_key.py` — generates a fresh
+   RSA-2048 keypair. Keep `private.pem` secret (mode 600, outside the repo).
+2. Replace `__SEED_PUB_B64__` with the base64 DER SPKI public key.
+3. After the ceremony, `private.pem` decrypts envelopes; guard it like a key.
+
+### Agent tools (for other agents)
+
+These scripts let any agent work with sealed envelopes without ever seeing
+key material:
+
+- **`derive_from_envelope.py`** — paste an envelope, get the EVM/Solana/Chia
+  addresses. Verifies EVM + Solana against known anchors and fails closed
+  on mismatch. The seed is derived in-process and never printed.
+- **`derive_addresses.py`** — derive all addresses from a seed hex directly.
+- **`new_seed_ceremony_key.py`** — mint a fresh ceremony RSA keypair.
+
+The daemon (`src/spellbook/daemon.py`) decrypts the same envelope format on
+startup via `sealed_envelope_path` + `ceremony_key_path` (see PR #105), so
+keys survive restarts without re-entry.
