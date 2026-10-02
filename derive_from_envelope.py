@@ -63,9 +63,9 @@ def decrypt_envelope(envelope: str) -> str:
         padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),
                      algorithm=hashes.SHA256(), label=None))
     seed_hex = AESGCM(aes_key).decrypt(iv, ct, None).decode().strip().lower()
-    if len(seed_hex) != 64 or \
+    if len(seed_hex) not in (64, 128) or \
             not all(c in "0123456789abcdef" for c in seed_hex):
-        raise ValueError("decrypted payload is not a 64-char hex seed")
+        raise ValueError("decrypted payload is not a 64- or 128-char hex seed")
     return seed_hex
 
 
@@ -92,8 +92,9 @@ def main():
         sys.exit(1)
 
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from derive_addresses import derive_all
+    from derive_addresses import derive_all, seed_mode
     try:
+        mode = seed_mode(seed_hex)
         addrs = derive_all(seed_hex)
     except Exception as e:
         print(f"ERROR: derivation failed: {e}", file=sys.stderr)
@@ -121,7 +122,7 @@ def main():
         sys.exit(2)
 
     print()
-    print("=== Spellbook addresses (label: default) — VERIFIED ===")
+    print(f"=== Spellbook addresses (mode: {mode}, label: default) — VERIFIED ===")
     print(f"evm_mainnet:    {addrs['evm_mainnet']}")
     print(f"solana_mainnet: {addrs['solana_mainnet']}")
     print(f"chia_mainnet:   {addrs['chia_mainnet']}")

@@ -49,8 +49,8 @@ code{background:var(--field);padding:2px 6px;border-radius:4px;font-size:.9em}
 <div class="step">
 <span class="stepnum">Step 1</span>
 <h2>Paste seed</h2>
-<label for="seed">32-byte seed as 64 hex characters (the <code>seed.key</code> file content)</label>
-<textarea id="seed" placeholder="64 hex chars…" autocomplete="off" spellcheck="false"></textarea>
+<label for="seed">Seed as hex — <b>64</b> chars for the 32-byte daemon seed (<code>seed.key</code>), or <b>128</b> chars for the 64-byte BIP-39 seed (<code>std_seed.key</code>)</label>
+<textarea id="seed" placeholder="64 or 128 hex chars…" autocomplete="off" spellcheck="false"></textarea>
 <div class="row">
 <button class="ghost" id="hideBtn" type="button">Hide</button>
 </div>
@@ -166,7 +166,7 @@ $("encBtn").onclick = async () => {
   $("copyEnc").style.display = "none";
   try{
     const seedHex = (seedHidden ? seedReal : $("seed").value).trim().toLowerCase();
-    if(!/^[0-9a-f]{64}$/.test(seedHex)) throw new Error("Seed must be exactly 64 hex characters.");
+    if(!/^[0-9a-f]{64}$/.test(seedHex) && !/^[0-9a-f]{128}$/.test(seedHex)) throw new Error("Seed must be 64 or 128 hex characters.");
     const rsaPub = await getAgentKey();
     const enc = new TextEncoder();
     // Hybrid: random AES-256-GCM data key, RSA-OAEP wraps only the key.
