@@ -27,10 +27,13 @@ import asyncio
 import logging
 import os
 import socket
+import time
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Dict, List, Optional
+from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 import aiohttp
+
+from .fallback import FallbackChain, build_sources
 
 from streamable import (
     CoinState,
@@ -124,6 +127,10 @@ class ChiaPeer:
         self._closed = asyncio.Event()
         self._peer_protocol_version: Optional[str] = None
         self._close_info: Optional[str] = None
+        # Unix timestamp of the last peak announcement received from this
+        # peer (NewPeakWallet push or CoinStateUpdate). The staleness
+        # watchdog uses it to rotate out peers that stop feeding us blocks.
+        self.last_peak_at: Optional[float] = None
 
     # -- properties ------------------------------------------------------
     @property
@@ -274,12 +281,14 @@ class ChiaPeer:
         try:
             if message.msg_type == MsgType.COIN_STATE_UPDATE:
                 update = dec_coin_state_update(message.data)
+                self.last_peak_at = time.time()
                 if self._on_peak is not None:
                     await self._on_peak(update["height"])
                 if self._on_coin_states is not None:
                     await self._on_coin_states(update["items"])
             elif message.msg_type == MsgType.NEW_PEAK_WALLET:
                 peak = dec_new_peak_wallet(message.data)
+                self.last_peak_at = time.time()
                 if self._on_peak is not None:
                     await self._on_peak(peak["height"])
             elif message.msg_type == MsgType.RESPOND_TO_PH_UPDATES:
@@ -364,6 +373,32 @@ class ManagerConfig:
     peers_override: Optional[List[str]] = None  # ["host:port", ...]
     max_peers: int = 3
     target_peers: int = 2
+    # A peer that has not announced a new peak within this many seconds is
+    # considered stale and gets rotated out for a freshly discovered peer.
+    # Chia blocks land ~every 19s, so 600s (~32 blocks) is generous.
+    peak_stale_after_s: float = 600.0
+    # A retired peer becomes eligible again after this long (avoids
+    # permanently blacklisting a node that was briefly wedged).
+    peak_retire_cooldown_s: float = 3600.0
+    # Hosted-API fallback sources for /v1/coins when P2P is stale or down,
+    # in try-order. Unknown names are ignored with a warning.
+    fallback_sources: List[str] = field(default_factory=lambda: ["coinset"])
+    # Seconds a fallback result is served from cache.
+    fallback_cache_s: float = 60.0
+    # Minimum interval between Coinset API calls (client-side rate limit).
+    coinset_min_interval_s: float = 2.0
+
+
+def _coin_state_to_dict(cs: CoinState) -> dict:
+    """Serialize a CoinState to the relay's coin JSON shape."""
+    return {
+        "coin_id": cs.coin.coin_id().hex(),
+        "parent_coin_info": cs.coin.parent_coin_info.hex(),
+        "puzzle_hash": cs.coin.puzzle_hash.hex(),
+        "amount_mojos": cs.coin.amount,
+        "created_height": cs.created_height,
+        "spent_height": cs.spent_height,
+    }
 
 
 class PeerManager:
@@ -382,7 +417,21 @@ class PeerManager:
         self._cache_lock = asyncio.Lock()
         self._watched: set[bytes] = set()          # puzzle hashes with live subs
         self._peak_height: Optional[int] = None
+        self._last_peak_at: Optional[float] = None  # unix ts of last peak push
         self._rr_index = 0
+        # label ("host:port") -> unix ts when a stale peer was retired.
+        # Retired peers are skipped by discovery until the cooldown lapses.
+        self._retired: Dict[str, float] = {}
+        # Hosted-API fallback chain for coin queries when P2P is stale/down.
+        self._fallback = FallbackChain(
+            build_sources(
+                session,
+                config.network_id,
+                config.fallback_sources,
+                config.coinset_min_interval_s,
+            ),
+            cache_s=config.fallback_cache_s,
+        )
 
     # -- lifecycle -------------------------------------------------------
     async def start(self) -> None:
@@ -395,6 +444,8 @@ class PeerManager:
             )
         # Background re-resolve: keep trying to fill up to target_peers.
         self._maintainers.append(asyncio.create_task(self._refill_loop(), name="peer-refill"))
+        # Staleness watchdog: rotate out peers that stop announcing peaks.
+        self._maintainers.append(asyncio.create_task(self._watchdog_loop(), name="peak-watchdog"))
 
     async def stop(self) -> None:
         self._stopping = True
@@ -446,6 +497,8 @@ class PeerManager:
                     for host, port in addrs:
                         if f"{host}:{port}" in have:
                             continue
+                        if self._is_retired(f"{host}:{port}"):
+                            continue  # stale; cooldown has not lapsed
                         async with self._peers_lock:
                             if len(self._peers) + sum(1 for t in self._maintainers if not t.done()) >= self.config.max_peers + 1:
                                 break
@@ -458,9 +511,65 @@ class PeerManager:
             except Exception as e:  # noqa: BLE001
                 log.warning("refill loop error: %s", e)
 
+    async def _watchdog_loop(self) -> None:
+        """Rotate out peers that stop announcing new peaks.
+
+        The relay learns the chain tip only from NewPeakWallet pushes. A
+        peer that stays connected but goes quiet leaves us serving stale
+        balances (exactly what happened on 2026-10-01: two peers sat at
+        mainnet height 9,370,473 for ~12h). Retired peers are skipped by
+        discovery until the cooldown lapses; the refill loop replaces them
+        with freshly discovered ones.
+        """
+        while not self._stopping:
+            try:
+                await asyncio.sleep(60)
+                now = time.time()
+                stale_after = self.config.peak_stale_after_s
+                async with self._peers_lock:
+                    peers = list(self._peers)
+                for peer in peers:
+                    if not peer.connected:
+                        continue
+                    last = peer.last_peak_at
+                    if last is None:
+                        continue  # freshly connected; give it a chance
+                    if now - last <= stale_after:
+                        continue
+                    label = peer.label
+                    self._retired[label] = now
+                    log.warning(
+                        "peer %s stale: no peak push for %.0fs (threshold %.0fs); "
+                        "retiring and rediscovering",
+                        label, now - last, stale_after,
+                    )
+                    await peer.close()
+                # Expire old retirements so a recovered node gets another chance.
+                cooldown = self.config.peak_retire_cooldown_s
+                for label, retired_at in list(self._retired.items()):
+                    if now - retired_at > cooldown:
+                        del self._retired[label]
+            except asyncio.CancelledError:
+                break
+            except Exception as e:  # noqa: BLE001
+                log.warning("watchdog loop error: %s", e)
+
+    def _is_retired(self, label: str) -> bool:
+        retired_at = self._retired.get(label)
+        if retired_at is None:
+            return False
+        if time.time() - retired_at > self.config.peak_retire_cooldown_s:
+            del self._retired[label]
+            return False
+        return True
+
     async def _maintain(self, host: str, port: int) -> None:
         backoff = 5.0
+        label = f"{host}:{port}"
         while not self._stopping:
+            if self._is_retired(label):
+                log.info("peer %s retired as stale; maintainer standing down", label)
+                break
             peer = ChiaPeer(
                 host, port, self._ssl, self.config.network_id, self._session,
                 on_coin_states=self._ingest_coin_states,
@@ -508,6 +617,7 @@ class PeerManager:
         async with self._cache_lock:
             if self._peak_height is None or height > self._peak_height:
                 self._peak_height = height
+            self._last_peak_at = time.time()
 
     # -- public API ----------------------------------------------------------
     def _pick_peer(self) -> ChiaPeer:
@@ -527,6 +637,34 @@ class PeerManager:
             self._watched.update(puzzle_hashes)
             wanted = set(puzzle_hashes)
             return [cs for cs in self._coins.values() if cs.coin.puzzle_hash in wanted]
+
+    def _p2p_is_fresh(self) -> bool:
+        """True when P2P peers are connected and their chain view is current."""
+        if self.connected_count() == 0:
+            return False
+        if self._last_peak_at is None:
+            return True  # never saw a peak; give P2P a chance
+        return (time.time() - self._last_peak_at) <= self.config.peak_stale_after_s
+
+    async def get_coins_with_source(
+        self, puzzle_hashes: List[bytes]
+    ) -> Tuple[List[dict], str]:
+        """Coin dicts (coin_to_json shape) plus the data-source label.
+
+        Prefers P2P while the peer pool's chain view is fresh; fails over to
+        the hosted-API chain (rate-limited, cached) when P2P is stale or the
+        peer request fails.
+        """
+        if self._p2p_is_fresh():
+            try:
+                states = await self.get_coins(puzzle_hashes)
+                return [_coin_state_to_dict(cs) for cs in states], "p2p"
+            except (NoPeersError, PeerError, asyncio.TimeoutError,
+                    StreamableError) as e:  # noqa: BLE001
+                log.warning("p2p get_coins failed, trying fallback: %s", e)
+        if not self._fallback.source_names:
+            raise NoPeersError("no connected peers and no fallback sources configured")
+        return await self._fallback.get_coins(puzzle_hashes)
 
     async def get_coins_by_ids(self, coin_ids: List[bytes]) -> List[CoinState]:
         """Subscribe + fetch current CoinStates for the given coin ids.
@@ -567,8 +705,15 @@ class PeerManager:
 
     async def snapshot(self) -> dict:
         async with self._cache_lock:
+            now = time.time()
+            last_peak = self._last_peak_at
+            stale_after = self.config.peak_stale_after_s
             return {
                 "peak_height": self._peak_height,
                 "watched_puzzle_hashes": len(self._watched),
                 "cached_coins": len(self._coins),
+                "last_peak_at": last_peak,
+                "peak_stale_after_s": stale_after,
+                "peak_stale": last_peak is not None and (now - last_peak) > stale_after,
+                "fallback_sources": self._fallback.source_names,
             }

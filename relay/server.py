@@ -378,6 +378,10 @@ async def handle_status(request: web.Request) -> web.Response:
         "peers_connected": manager.connected_count() if manager else 0,
         "watched_puzzle_hashes": snap.get("watched_puzzle_hashes", 0),
         "cached_coins": snap.get("cached_coins", 0),
+        "last_peak_at": snap.get("last_peak_at"),
+        "peak_stale_after_s": snap.get("peak_stale_after_s"),
+        "peak_stale": snap.get("peak_stale", False),
+        "fallback_sources": snap.get("fallback_sources", []),
         "uptime_s": int(time.time() - state.started_at),
     })
 
@@ -414,15 +418,19 @@ async def handle_coins(request: web.Request) -> web.Response:
     if manager is None:
         return err(f"network {network} not running", 503)
     try:
-        states = await manager.get_coins(ph_bytes)
+        coins, source = await manager.get_coins_with_source(ph_bytes)
     except NoPeersError:
-        return err("no peers connected", 503)
+        return err("no peers connected and no fallback source available", 503)
     except (PeerError, StreamableError, asyncio.TimeoutError) as e:
         log.warning("get_coins failed: %s", e)
         return err(f"peer request failed: {type(e).__name__}", 502)
+    except RuntimeError as e:
+        # All hosted fallback sources failed.
+        log.warning("get_coins fallback failed: %s", e)
+        return err(str(e), 502)
 
-    coins = sorted((coin_to_json(cs) for cs in states), key=lambda c: (c["created_height"] or 0))
-    return web.json_response({"ok": True, "network": network, "coins": coins})
+    coins = sorted(coins, key=lambda c: (c["created_height"] or 0))
+    return web.json_response({"ok": True, "network": network, "source": source, "coins": coins})
 
 
 async def handle_coin(request: web.Request) -> web.Response:
@@ -628,6 +636,14 @@ async def on_startup(app: web.Application) -> None:
             introducer_host=net_cfg.get("introducer_host", cfg.get("introducer_host", "")),
             peers_override=net_cfg.get("peers_override", cfg.get("peers_override")),
             max_peers=net_cfg.get("max_peers", cfg.get("max_peers", 3)),
+            peak_stale_after_s=float(os.environ.get("RELAY_PEAK_STALE_S", "600")),
+            fallback_sources=[
+                s.strip()
+                for s in os.environ.get("RELAY_FALLBACK_SOURCES", "coinset").split(",")
+                if s.strip()
+            ],
+            fallback_cache_s=float(os.environ.get("RELAY_FALLBACK_CACHE_S", "60")),
+            coinset_min_interval_s=float(os.environ.get("RELAY_COINSET_MIN_INTERVAL_S", "2.0")),
         )
         manager = PeerManager(mgr_cfg, ssl_ctx, state.session)
         await manager.start()
