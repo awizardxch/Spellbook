@@ -139,6 +139,26 @@ async function getAgentKey(){
   return crypto.subtle.importKey("spki", der, {name:"RSA-OAEP", hash:"SHA-256"}, false, ["encrypt"]);
 }
 
+async function copyText(t){
+  try{
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      await navigator.clipboard.writeText(t);
+      return true;
+    }
+  }catch(_){ /* fall through to legacy path */ }
+  try{
+    const ta = document.createElement("textarea");
+    ta.value = t;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return !!ok;
+  }catch(_){ return false; }
+}
+
 $("encBtn").onclick = async () => {
   $("encErr").textContent = "";
   $("encOk").textContent = "";
@@ -164,10 +184,22 @@ $("encBtn").onclick = async () => {
     const out = "SPELLBOOK-SEED-ENC2." + btoa(JSON.stringify(env));
     $("encOut").textContent = out;
     $("encOut").style.display = "block";
+    $("encOut").title = "Click to select the full envelope for manual copy";
+    $("encOut").onclick = () => {
+      try{
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        const r = document.createRange();
+        r.selectNodeContents($("encOut"));
+        sel.addRange(r);
+      }catch(_){}
+    };
     $("copyEnc").style.display = "inline-block";
-    $("copyEnc").onclick = () => {
-      navigator.clipboard.writeText(out);
-      $("encOk").textContent = "Copied. Paste the envelope in chat — no password needed.";
+    $("copyEnc").onclick = async () => {
+      const ok = await copyText(out);
+      $("encOk").textContent = ok
+        ? "Copied. Paste the envelope in chat — no password needed."
+        : "Copy was blocked by this viewer — tap the envelope above to select it, then copy it manually.";
     };
     $("encOk").textContent = "Sealed. Copy the envelope above and paste it in chat.";
     // Clear the seed from the page after sealing
