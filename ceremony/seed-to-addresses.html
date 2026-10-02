@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Spellbook — Seed to Addresses</title>
+<style>
+:root{--bg:#0e1210;--card:#161c19;--line:#2c3831;--ink:#eef4f0;--muted:#9fb0a6;--accent:#5fd39a;--warn:#ffb454;--danger:#ff8c86;--field:#0c100e}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;line-height:1.5;padding:24px 16px 60px}
+main{max-width:640px;margin:0 auto}
+h1{font-size:1.6rem;margin:0 0 8px}
+.sub{color:var(--muted);margin:0 0 20px}
+.warnbox{background:#2a1f0d;border:1px solid var(--warn);border-radius:10px;padding:14px 16px;margin:0 0 24px;color:#ffd9a0}
+.warnbox strong{color:var(--warn)}
+.step{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;margin:0 0 20px}
+.step h2{margin:0 0 4px;font-size:1.15rem}
+.stepnum{display:inline-block;background:var(--accent);color:#06130c;font-weight:800;font-size:.8rem;border-radius:20px;padding:2px 12px;margin-bottom:10px}
+textarea{width:100%;background:var(--field);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:12px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;margin:8px 0;min-height:80px;resize:vertical}
+button{display:inline-block;background:var(--accent);color:#06130c;border:none;border-radius:8px;padding:12px 20px;font-size:15px;font-weight:700;cursor:pointer;margin:6px 6px 6px 0}
+button.ghost{background:transparent;color:var(--accent);border:1px solid var(--accent)}
+.err{color:var(--danger);min-height:1.3em;font-size:.9rem;margin:4px 0}
+.ok{color:var(--accent);font-size:.9rem;margin:4px 0}
+.doc{background:var(--field);border:1px solid var(--line);border-radius:8px;padding:14px;white-space:pre-wrap;word-break:break-all;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;max-height:300px;overflow:auto;margin:8px 0}
+footer{color:var(--muted);font-size:.85rem;text-align:center;margin-top:30px}
+label{display:block;font-size:.85rem;color:var(--muted);margin:12px 0 2px}
+ol{margin:8px 0;padding-left:20px}
+ol li{margin:6px 0}
+code{background:var(--field);padding:2px 6px;border-radius:4px;font-size:.9em}
+.keyline{font-size:.8rem;color:var(--muted);margin-top:10px;word-break:break-all}
+.agentbox{background:#0f1a14;border:1px solid var(--accent);border-radius:10px;padding:14px 16px;margin:0 0 24px}
+.agentbox strong{color:var(--accent)}
+.agentbox ul{margin:8px 0;padding-left:20px}
+.agentbox li{margin:4px 0}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+</style>
+</head>
+<body>
+<main>
+<h1>🔑 Spellbook — Seed to Addresses</h1>
+<p class="sub">Paste your 32-byte seed. It gets sealed for the agent with <b>public-key encryption</b> — no passwords, nothing to share or remember. The agent derives <b>all three</b> addresses (EVM, Solana, Chia) and binds them to your dashboard viewer token. One flow, no stale addresses.</p>
+
+<div class="warnbox">
+<strong>⚠️ OFFLINE ONLY.</strong> This page makes zero network requests. Your seed never leaves this tab except inside the encrypted envelope you copy yourself. Do not reload this page mid-ceremony.
+</div>
+
+<div class="step">
+<span class="stepnum">Step 1</span>
+<h2>Paste seed</h2>
+<label for="seed">32-byte seed as 64 hex characters (the <code>seed.key</code> file content)</label>
+<textarea id="seed" placeholder="64 hex chars…" autocomplete="off" spellcheck="false"></textarea>
+<div class="row">
+<button class="ghost" id="hideBtn" type="button">Hide</button>
+</div>
+<div class="err" id="seedErr"></div>
+<div class="keyline" id="keyfp">Agent key: loading…</div>
+</div>
+
+<div class="step">
+<span class="stepnum">Step 2</span>
+<h2>Seal it for the agent</h2>
+<ol>
+<li>Click <b>Seal seed</b> — the seed is encrypted to the agent's public key. No password needed.</li>
+<li>Copy the envelope and paste it in chat.</li>
+<li>The agent derives EVM + Solana + Chia and mints a fresh viewer token with all three.</li>
+</ol>
+<button id="encBtn">Seal seed</button>
+<div class="err" id="encErr"></div>
+<div class="ok" id="encOk"></div>
+<div class="doc" id="encOut" style="display:none"></div>
+<button class="ghost" id="copyEnc" style="display:none">Copy encrypted envelope</button>
+</div>
+
+<div class="agentbox">
+<strong>🤖 What the agent does with your envelope</strong>
+<ul>
+<li>Decrypts it on its own machine with the private key — the seed is never written to a file or a log.</li>
+<li>Derives <b>EVM, Solana, and Chia</b> addresses from the seed in one run.</li>
+<li>Checks the derived EVM and Solana addresses against the wallet's known addresses. If they don't match, it <b>stops</b> — no token, no guessing.</li>
+<li>Mints a fresh viewer token only when all three addresses are present and verified. It never reuses an address from memory or an old token.</li>
+</ul>
+</div>
+
+<footer>Runs fully offline · RSA-OAEP-SHA256 + AES-GCM-256 · v2.0 · no passwords</footer>
+</main>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+// Stamped per ceremony by the agent (new_seed_ceremony_key.py). Never commit a stamped copy.
+const SEED_PUB_B64 = "__SEED_PUB_B64__";
+
+function bytesToHex(b){ return [...b].map(x=>x.toString(16).padStart(2,"0")).join(""); }
+function b64ToBytes(b64){
+  const bin = atob(b64);
+  const u8 = new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) u8[i] = bin.charCodeAt(i);
+  return u8;
+}
+
+// ---- agent key fingerprint (so you can confirm the right key is stamped) ----
+(async () => {
+  try{
+    if(!SEED_PUB_B64 || SEED_PUB_B64.indexOf("__SEED_PUB") !== -1)
+      throw new Error("no agent key stamped in this copy");
+    const der = b64ToBytes(SEED_PUB_B64);
+    const fp = bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", der))).slice(0, 32);
+    $("keyfp").textContent = "Agent key fingerprint: " + fp + "… — confirm it matches the agent's before sealing.";
+  }catch(e){
+    $("keyfp").textContent = "⚠️ " + e.message + " — ask the agent to stamp this copy first.";
+  }
+})();
+
+// ---- Show / Hide for the seed field ----
+let seedHidden = false;
+let seedReal = "";
+$("hideBtn").onclick = () => {
+  const ta = $("seed");
+  if(!seedHidden){
+    seedReal = ta.value;
+    ta.value = "•".repeat(seedReal.length);
+    ta.readOnly = true;
+    seedHidden = true;
+    $("hideBtn").textContent = "Show";
+  }else{
+    ta.value = seedReal;
+    ta.readOnly = false;
+    seedHidden = false;
+    $("hideBtn").textContent = "Hide";
+  }
+};
+
+async function getAgentKey(){
+  if(!SEED_PUB_B64 || SEED_PUB_B64.indexOf("__SEED_PUB") !== -1)
+    throw new Error("This copy has no agent key stamped. Ask the agent to stamp it, then reload.");
+  const der = b64ToBytes(SEED_PUB_B64);
+  return crypto.subtle.importKey("spki", der, {name:"RSA-OAEP", hash:"SHA-256"}, false, ["encrypt"]);
+}
+
+$("encBtn").onclick = async () => {
+  $("encErr").textContent = "";
+  $("encOk").textContent = "";
+  $("encOut").style.display = "none";
+  $("copyEnc").style.display = "none";
+  try{
+    const seedHex = (seedHidden ? seedReal : $("seed").value).trim().toLowerCase();
+    if(!/^[0-9a-f]{64}$/.test(seedHex)) throw new Error("Seed must be exactly 64 hex characters.");
+    const rsaPub = await getAgentKey();
+    const enc = new TextEncoder();
+    // Hybrid: random AES-256-GCM data key, RSA-OAEP wraps only the key.
+    const aesKey = await crypto.subtle.generateKey({name:"AES-GCM", length:256}, true, ["encrypt"]);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt({name:"AES-GCM", iv}, aesKey, enc.encode(seedHex));
+    const rawAes = await crypto.subtle.exportKey("raw", aesKey);
+    const ek = await crypto.subtle.encrypt({name:"RSA-OAEP"}, rsaPub, rawAes);
+    // Best-effort wipe of key material handles
+    try{ rawAes.fill(0); }catch(_){}
+    const env = { v:2, algo:"RSA-OAEP-SHA256+AES-GCM-256",
+      ek: bytesToHex(new Uint8Array(ek)),
+      iv: bytesToHex(iv),
+      ct: bytesToHex(new Uint8Array(ct)) };
+    const out = "SPELLBOOK-SEED-ENC2." + btoa(JSON.stringify(env));
+    $("encOut").textContent = out;
+    $("encOut").style.display = "block";
+    $("copyEnc").style.display = "inline-block";
+    $("copyEnc").onclick = () => {
+      navigator.clipboard.writeText(out);
+      $("encOk").textContent = "Copied. Paste the envelope in chat — no password needed.";
+    };
+    $("encOk").textContent = "Sealed. Copy the envelope above and paste it in chat.";
+    // Clear the seed from the page after sealing
+    seedReal = "";
+    $("seed").value = "";
+    $("seed").readOnly = false;
+    seedHidden = false;
+    $("hideBtn").textContent = "Hide";
+    $("seedErr").textContent = "";
+  }catch(e){
+    $("encErr").textContent = e.message;
+  }
+};
+</script>
+</body>
+</html>
