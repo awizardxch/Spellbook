@@ -60,9 +60,9 @@ code{background:var(--field);padding:2px 6px;border-radius:4px;font-size:.9em}
 
 <div class="step">
 <span class="stepnum">Step 1 — option B</span>
-<h2>Or use your SET 2 recovery words</h2>
-<p style="font-size:.9rem;color:var(--muted);margin:4px 0 8px">No <code>std_seed.key</code> handy? Paste the 24 SET 2 recovery words from your paper backup. This page checks them and derives the 64-byte seed <b>right here, offline</b> — the words never leave this tab.</p>
-<label for="words">SET 2 — 24 recovery words, separated by spaces</label>
+<h2>Or use your BIP-39 recovery words</h2>
+<p style="font-size:.9rem;color:var(--muted);margin:4px 0 8px">No <code>std_seed.key</code> handy? Paste the 24 recovery words for the <b>standard wallet</b> — the set your backup marks as BIP-39 / imports into Sage/MetaMask. This page checks them and derives the 64-byte seed <b>right here, offline</b> — the words never leave this tab.</p>
+<label for="words">24 recovery words, separated by spaces</label>
 <textarea id="words" placeholder="24 words…" autocomplete="off" spellcheck="false"></textarea>
 <div class="row">
 <button id="wordsBtn" type="button">Check words &amp; seal</button>
@@ -178,7 +178,7 @@ BIP39_WORDS.forEach((w,i)=>{ BIP39_INDEX[w]=i; });
 
 async function mnemonicToSeedHex(sentence){
   const words = sentence.trim().toLowerCase().split(/\s+/);
-  if(words.length !== 24) throw new Error("Enter all 24 SET 2 recovery words, separated by spaces.");
+  if(words.length !== 24) throw new Error("Enter all 24 recovery words, separated by spaces.");
   let bits = 0n;
   for(const w of words){
     const v = BIP39_INDEX[w];
