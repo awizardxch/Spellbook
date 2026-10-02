@@ -29,9 +29,11 @@ import os
 import socket
 import time
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Dict, List, Optional
+from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 import aiohttp
+
+from .fallback import FallbackChain, build_sources
 
 from streamable import (
     CoinState,
@@ -378,6 +380,25 @@ class ManagerConfig:
     # A retired peer becomes eligible again after this long (avoids
     # permanently blacklisting a node that was briefly wedged).
     peak_retire_cooldown_s: float = 3600.0
+    # Hosted-API fallback sources for /v1/coins when P2P is stale or down,
+    # in try-order. Unknown names are ignored with a warning.
+    fallback_sources: List[str] = field(default_factory=lambda: ["coinset"])
+    # Seconds a fallback result is served from cache.
+    fallback_cache_s: float = 60.0
+    # Minimum interval between Coinset API calls (client-side rate limit).
+    coinset_min_interval_s: float = 2.0
+
+
+def _coin_state_to_dict(cs: CoinState) -> dict:
+    """Serialize a CoinState to the relay's coin JSON shape."""
+    return {
+        "coin_id": cs.coin.coin_id().hex(),
+        "parent_coin_info": cs.coin.parent_coin_info.hex(),
+        "puzzle_hash": cs.coin.puzzle_hash.hex(),
+        "amount_mojos": cs.coin.amount,
+        "created_height": cs.created_height,
+        "spent_height": cs.spent_height,
+    }
 
 
 class PeerManager:
@@ -401,6 +422,16 @@ class PeerManager:
         # label ("host:port") -> unix ts when a stale peer was retired.
         # Retired peers are skipped by discovery until the cooldown lapses.
         self._retired: Dict[str, float] = {}
+        # Hosted-API fallback chain for coin queries when P2P is stale/down.
+        self._fallback = FallbackChain(
+            build_sources(
+                session,
+                config.network_id,
+                config.fallback_sources,
+                config.coinset_min_interval_s,
+            ),
+            cache_s=config.fallback_cache_s,
+        )
 
     # -- lifecycle -------------------------------------------------------
     async def start(self) -> None:
@@ -607,6 +638,34 @@ class PeerManager:
             wanted = set(puzzle_hashes)
             return [cs for cs in self._coins.values() if cs.coin.puzzle_hash in wanted]
 
+    def _p2p_is_fresh(self) -> bool:
+        """True when P2P peers are connected and their chain view is current."""
+        if self.connected_count() == 0:
+            return False
+        if self._last_peak_at is None:
+            return True  # never saw a peak; give P2P a chance
+        return (time.time() - self._last_peak_at) <= self.config.peak_stale_after_s
+
+    async def get_coins_with_source(
+        self, puzzle_hashes: List[bytes]
+    ) -> Tuple[List[dict], str]:
+        """Coin dicts (coin_to_json shape) plus the data-source label.
+
+        Prefers P2P while the peer pool's chain view is fresh; fails over to
+        the hosted-API chain (rate-limited, cached) when P2P is stale or the
+        peer request fails.
+        """
+        if self._p2p_is_fresh():
+            try:
+                states = await self.get_coins(puzzle_hashes)
+                return [_coin_state_to_dict(cs) for cs in states], "p2p"
+            except (NoPeersError, PeerError, asyncio.TimeoutError,
+                    StreamableError) as e:  # noqa: BLE001
+                log.warning("p2p get_coins failed, trying fallback: %s", e)
+        if not self._fallback.source_names:
+            raise NoPeersError("no connected peers and no fallback sources configured")
+        return await self._fallback.get_coins(puzzle_hashes)
+
     async def get_coins_by_ids(self, coin_ids: List[bytes]) -> List[CoinState]:
         """Subscribe + fetch current CoinStates for the given coin ids.
 
@@ -656,4 +715,5 @@ class PeerManager:
                 "last_peak_at": last_peak,
                 "peak_stale_after_s": stale_after,
                 "peak_stale": last_peak is not None and (now - last_peak) > stale_after,
+                "fallback_sources": self._fallback.source_names,
             }
