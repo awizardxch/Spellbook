@@ -67,3 +67,20 @@ when its peers go stale — so a `0` balance with `peak_stale: true` means
   docstrings; the fallback chain lives in `relay/fallback.py`.
 - Ceremony tooling (sealed envelopes, address derivation) is in
   `ceremony/` — see `ceremony/README.md`.
+
+## Chia transaction fees (policy)
+
+**Never submit a Chia transaction with a 1-mojo (or zero) fee.** Always use
+a fee meaningfully above the dust minimum.
+
+- **Floor:** 1,000 mojos minimum on every Chia spend. Anything at or near
+  1 mojo risks sitting in the mempool indefinitely, especially under load.
+- **Default:** the daemon uses 100,000,000 mojos (0.0001 XCH) unless
+  configured otherwise (`fee_mojos` in `spellbook.json`). Match or exceed
+  this for time-sensitive sends.
+- **Why:** Chia's mempool prioritizes by fee. A 1-mojo transaction is
+  technically valid but is the first to be deprioritized; agents must not
+  optimize fees down to the minimum.
+
+This applies to all agent-constructed Chia spends (daemon `request_spend`,
+offer fees, etc.), not just the dashboard.
