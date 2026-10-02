@@ -481,11 +481,19 @@ class Daemon:
         self.std_seed = None
         if self.key_derivation == "standard":
             std_seed_path = self.cfg.get("std_seed_path")
-            if not std_seed_path:
+            if std_seed_path and os.path.exists(std_seed_path):
+                from spellbook.seed import load_std_seed
+                self.std_seed = load_std_seed(std_seed_path)
+            elif self.cfg.get("sealed_envelope_path"):
+                # Passwordless seal: decrypt the ENC2 envelope with the
+                # ceremony private key and hold the seed in memory only.
+                # Keys survive daemon restarts via re-decryption; no
+                # plaintext seed is ever written to disk.
+                self.std_seed = self._load_std_seed_from_envelope()
+            else:
                 raise ValueError(
-                    "key_derivation=standard requires std_seed_path")
-            from spellbook.seed import load_std_seed
-            self.std_seed = load_std_seed(std_seed_path)
+                    "key_derivation=standard requires std_seed_path or "
+                    "sealed_envelope_path")
         if self.seed and self.cfg.get("musebook_signing_mode") == "daemon":
             from nacl.signing import SigningKey
             self._identity_key = SigningKey(self.seed)
@@ -669,6 +677,73 @@ class Daemon:
             return priv, stdkeys.evm_address(priv)
         d = kdf.derive_labeled(self.seed, chain, "default")
         return bytes.fromhex(d["scalar_hex"]), d["address"]
+
+    def _load_std_seed_from_envelope(self) -> bytes:
+        """Decrypt the passwordless ENC2 envelope and return the 64-byte seed.
+
+        The envelope (SPELLBOOK-SEED-ENC2) is hybrid-encrypted: the AES-256-GCM
+        key is wrapped with RSA-OAEP-SHA256 to the ceremony keypair. The
+        envelope file and the private key must both be mode 0600; the
+        decrypted seed lives in memory only and is never logged, never
+        returned by any route, never written to disk.
+
+        Fails closed on any permissions, format, or decryption problem.
+        """
+        import base64
+        import json
+
+        envelope_path = os.path.expanduser(self.cfg["sealed_envelope_path"])
+        key_path = os.path.expanduser(self.cfg.get(
+            "ceremony_key_path",
+            "~/workspace/.spellbook/seed-derive/private.pem"))
+
+        for path, label in ((envelope_path, "sealed envelope"),
+                            (key_path, "ceremony private key")):
+            if not os.path.exists(path):
+                raise FileNotFoundError(
+                    f"{label} not found at {path} — cannot load sealed seed")
+            st = os.stat(path)
+            if st.st_mode & 0o077:
+                raise PermissionError(
+                    f"{label} at {path} is not 0600 — refusing to load")
+
+        with open(envelope_path) as f:
+            envelope = f.read().strip()
+        if not envelope.startswith("SPELLBOOK-SEED-ENC2."):
+            raise ValueError("sealed envelope has wrong prefix — refusing")
+        try:
+            payload = json.loads(
+                base64.b64decode(envelope.split(".", 1)[1]))
+        except Exception as e:
+            raise ValueError(f"sealed envelope is not valid JSON: {e}")
+        if payload.get("v") != 2 or payload.get(
+                "algo") != "RSA-OAEP-SHA256+AES-GCM-256":
+            raise ValueError("unsupported envelope version/algorithm — refusing")
+
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        with open(key_path, "rb") as f:
+            private_key = serialization.load_pem_private_key(
+                f.read(), password=None)
+        try:
+            aes_key = private_key.decrypt(
+                bytes.fromhex(payload["ek"]),
+                padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                             algorithm=hashes.SHA256(), label=None))
+            seed_hex = AESGCM(aes_key).decrypt(
+                bytes.fromhex(payload["iv"]),
+                bytes.fromhex(payload["ct"]),
+                None).decode().strip().lower()
+        except Exception as e:
+            raise ValueError(f"envelope decryption failed: {type(e).__name__}")
+        # Standard mode needs the 64-byte BIP-39 seed (128 hex chars).
+        if len(seed_hex) != 128 or not all(
+                c in "0123456789abcdef" for c in seed_hex):
+            raise ValueError(
+                "envelope did not contain a 128-char standard seed — refusing")
+        return bytes.fromhex(seed_hex)
 
     def _chia_master_sk(self, chain):
         """32-byte Chia master secret for `chain` under the configured derivation.
