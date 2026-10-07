@@ -49,7 +49,7 @@ against. Every rule here was exercised against the hosted responder on
 | # | Rule | Why |
 |---|------|-----|
 | R1 | Use `quote.offer_spec` for build and `quote.settlement.body` for swap verbatim, adding only coins (build) and offer (swap). Never construct a route. | The lane is picked by the body's shape; a hand-built body settles the wrong thing or nothing. |
-| R2 | Show the human `quote.intent` (amounts, route, impact, fees, executable) before signing; apply spend caps to `intent.offer[].amount`. | The intent is the only decoded view; the spends are opaque. |
+| R2 | Show the human `quote.intent` (amounts, route, impact, fees, executable) before signing; apply spend caps to `intent.offer[].amount`. **Then decode the spends and refuse to sign unless they match the intent** (see "Binding the spends to the intent" below). | The intent is what the human approves; the spends are what the key signs. Nothing ties them unless the daemon checks. |
 | R3 | Attach a fee. `build` takes `fee` (mojos, taken from the offered XCH). A zero fee is refused whenever the node's mempool is full (`INVALID_FEE_TOO_CLOSE_TO_ZERO`), which on testnet11 is most of the time. Pay at least 5 mojos per unit of cost; 5,000,000,000 mojos (0.005 TXCH) cleared a single-pool settle on 2026-09-26. Select coins to cover `amount_in` + fee. | The node, not the Forge, sets this floor. |
 | R4 | Rehearse with `dry_run: true` first and require `success: true`. A dry run also repairs a stale hosted pool record (auto-resync runs in preflight), so it is the cheapest way to make the next quote true. | A refused rehearsal costs nothing; a refused live settle after signing costs a re-quote. |
 | R5 | Treat the live answer by its `success` field, not its status code: `202 success:true pending:true` is a landed push. | This was the review's finding 03; the first version of the route got it wrong. |
@@ -86,11 +86,72 @@ the proposal; the acceptance tests below are what it must pass.
   is "a Forge pool"; the request is refused if `intent.executable` is false
   or the quote is older than N seconds (the daemon's choice; 120 s is
   sensible — quotes are cheap).
+- **Decode before signing (Chialisp audit 2026-10-07, S4):** the daemon
+  never signs a spend it has not decoded. Before anything is signed, each
+  `coin_spends[]` entry is parsed with `chia_offer.parse_conditions` and
+  checked against the intent — see "Binding the spends to the intent".
+  Any mismatch refuses the whole request (nothing is signed, nothing is
+  queued).
 - **Approval:** returns `{ signature }` (96-byte aggregated BLS over the
-  spends), never a txid.
+  spends), never a txid. The queue entry the human approves shows the
+  decoded intent **and** the receive puzzle hash the spends assert
+  (`receive_ph`), so the approver sees where the requested leg pays.
 - **After:** the agent calls `finalize` and `swap` itself and polls status;
   or hands the offer to its relay's `/v1/broadcast` (the dry run's
   `result.bundle` is the bundle) if it prefers to push.
+
+### Binding the spends to the intent
+
+The responder builds the spends; the daemon's key signs them. A malicious
+or compromised responder could present an honest `intent` with spends that
+pay elsewhere, so the daemon treats `coin_spends[]` as untrusted input and
+requires, for every spend, before signing:
+
+1. **Our coin, our puzzle.** The spend's coin must be one of the daemon's
+   own scanned coins (`_native_relay_coins`), and its `puzzle_reveal`
+   must hash (`chia_sign.sha256tree(chia_sign.deser(reveal))`) to the
+   coin's puzzle hash **and** equal the daemon's standard puzzle for that
+   derivation index (`chia_sign.standard_puzzle_reveal`, i.e. the
+   canonical curry — after S1 the same bytes chia-blockchain builds; a
+   legacy-address coin uses `legacy_standard_puzzle_reveal`). Any other
+   program is refused even if it hashes correctly.
+2. **Standard solution, decoded conditions.** The solution must be the
+   standard `(() (q . conditions) ())` shape; `chia_offer.parse_conditions`
+   must return a condition list (CAT / singleton / unknown-driver shapes
+   fail closed there).
+3. **Exactly the offered amount to settlement, change to us.** Across all
+   spends, the `CREATE_COIN` outputs to `OFFER_MOD_HASH` must total
+   **exactly** `intent.offer[].amount` for the native leg; every other
+   `CREATE_COIN` must pay a puzzle hash in the daemon's own scanned set
+   (change) and the amounts must balance: inputs = settlement + change +
+   `RESERVE_FEE` (which must equal the request's `fee`). No other
+   `CREATE_COIN` targets, no `CREATE_COIN_ANNOUNCEMENT`/`AGG_SIG` for
+   foreign keys, no conditions outside the allowlist
+   `{AGG_SIG_ME for our key, CREATE_COIN, RESERVE_FEE,
+   ASSERT_PUZZLE_ANNOUNCEMENT}`.
+4. **The settlement announcement is recomputed, not trusted.** The spends
+   must assert (opcode 63) exactly the announcement the daemon computes
+   itself from the intent's requested leg with the **agent's own receive
+   puzzle hash** and the nonce over the **agent's input coins**:
+   `nonce = chia_offer.offer_nonce([our input coins])`,
+   `(ph, msg) = chia_offer.announcement_for_asset(asset, nonce,
+   [Payment(our_receive_ph, intent.requested.amount, memos)])`,
+   `announcement_id = sha256(ph || msg)`. The requested payee is the
+   daemon's own puzzle hash (S2: the requester never names it), the
+   amount is the intent's `requested` amount, and the nonce covers every
+   coin the spends consume — so a responder cannot pay the requested leg
+   elsewhere, pay less, or detach the assertion from these coins. Check T3
+   below is therefore strengthened from "opcode 63 is present" to "the
+   asserted announcement id equals the recomputed one".
+5. **The queue shows it.** The decoded queue entry carries the intent,
+   the per-spend decoded conditions summary (settlement total, change
+   total, fee), and `receive_ph` — the puzzle hash the announcement pays —
+   so the human approves what the key will actually sign.
+
+These reuse the existing native-offer code (`parse_conditions`,
+`create_coin_outputs`, `asserted_puzzle_announcements`, `offer_nonce`,
+`announcement_for_asset`) — no new CLVM evaluation is introduced, and a
+spend that does not fit is refused the way an unparseable offer is.
 
 **Signing detail:** each spend's AGG_SIG_ME message is
 `sha256tree(delegated_puzzle) || coin_id || genesis_challenge`
@@ -109,7 +170,8 @@ the last column. T1–T6 spend nothing; T7 spends a small amount on testnet11.
 |------|-------|-----------|
 | T1 markets | `GET markets` | `success:true`, ≥1 market with `protocol_version: 15`, every market has `state_as_of` |
 | T2 quote | `POST quote` 0.05 TXCH → a CAT, `slippage_bps: 50` | ≥1 executable quote; `best.amount_out` is an integer string; each executable quote has `offer_spec`, `settlement.body`, `intent` |
-| T3 build+finalize | coins from `wallet-coins`, `fee: "5000000000"`, build, sign, finalize | offer starts with `offer1`; every maker spend's conditions include opcode 63 (announcement assertion) |
+| T3 build+finalize | coins from `wallet-coins`, `fee: "5000000000"`, build, sign, finalize | offer starts with `offer1`; every maker spend passes the five checks in "Binding the spends to the intent": the asserted opcode-63 announcement id **equals** the one recomputed from `intent.requested`, the agent's receive puzzle hash and the nonce over the agent's inputs; settlement output == `intent.offer[].amount`; change only to own puzzle hashes; reveal is the daemon's standard puzzle |
+| T3b tampered spends | T3's build output with (a) the requested amount in the asserted announcement lowered, (b) the announcement's payee changed, (c) change sent to a foreign puzzle hash, (d) a reveal that hashes to the coin but is not the standard puzzle | each variant is refused before signing (`ok:false`, nothing queued, no signature returned) |
 | T4 rehearsal | swap with `dry_run: true` for the best single-pool quote, a split and a multi-hop | `200 success:true dry_run:true pending:false`, `watch.spent_coin_ids` non-empty |
 | T5 over-ask refused | same offer with `requested[0].amount` raised 5% | `409 success:false` with pool pays X, trader asks Y, X equal to the quote's `amount_out` |
 | T6 bad signature | finalize with 96 bytes of `ab` | 422, error mentions BLST |

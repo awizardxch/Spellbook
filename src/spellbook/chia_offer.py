@@ -733,8 +733,11 @@ def parse_offer(offer_str: str) -> ParsedOffer:
     nonce: bytes | None = None
     for spend in spends:
         if spend.coin.parent_coin_info == _ZERO32:
-            # Dummy settlement spend encoding requested payments.
-            if spend.puzzle_reveal != OFFER_MOD:
+            # Dummy settlement spend encoding requested payments. Compare
+            # by tree hash: a reveal with a legal non-minimal length
+            # prefix is the same puzzle (parse_solutions_bundle already
+            # tied this reveal to the coin record's puzzle hash).
+            if cs.sha256tree(cs.deser(spend.puzzle_reveal)) != OFFER_MOD_HASH:
                 raise OfferError(
                     "offer requests an asset with an unsupported driver "
                     "(not native XCH settlement) — refusing"
@@ -900,17 +903,35 @@ class BuiltOffer:
     nonce: bytes
 
 
-def _standard_inner(master_sk: bytes, index: int) -> tuple[bytes, bytes, bytes]:
-    """(reveal, puzzle_hash, synthetic_sk) for a wallet derivation index."""
+def _standard_inner(
+    master_sk: bytes, index: int, legacy: bool = False
+) -> tuple[bytes, bytes, bytes]:
+    """(reveal, puzzle_hash, synthetic_sk) for a wallet derivation index.
+
+    ``legacy=True`` selects the pre-fix non-standard reveal (chia_sign's
+    LEGACY section) — only for spending coins that already sit at a
+    legacy puzzle hash; new outputs always use the standard shape.
+    """
     wsk = cs.wallet_sk(master_sk, index)
     spk = cs.synthetic_pk(cs.pk_bytes(wsk))
-    reveal = cs.standard_puzzle_reveal(spk)
+    if legacy:
+        reveal = cs.legacy_standard_puzzle_reveal(spk)
+    else:
+        reveal = cs.standard_puzzle_reveal(spk)
     return reveal, cs.sha256tree(cs.deser(reveal)), cs.synthetic_sk(wsk)
 
 
 def _check_xch_input(master_sk: bytes, inp: XchInput) -> tuple[bytes, bytes]:
-    """Verify an XCH input is really ours; return (inner_reveal, synth_sk)."""
+    """Verify an XCH input is really ours; return (inner_reveal, synth_sk).
+
+    The input's puzzle hash must be the standard puzzle hash for its
+    derivation index, or the pre-fix legacy hash (so coins received
+    before the S1 fix can still back or cancel an offer). The returned
+    reveal is the one that hashes to the coin's puzzle hash.
+    """
     reveal, ph, ssk = _standard_inner(master_sk, inp.index)
+    if ph != inp.puzzle_hash:
+        reveal, ph, ssk = _standard_inner(master_sk, inp.index, legacy=True)
     if ph != inp.puzzle_hash:
         raise OfferError(
             f"XCH input {inp.coin().coin_id().hex()[:16]}… is not locked to "
@@ -1044,8 +1065,11 @@ def _build_side(
     settlement: dict[str, list[Coin]] = {}
     first_spend = True
 
-    def _sign_standard(index: int, coin: Coin, conditions) -> tuple[CoinSpend, bytes]:
-        reveal, _, ssk = _standard_inner(master_sk, index)
+    def _sign_standard(
+        reveal: bytes, ssk: bytes, coin: Coin, conditions
+    ) -> tuple[CoinSpend, bytes]:
+        # reveal/ssk come from _check_xch_input: the reveal that hashes
+        # to THIS coin's puzzle hash (standard, or legacy for a sweep).
         solution = _standard_solution(conditions)
         sig = cs.sign_coin_spend(
             ssk,
@@ -1058,7 +1082,7 @@ def _build_side(
     # --- XCH spends: origin coin creates all outputs, others consolidate.
     xch_sorted = sorted(xch_checked, key=lambda t: t[0].coin().coin_id())
     xch_change = xch_total - native_offered - fee
-    for pos, (inp, _reveal, _ssk) in enumerate(xch_sorted):
+    for pos, (inp, reveal, ssk) in enumerate(xch_sorted):
         coin = inp.coin()
         if pos == 0:
             conds = []
@@ -1080,7 +1104,7 @@ def _build_side(
             # Consolidate: no outputs; value flows into the origin coin's
             # outputs (standard Chia wallet behavior).
             conditions = cs._list([])
-        spend, sig = _sign_standard(inp.index, coin, conditions)
+        spend, sig = _sign_standard(reveal, ssk, coin, conditions)
         spends.append(spend)
         signatures.append(sig)
 
@@ -1339,14 +1363,13 @@ def cancel_offer(
     if len(change_ph) != 32 or fee < 0:
         raise OfferError("bad cancel params")
     inp = XchInput(coin.parent_coin_info, coin.puzzle_hash, coin.amount, index)
-    _check_xch_input(master_sk, inp)
+    reveal, ssk = _check_xch_input(master_sk, inp)
     if coin.amount - fee <= 0:
         raise OfferError("cancel amount does not cover fee")
     conds = [_inner_create_coin(change_ph, coin.amount - fee)]
     if fee > 0:
         conds.append(_reserve_fee_cond(fee))
     conditions = cs._list(conds)
-    reveal, _, ssk = _standard_inner(master_sk, index)
     solution = _standard_solution(conditions)
     sig = cs.sign_coin_spend(
         ssk,

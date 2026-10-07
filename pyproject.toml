@@ -21,6 +21,7 @@ test = [
     "pytest>=8.0.0",
     "eth-keys>=0.7.0",  # independent ECDSA cross-check in tests/test_evm.py
     "eth-abi>=5.0.0",  # independent ABI cross-check in tests/test_contract.py
+    "eth-account>=0.13.0",  # EIP-191/712 cross-check in tests/test_message_sign.py
 ]
 
 [project.scripts]
@@ -45,3 +46,7 @@ spellbook = ["bip39-english.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# -rs: list skipped tests with their reason in the summary, so a skipped
+# simulator verification (tests/test_chia_sim.py without chia-blockchain)
+# is never silent.
+addopts = "-rs"

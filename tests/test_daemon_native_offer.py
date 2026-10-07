@@ -159,7 +159,9 @@ class TestNativeOfferMake:
         assert legs["requested"] == [("native", 400_000)]
         assert d.sage_calls == []  # native path never touched Sage
 
-    def test_make_rejects_missing_receive_address(self, env):
+    def test_make_defaults_receive_address_to_primary(self, env):
+        # S2: no receive_address -> the requested leg pays OUR primary
+        # (index 0, standard) address, and the approver sees it.
         d, fake = env
         fake.coins_list = [_fund_coin(0, 1_000_000)]
         res = d.rt_offer_make(
@@ -167,7 +169,90 @@ class TestNativeOfferMake:
              "offered": [{"asset": "native", "amount_mojos": 100}],
              "requested": [{"asset": "native", "amount_mojos": 100}]},
             "muse-test")
+        assert res["ok"] is True and res["decision"] == "queued"
+        q = d._decoded_queue()[0]
+        primary = _wallet_ph(0)
+        assert q["receive_ph"] == primary.hex()
+        assert q["receive_address"] == chia_sign.address_for_puzzle_hash(
+            primary, "txch")
+        assert d.queue[res["queue_id"]]["params"]["_receive_ph"] == primary.hex()
+
+    def test_make_refuses_foreign_receive_address(self, env):
+        # S2: a requester holding only the request token must not be
+        # able to point the requested XCH at an address we do not own.
+        d, fake = env
+        fake.coins_list = [_fund_coin(0, 1_000_000)]
+        foreign = chia_sign.address_for_puzzle_hash(bytes([0x42]) * 32, "txch")
+        res = _make_queued(d, receive_address=foreign)
+        assert res["ok"] is False
+        assert "receive_address" in res["error"] and "own" in res["error"]
+        assert d.queue == {}
+        # A legacy (pre-fix) address of our own key is still ours.
+        d2 = kdf.derive_labeled(SEED, CHAIN, "default")
+        master_sk = bytes.fromhex(d2["scalar_hex"])
+        spk = chia_sign.synthetic_pk(chia_sign.wallet_pk(master_sk, 2))
+        legacy = chia_sign.address_for_puzzle_hash(
+            chia_sign.legacy_puzzle_hash_for_synthetic_pk(spk), "txch")
+        res = _make_queued(d, receive_address=legacy)
+        assert res["ok"] is True and res["decision"] == "queued"
+
+    def test_make_queue_entry_shows_receive_address(self, env):
+        d, fake = env
+        fake.coins_list = [_fund_coin(0, 1_000_000)]
+        res = _make_queued(d)
+        assert res["ok"] is True and res["decision"] == "queued"
+        q = d._decoded_queue()[0]
+        assert q["kind"] == "offer_make"
+        assert q["receive_address"] == _receive_address()
+        assert q["receive_ph"] == _wallet_ph(3).hex()
+
+    def test_make_rejects_wrong_prefix_receive_address(self, env):
+        d, fake = env
+        fake.coins_list = [_fund_coin(0, 1_000_000)]
+        res = _make_queued(d, receive_address="xch1" + "q" * 20)
         assert res["ok"] is False and "receive_address" in res["error"]
+
+    def test_execute_refuses_tampered_receive_ph(self, env):
+        # Belt and braces: an approved intent whose stored receive puzzle
+        # hash is not ours never builds an offer.
+        d, fake = env
+        fake.coins_list = [_fund_coin(0, 1_000_000)]
+        res = _make_queued(d)
+        item = d.queue[res["queue_id"]]
+        item["params"]["_receive_ph"] = "42" * 32
+        with pytest.raises(RelayError, match="not ours"):
+            d._execute_offer_make_native(item["params"])
+
+    def test_legacy_coins_are_scanned_and_sweepable(self, env):
+        # S1: coins already received at a pre-fix (legacy) address stay
+        # visible to the relay scan and can back an offer; the offer's
+        # own outputs (change) go to the standard address.
+        d, fake = env
+        d2 = kdf.derive_labeled(SEED, CHAIN, "default")
+        master_sk = bytes.fromhex(d2["scalar_hex"])
+        spk = chia_sign.synthetic_pk(chia_sign.wallet_pk(master_sk, 1))
+        legacy_ph = chia_sign.legacy_puzzle_hash_for_synthetic_pk(spk)
+        parent = bytes.fromhex("cc" * 32)
+        fake.coins_list = [{
+            "coin_id": chia_sign.coin_id(parent, legacy_ph, 1_000_000).hex(),
+            "parent_coin_info": parent.hex(),
+            "puzzle_hash": legacy_ph.hex(),
+            "amount_mojos": 1_000_000,
+            "created_height": 100, "spent_height": None,
+        }]
+        _rpc, _net, _m, unspent, index_for_ph, phs = d._native_relay_coins(CHAIN)
+        assert phs[0] == _wallet_ph(0).hex()          # primary is standard
+        assert index_for_ph[legacy_ph.hex()] == 1     # legacy still mapped
+        assert legacy_ph.hex() not in phs[:10]        # never a printed address
+        res = _make_queued(d)
+        assert res["ok"] is True and res["decision"] == "queued"
+        out = d.rt_queue_approve({"queue_id": res["queue_id"]}, "human")
+        assert out["ok"] is True, out
+        parsed = chia_offer.parse_offer(out["offer"])
+        assert parsed.spends[0].coin.puzzle_hash == legacy_ph
+        conds = chia_offer.parse_conditions(parsed.spends[0].solution)
+        outs = dict(chia_offer.create_coin_outputs(conds))
+        assert outs[_wallet_ph(0)] == 1_000_000 - 400_000   # change: standard
 
     def test_make_rejects_unfunded(self, env):
         d, fake = env

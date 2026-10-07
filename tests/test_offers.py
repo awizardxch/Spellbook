@@ -6,6 +6,8 @@ queue rendering.
 No live wallet is touched: the RPC layer is a recording stub and the
 daemon layer monkeypatches chia.SageRpc with an offer-capable fake.
 """
+import json
+import os
 import sys
 
 import pytest
@@ -585,3 +587,157 @@ def test_decoded_queue_renders_offer_make(tmp_path, monkeypatch):
     assert q["requested"] == [{"asset": CAT, "amount_mojos": 500}]
     # no opaque-hash-only rendering: legs are fully decoded
     assert q["destination"] is None
+
+
+# ---------------------------------------------------------------------------
+# Chialisp audit 2026-10-07: S2 (Sage path payee), S3 (dispatcher / serve
+# never let a request kill the daemon), S5 (offer_delete behind approve)
+# ---------------------------------------------------------------------------
+
+REQUEST_TOKEN = "aa" * 32
+APPROVE_TOKEN = "bb" * 32
+
+
+def _own_address(d, index=0):
+    from spellbook import chia_sign
+    phs, _ = d._own_puzzle_hashes("chia-testnet")
+    return chia_sign.address_for_puzzle_hash(bytes.fromhex(phs[index]), "txch")
+
+
+def test_sage_offer_make_defaults_receive_to_primary(tmp_path, monkeypatch):
+    d, fake = _offer_daemon(tmp_path, monkeypatch)
+    resp = d.rt_offer_make(_make_params(), "m")
+    assert resp["ok"] is True and resp["decision"] == "queued"
+    params = d.queue[resp["queue_id"]]["params"]
+    assert params["receive_address"] == _own_address(d, 0)
+    phs, _ = d._own_puzzle_hashes("chia-testnet")
+    assert params["_receive_ph"] == phs[0]
+    q = d._decoded_queue()[0]
+    assert q["receive_address"] == _own_address(d, 0)
+    assert q["receive_ph"] == phs[0]
+
+
+def test_sage_offer_make_refuses_foreign_receive_address(tmp_path, monkeypatch):
+    from spellbook import chia_sign
+    d, fake = _offer_daemon(tmp_path, monkeypatch)
+    p = _make_params()
+    p["receive_address"] = chia_sign.address_for_puzzle_hash(b"\x42" * 32, "txch")
+    resp = d.rt_offer_make(p, "m")
+    assert resp["ok"] is False and "own" in resp["error"]
+    assert d.queue == {}
+    p["receive_address"] = "txch1notanaddress"
+    assert d.rt_offer_make(p, "m")["ok"] is False
+    # one of our own (non-primary) addresses is accepted and shown
+    p["receive_address"] = _own_address(d, 4)
+    resp = d.rt_offer_make(p, "m")
+    assert resp["ok"] is True
+    assert d._decoded_queue()[0]["receive_address"] == _own_address(d, 4)
+
+
+def test_offer_delete_requires_approve_token(tmp_path, monkeypatch):
+    """S5: deleting Sage's local record is not an on-chain cancel; for a
+    live offer we made it removes the only handle offer_cancel has, so
+    the request token cannot do it."""
+    from spellbook.daemon import APPROVE_ROUTES, REQUEST_ROUTES
+    assert "offer_delete" in APPROVE_ROUTES
+    assert "offer_delete" not in REQUEST_ROUTES
+    d, fake = _offer_daemon(tmp_path, monkeypatch)
+    fake.records["oid9"] = {"offer_id": "oid9", "status": "active",
+                            "summary": fake._summary_for(
+                                [("native", 2_000_000)], [("native", 1)]),
+                            "offer": "OFFERoid9"}
+    deleted = []
+    fake.delete_offer = lambda oid: deleted.append(oid)
+    out = d.handle({"token": REQUEST_TOKEN, "route": "offer_delete",
+                    "params": {"chain": "chia-testnet", "offer_id": "oid9"},
+                    "muse_id": "m"}, os.getuid())
+    assert out["ok"] is False and "approve token" in out["error"]
+    assert deleted == []
+    # the maker can still cancel it on-chain through the daemon
+    resp = d.rt_offer_cancel({"chain": "chia-testnet", "offer_id": "oid9"}, "m")
+    assert resp["ok"] is True and resp["decision"] == "queued"
+    # the human (approve token) may delete
+    out = d.handle({"token": APPROVE_TOKEN, "route": "offer_delete",
+                    "params": {"chain": "chia-testnet", "offer_id": "oid9"},
+                    "muse_id": "h"}, os.getuid())
+    assert out["ok"] is True and deleted == ["oid9"]
+
+
+def test_handle_turns_offer_errors_into_structured_failures(tmp_path, monkeypatch):
+    """S3: OfferError / ChiaSignError / RecursionError out of a handler
+    become {"ok": false, ...}, never an exception out of handle()."""
+    from spellbook import chia_offer, chia_sign
+    d, fake = _offer_daemon(tmp_path, monkeypatch)
+    req = {"token": REQUEST_TOKEN, "route": "offer_take",
+           "params": {"chain": "chia-testnet", "offer": "offer1x"},
+           "muse_id": "m"}
+    for exc in (chia_offer.OfferError("maker spend creates no native settlement output"),
+                chia_sign.ChiaSignError("truncated CLVM")):
+        monkeypatch.setattr(d, "rt_offer_take",
+                            lambda p, m, _e=exc: (_ for _ in ()).throw(_e))
+        out = d.handle(req, os.getuid())
+        assert out["ok"] is False and str(exc) in out["error"]
+
+    def _blow(p, m):
+        raise RecursionError("maximum recursion depth exceeded")
+    monkeypatch.setattr(d, "rt_offer_take", _blow)
+    out = d.handle(req, os.getuid())
+    assert out["ok"] is False and "nested" in out["error"]
+
+
+def test_serve_connection_survives_any_exception(tmp_path, monkeypatch, capsys):
+    """S3: serve() answers internal error and keeps running when handle()
+    raises something unexpected."""
+    import socket
+    from spellbook.daemon import _serve_connection
+    d, fake = _offer_daemon(tmp_path, monkeypatch)
+    monkeypatch.setattr(d, "handle",
+                        lambda req, uid: (_ for _ in ()).throw(ValueError("boom")))
+    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        b.sendall(json.dumps({"token": REQUEST_TOKEN, "route": "status",
+                              "params": {}}).encode() + b"\n")
+        _serve_connection(a, d)
+        line = b.recv(65536)
+    finally:
+        b.close()
+    assert json.loads(line) == {"ok": False, "error": "internal error"}
+    err = capsys.readouterr().err
+    assert "ValueError: boom" in err and REQUEST_TOKEN not in err
+    # bad json is still answered, and a normal request still works
+    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        b.sendall(b"{not json\n")
+        _serve_connection(a, d)
+        assert json.loads(b.recv(65536)) == {"ok": False, "error": "bad json"}
+    finally:
+        b.close()
+    monkeypatch.undo()
+    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        b.sendall(json.dumps({"token": "zz" * 32, "route": "status",
+                              "params": {}}).encode() + b"\n")
+        _serve_connection(a, d)
+        assert json.loads(b.recv(65536)) == {"ok": False, "error": "bad token"}
+    finally:
+        b.close()
+
+
+def test_offer_take_native_crafted_offer_refuses_not_raises(tmp_path, monkeypatch):
+    """S3 end to end on the request path: a native-shaped offer whose
+    maker spend creates no settlement output is refused with a
+    structured error instead of escaping summarize_offer."""
+    import test_chia_offer as tco
+    from spellbook import chia_offer
+    d, fake = _offer_daemon(tmp_path, monkeypatch)
+    offer = tco.crafted_offer_without_settlement_output()
+    parsed = chia_offer.parse_offer(offer)
+    with pytest.raises(chia_offer.OfferError):
+        chia_offer.summarize_offer(parsed)
+    monkeypatch.setattr(d, "_offer_native_route", lambda chain: True)
+    out = d.handle({"token": REQUEST_TOKEN, "route": "offer_take",
+                    "params": {"chain": "chia-testnet", "offer": offer},
+                    "muse_id": "m"}, os.getuid())
+    assert out["ok"] is False
+    assert "no native settlement output" in out["error"]
+    assert d.queue == {}
