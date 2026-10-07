@@ -55,10 +55,13 @@ from spellbook.chia_offer import (
 NETWORK = "testnet11"
 MASTER = bytes([7]) * 32  # deterministic test key (never a real wallet)
 
-# Fixed vectors (see module docstring for provenance).
-FIXED_OFFER_ID = "1a0402b22ab450a527a346bef66a8508623089e038f7acaeb1c74d32c857b550"
-FIXED_NONCE = "609eeb662555c2c11832f3c4863b69571414312d8e92aed7ea92541f3d94faed"
-FIXED_ANN_MSG = "08547339d6dac23c2a6b41f5aea51465c8cf4a960f323f71f58009fc7154da10"
+# Fixed vectors (see module docstring for provenance). Re-pinned 2026-10-07
+# with the S1 fix: the maker/receive/change puzzle hashes are now the
+# STANDARD curry's (chia-blockchain's), so every vector that embeds a
+# puzzle hash changed; the construction they pin did not.
+FIXED_OFFER_ID = "33d25276a9eace69f9e99b6a3c6e7b307a7ceceb59dd1241be0b5592cc4bdec0"
+FIXED_NONCE = "2223f7981f58c2ec7d8a0d29a8bc4785eafbd1ea27aaaaabf5f3860dea45cb72"
+FIXED_ANN_MSG = "01292cbad313eca871f8beb55a3640fe0472b9b904d17b953a9db245cee6febe"
 
 
 # ---------------------------------------------------------------------------
@@ -699,3 +702,138 @@ def test_parse_accepts_raw_uncompressed_bundle():
     parsed = parse_offer(enc)
     assert parsed.offer_id == built.offer_id
     assert summarize_offer(parsed)["offered"] == [("native", 400_000)]
+
+
+# ---------------------------------------------------------------------------
+# Chialisp audit 2026-10-07: S3 (crafted offer must refuse, not raise),
+# S7 (settlement reveal compared by tree hash), S1 (legacy inputs)
+# ---------------------------------------------------------------------------
+
+
+def _reencode_nonminimal(obj) -> bytes:
+    """Serialize ``obj`` encoding every 1-byte atom < 0x80 as 0x81 || b.
+
+    A legal, non-minimal CLVM encoding of the same program (same tree
+    hash); chia's deserializer accepts it.
+    """
+    out = bytearray()
+    stack = [obj]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, bytes):
+            if len(node) == 1 and node[0] < 0x80:
+                out += b"\x81" + node
+            else:
+                out += cs._ser_atom(node)
+        else:
+            first, rest = node
+            out.append(0xFF)
+            stack.append(rest)
+            stack.append(first)
+    return bytes(out)
+
+
+def crafted_offer_without_settlement_output() -> str:
+    """A well-formed offer whose (only) maker spend creates no settlement
+    output: the maker's standard solution pays the whole coin to a
+    change address instead of OFFER_MOD_HASH. parse_offer accepts it
+    (the shape is standard XCH), summarize_offer must refuse it."""
+    built = make_basic_offer()
+    spends, signature = o.parse_solutions_bundle(built.bundle_bytes)
+    out = []
+    for sp in spends:
+        if sp.coin.parent_coin_info == o._ZERO32:
+            out.append(sp)
+            continue
+        conds = cs._list([o._inner_create_coin(std_index(2)[1], sp.coin.amount)])
+        out.append(CoinSpend(sp.coin, sp.puzzle_reveal, o._standard_solution(conds)))
+    bundle = o.serialize_bundle(out, signature)  # signature now stale — irrelevant to parsing
+    return cs.bech32m_encode("offer", o.compress_offer(bundle))
+
+
+def test_crafted_offer_without_settlement_refuses_cleanly():
+    offer = crafted_offer_without_settlement_output()
+    parsed = parse_offer(offer)  # parses: standard-shaped maker spend
+    with pytest.raises(OfferError, match="no native settlement output"):
+        summarize_offer(parsed)
+    with pytest.raises(OfferError):
+        take_offer(MASTER, NETWORK, parsed, [xch_input(3, 1_000_000)],
+                   [RequestedPayment("native", std_index(4)[1], 400_000)],
+                   std_index(4)[1])
+
+
+def test_parse_offer_accepts_nonminimal_settlement_reveal():
+    """S7: the dummy settlement spend's reveal is matched by tree hash,
+    so a legal non-minimal encoding of OFFER_MOD is the same puzzle."""
+    built = make_basic_offer()
+    spends, signature = o.parse_solutions_bundle(built.bundle_bytes)
+    out = []
+    for sp in spends:
+        if sp.coin.parent_coin_info == o._ZERO32:
+            reveal = _reencode_nonminimal(cs.deser(o.OFFER_MOD))
+            assert reveal != o.OFFER_MOD
+            assert cs.sha256tree(cs.deser(reveal)) == o.OFFER_MOD_HASH
+            sp = CoinSpend(sp.coin, reveal, sp.solution)
+        out.append(sp)
+    bundle = o.serialize_bundle(out, signature)
+    parsed = parse_offer(cs.bech32m_encode("offer", o.compress_offer(bundle)))
+    assert summarize_offer(parsed) == summarize_offer(parse_offer(built.offer_str))
+
+
+def test_parse_offer_still_rejects_wrong_settlement_puzzle():
+    built = make_basic_offer()
+    spends, signature = o.parse_solutions_bundle(built.bundle_bytes)
+    out = []
+    for sp in spends:
+        if sp.coin.parent_coin_info == o._ZERO32:
+            # a different puzzle with the matching coin record
+            reveal = std_index(5)[0]
+            sp = CoinSpend(Coin(o._ZERO32, cs.sha256tree(cs.deser(reveal)), 0),
+                           reveal, sp.solution)
+        out.append(sp)
+    bundle = o.serialize_bundle(out, signature)
+    with pytest.raises(OfferError, match="unsupported driver"):
+        parse_offer(cs.bech32m_encode("offer", o.compress_offer(bundle)))
+
+
+def legacy_xch_input(index: int, amount: int) -> XchInput:
+    wsk = cs.wallet_sk(MASTER, index)
+    spk = cs.synthetic_pk(cs.pk_bytes(wsk))
+    return XchInput(
+        parent_coin_info=hashlib.sha256(f"legacy-parent-{index}".encode()).digest(),
+        puzzle_hash=cs.legacy_puzzle_hash_for_synthetic_pk(spk),
+        amount=amount, index=index,
+    )
+
+
+def test_make_offer_from_legacy_coin_executes():
+    """S1: a coin at a pre-fix (legacy) address can still back an offer;
+    its spend carries the legacy reveal (which hashes to the coin's
+    puzzle hash) and the change goes to the standard address."""
+    inp = legacy_xch_input(1, 1_000_000)
+    built = make_basic_offer(xch_inputs=[inp])
+    parsed = parse_offer(built.offer_str)
+    spend = parsed.spends[0]
+    assert spend.coin.puzzle_hash == inp.puzzle_hash
+    assert spend.puzzle_reveal == cs.legacy_standard_puzzle_reveal(
+        cs.synthetic_pk(cs.pk_bytes(cs.wallet_sk(MASTER, 1))))
+    conds = run(spend)
+    assert (o.OFFER_MOD_HASH, 400_000) in create_coins(conds)
+    assert (std_index(2)[1], 600_000) in create_coins(conds)
+    assert_bundle_sigs(parsed.spends, parsed.signature)
+
+
+def test_cancel_legacy_coin_executes():
+    inp = legacy_xch_input(1, 1_000_000)
+    bundle = cancel_offer(MASTER, NETWORK, inp.coin(), 1, std_index(0)[1], fee=0)
+    spends, sig = o.parse_solutions_bundle(bundle)
+    assert spends[0].coin.puzzle_hash == inp.puzzle_hash
+    assert create_coins(run(spends[0])) == [(std_index(0)[1], 1_000_000)]
+    assert_bundle_sigs(spends, sig)
+
+
+def test_wrong_index_rejected_for_legacy_coin_too():
+    inp = legacy_xch_input(1, 1_000_000)
+    bad = XchInput(inp.parent_coin_info, inp.puzzle_hash, inp.amount, 2)
+    with pytest.raises(OfferError, match="not locked"):
+        make_basic_offer(xch_inputs=[bad])

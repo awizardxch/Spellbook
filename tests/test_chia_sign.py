@@ -286,3 +286,218 @@ class TestStreamable:
         solution = b"solution-bytes"
         raw = cs.coin_spend_bytes(coin, reveal, solution)
         assert len(raw) > 0
+
+
+# ---------------------------------------------------------------------------
+# S1 (Chialisp audit 2026-10-07): the curried standard puzzle must be the
+# canonical curry (a (q . MOD) (c (q . PK) 1)) — the program chia-blockchain's
+# puzzle_for_synthetic_public_key builds — so the daemon's addresses are the
+# ones a stock wallet derives from the same key. The vectors below were
+# computed ONCE with chia-blockchain 2.5.6:
+#
+#   pz = p2_delegated_puzzle_or_hidden_puzzle.puzzle_for_synthetic_public_key(
+#            G1Element.from_bytes(spk))
+#   pz.get_tree_hash(), bytes(pz)
+#
+# and are hard-coded so this test never imports chia at runtime.
+# ---------------------------------------------------------------------------
+
+_MOD_HEX = cs.P2_DELEGATED_PUZZLE_OR_HIDDEN_PUZZLE.hex()
+
+# {synthetic pk hex: (standard puzzle hash, standard reveal bytes)}
+CHIA_STANDARD_VECTORS = {
+    # tests/fixtures/synth_vectors.txt ARR0[0]
+    "b0c8cf08fdbe7fdb7bb1795740153b944c32364b100c372a05833554cb977945"
+    "63b096cb5f57bfa09f38d7aebb48704e": (
+        "2802277b2573e049e71f30d7d912821ebab1305d2d6bf3a73700c057c6b6864f",
+        "ff02ffff01" + _MOD_HEX + "ffff04ffff01b0"
+        "b0c8cf08fdbe7fdb7bb1795740153b944c32364b100c372a05833554cb977945"
+        "63b096cb5f57bfa09f38d7aebb48704e" + "ff018080",
+    ),
+    # tests/fixtures/synth_vectors.txt ARR0[1]
+    "8b1b92da63fdf8c4b53349da2fdd84685303587653f1a75826a56a97ea50b86c"
+    "a8a0fbf6a5d6605c70b6be324bc59c85": (
+        "f5499b326f3e2ac408b29e6debbcea9ef3e3f770392a46b94bfd2e98678f3e64",
+        "ff02ffff01" + _MOD_HEX + "ffff04ffff01b0"
+        "8b1b92da63fdf8c4b53349da2fdd84685303587653f1a75826a56a97ea50b86c"
+        "a8a0fbf6a5d6605c70b6be324bc59c85" + "ff018080",
+    ),
+}
+
+# The audit's key: PrivateKey.from_bytes(bytes.fromhex("0"*63+"7")) ->
+# AugSchemeMPL.sk_to_g1, used directly as the synthetic key. Its legacy
+# (pre-fix) hash 614a8f97… and standard hash da22b403… are the two values
+# the audit printed for finding S1.
+AUDIT_PK_HEX = ("b928f3beb93519eecf0145da903b40a4c97dca00b21f12ac0df3be9116ef2ef2"
+                "7b2ae6bcd4c5bc2d54ef5a70627efcb7")
+AUDIT_LEGACY_HASH = "614a8f97c746a7d857fd218ac29418a648d834278daf606e3181a84a2b56db72"
+AUDIT_STANDARD_HASH = "da22b403d584b56502ede358d58a46e738a4c22bc4cd28361a78a7052f22f637"
+
+
+class TestStandardCurryMatchesChia:
+    def test_puzzle_hash_matches_chia_blockchain(self):
+        for spk_hex, (ph_hex, _reveal_hex) in CHIA_STANDARD_VECTORS.items():
+            assert cs.puzzle_hash_for_synthetic_pk(
+                bytes.fromhex(spk_hex)).hex() == ph_hex, spk_hex[:16]
+
+    def test_reveal_bytes_match_chia_blockchain(self):
+        for spk_hex, (_ph_hex, reveal_hex) in CHIA_STANDARD_VECTORS.items():
+            reveal = cs.standard_puzzle_reveal(bytes.fromhex(spk_hex))
+            assert reveal.hex() == reveal_hex, spk_hex[:16]
+            # (a (q . MOD) (c (q . PK) 1)) — the canonical curry prefix
+            assert reveal[:5].hex() == "ff02ffff01"
+
+    def test_reveal_hashes_to_puzzle_hash(self):
+        for spk_hex, (ph_hex, _r) in CHIA_STANDARD_VECTORS.items():
+            reveal = cs.standard_puzzle_reveal(bytes.fromhex(spk_hex))
+            assert cs.sha256tree(cs.deser(reveal)).hex() == ph_hex
+
+    def test_audit_key_pins_both_hashes(self):
+        pk = bytes.fromhex(AUDIT_PK_HEX)
+        from blspy import AugSchemeMPL, PrivateKey
+        sk = PrivateKey.from_bytes(bytes.fromhex("0" * 63 + "7"))
+        assert bytes(AugSchemeMPL.sk_to_g1(sk)) == pk
+        assert cs.puzzle_hash_for_synthetic_pk(pk).hex() == AUDIT_STANDARD_HASH
+        assert cs.legacy_puzzle_hash_for_synthetic_pk(pk).hex() == AUDIT_LEGACY_HASH
+
+    def test_receive_address_is_standard(self):
+        spk = cs.synthetic_pk(cs.wallet_pk(MASTER_SK, 0))
+        addr = cs.receive_address(MASTER_SK, 0, "testnet11")
+        assert cs.puzzle_hash_for_address(addr) == \
+            cs.puzzle_hash_for_synthetic_pk(spk)
+        assert cs.puzzle_hash_for_address(addr) != \
+            cs.legacy_puzzle_hash_for_synthetic_pk(spk)
+
+
+class TestLegacyShape:
+    """The pre-fix shape (a (f (q MOD)) (c (f (q PK)) 1)) is kept ONLY so
+    coins already received at those hashes can be scanned and swept."""
+
+    def test_legacy_hash_still_reproduces_old_value(self):
+        pk = bytes.fromhex(AUDIT_PK_HEX)
+        assert cs.legacy_puzzle_hash_for_synthetic_pk(pk).hex() == AUDIT_LEGACY_HASH
+        reveal = cs.legacy_standard_puzzle_reveal(pk)
+        assert cs.sha256tree(cs.deser(reveal)).hex() == AUDIT_LEGACY_HASH
+        assert reveal[:5].hex() == "ff02ffff05"  # (a (f …) …) — not a curry
+
+    def test_legacy_differs_from_standard_for_every_vector(self):
+        for spk_hex in CHIA_STANDARD_VECTORS:
+            spk = bytes.fromhex(spk_hex)
+            assert cs.legacy_puzzle_hash_for_synthetic_pk(spk) != \
+                cs.puzzle_hash_for_synthetic_pk(spk)
+
+    def test_legacy_reveal_runs_like_the_standard_one(self):
+        # Same conditions out (the audit's observation): the bug was the
+        # program identity, not its behaviour.
+        from chia_rs import run_chia_program
+        spk = bytes.fromhex(VEC["SYNTH_PK"][0])
+        conds = cs._list([cs._list([b"\x01"])])
+        sol = cs.ser(cs._list([cs.NIL, cs.quote(conds), cs.NIL]))
+        _c1, out1 = run_chia_program(cs.standard_puzzle_reveal(spk), sol,
+                                     11000000000, 0)
+        _c2, out2 = run_chia_program(cs.legacy_standard_puzzle_reveal(spk),
+                                     sol, 11000000000, 0)
+        from chia_rs import tree_hash
+        assert tree_hash(cs.standard_puzzle_reveal(spk)) != \
+            tree_hash(cs.legacy_standard_puzzle_reveal(spk))
+
+        def to_py(n):
+            if n.atom is not None:
+                return n.atom
+            a, b = n.pair
+            return (to_py(a), to_py(b))
+        assert to_py(out1) == to_py(out2)
+
+    def test_build_standard_spend_accepts_both_hashes(self):
+        wsk = cs.wallet_sk(MASTER_SK, 0)
+        spk = cs.synthetic_pk(cs.pk_bytes(wsk))
+        std_ph = cs.puzzle_hash_for_synthetic_pk(spk)
+        legacy_ph = cs.legacy_puzzle_hash_for_synthetic_pk(spk)
+        out = [(std_ph, 1000)]
+        std = cs.build_standard_spend(MASTER_SK, 0, (bytes(32), std_ph, 1000),
+                                      out, "testnet11")
+        assert std["legacy"] is False
+        assert std["puzzle_reveal"] == cs.standard_puzzle_reveal(spk)
+        old = cs.build_standard_spend(MASTER_SK, 0, (bytes(32), legacy_ph, 1000),
+                                      out, "testnet11")
+        assert old["legacy"] is True
+        assert old["puzzle_reveal"] == cs.legacy_standard_puzzle_reveal(spk)
+        assert old["puzzle_hash"] == legacy_ph
+        with pytest.raises(ChiaSignError):
+            cs.build_standard_spend(MASTER_SK, 1, (bytes(32), legacy_ph, 1000),
+                                    out, "testnet11")
+
+    def test_scan_puzzle_hashes_standard_first_then_legacy(self):
+        phs, index_for_ph = cs.scan_puzzle_hashes(MASTER_SK, 3)
+        assert len(phs) == 6 and len(index_for_ph) == 6
+        for i in range(3):
+            spk = cs.synthetic_pk(cs.wallet_pk(MASTER_SK, i))
+            assert phs[i] == cs.puzzle_hash_for_synthetic_pk(spk).hex()
+            assert phs[3 + i] == cs.legacy_puzzle_hash_for_synthetic_pk(spk).hex()
+            assert index_for_ph[phs[i]] == i and index_for_ph[phs[3 + i]] == i
+        with pytest.raises(ChiaSignError):
+            cs.scan_puzzle_hashes(MASTER_SK, 0)
+
+
+class TestIterativeClvmWalkers:
+    """S6: ser/deser/deser_partial/sha256tree are iterative — a 5000-wide
+    proper list and a 5000-deep nesting either parse or raise
+    ChiaSignError, never RecursionError."""
+
+    def _deep(self, n):
+        node = b""
+        for _ in range(n):
+            node = (node, b"")
+        return node
+
+    def test_wide_list_roundtrips(self):
+        from chia_rs import tree_hash
+        wide = cs._list([b"\x01"] * 5000)
+        raw = cs.ser(wide)
+        assert cs.ser(cs.deser(raw)) == raw
+        assert cs.sha256tree(wide) == tree_hash(raw)
+        obj, end = cs.deser_partial(raw + b"\x80", 0)
+        assert end == len(raw) and cs.ser(obj) == raw
+
+    def test_deep_nesting_roundtrips(self):
+        from chia_rs import tree_hash
+        deep = self._deep(5000)
+        raw = cs.ser(deep)
+        assert raw.startswith(b"\xff" * 5000)
+        try:
+            back = cs.deser(raw)
+            assert cs.ser(back) == raw
+            assert cs.sha256tree(back) == tree_hash(raw)
+        except RecursionError:  # pragma: no cover — the point of S6
+            pytest.fail("deser raised RecursionError")
+
+    def test_deep_nesting_from_bytes_only(self):
+        # 20k levels purely from serialized bytes: still no recursion.
+        raw = b"\xff" * 20000 + b"\x80" + b"\x80" * 20000
+        try:
+            obj = cs.deser(raw)
+        except ChiaSignError:
+            return
+        except RecursionError:  # pragma: no cover
+            pytest.fail("deser raised RecursionError")
+        assert cs.ser(obj) == raw
+        assert len(cs.sha256tree(obj)) == 32
+
+    def test_malformed_inputs_raise_chia_sign_error(self):
+        for bad in (b"", b"\xff", b"\xff\x01", b"\xc0", b"\x85ab",
+                    b"\xfe\x01", b"\xf8\x00\x00\x00\x00\x01", b"\x01\x02"):
+            with pytest.raises(ChiaSignError):
+                cs.deser(bad)
+        with pytest.raises(ChiaSignError):
+            cs.deser_partial(b"\x01", 5)
+
+    def test_non_minimal_atom_prefix_is_same_atom(self):
+        # 0x81 0x0b is a legal (non-minimal) encoding of the atom 0x0b.
+        assert cs.deser(b"\x81\x0b") == b"\x0b"
+        assert cs.sha256tree(cs.deser(b"\x81\x0b")) == cs.sha256tree(b"\x0b")
+
+    def test_bad_sexpr_node_rejected(self):
+        with pytest.raises(ChiaSignError):
+            cs.ser(("not", "a", "pair"))
+        with pytest.raises(ChiaSignError):
+            cs.sha256tree(42)

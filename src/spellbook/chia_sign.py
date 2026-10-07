@@ -4,8 +4,10 @@ Every secret stays on the daemon. This module:
 
   - derives wallet keys: master secret -> unhardened path [12381, 8444, 2, index]
   - derives synthetic keys against the default hidden puzzle
-  - builds the standard-transaction puzzle reveal (curried
-    p2_delegated_puzzle_or_hidden_puzzle) and its puzzle hash / address
+  - builds the standard-transaction puzzle reveal (the canonical curry
+    (a (q . MOD) (c (q . PK) 1)) of p2_delegated_puzzle_or_hidden_puzzle,
+    pinned against chia-blockchain) and its puzzle hash / address; keeps
+    the pre-fix non-standard shape under legacy_* names for sweeping only
   - builds standard solutions from condition lists
   - signs spends: AGG_SIG_ME preimage =
         sha256tree1((q . conditions)) || coin_id || genesis_challenge
@@ -110,20 +112,52 @@ def _ser_atom(blob: bytes) -> bytes:
 
 
 def ser(obj) -> bytes:
-    """Serialize a CLVM s-expression: bytes = atom, tuple(first, rest) = pair."""
-    if isinstance(obj, bytes):
-        return _ser_atom(obj)
-    first, rest = obj
-    return b"\xff" + ser(first) + ser(rest)
+    """Serialize a CLVM s-expression: bytes = atom, tuple(first, rest) = pair.
+
+    Iterative (explicit stack), so the depth of the tree never reaches the
+    Python recursion limit: a malformed or adversarial shape raises
+    ChiaSignError, never RecursionError.
+    """
+    out = bytearray()
+    stack = [obj]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, bytes):
+            out += _ser_atom(node)
+            continue
+        if not isinstance(node, tuple) or len(node) != 2:
+            raise ChiaSignError("bad s-expression node")
+        first, rest = node
+        out.append(0xFF)
+        stack.append(rest)
+        stack.append(first)
+    return bytes(out)
 
 
 def sha256tree(obj) -> bytes:
     """sha256tree1: sha256(0x01 || atom) for atoms,
-    sha256(0x02 || sha256tree(l) || sha256tree(r)) for pairs."""
-    if isinstance(obj, bytes):
-        return hashlib.sha256(b"\x01" + obj).digest()
-    first, rest = obj
-    return hashlib.sha256(b"\x02" + sha256tree(first) + sha256tree(rest)).digest()
+    sha256(0x02 || sha256tree(l) || sha256tree(r)) for pairs.
+
+    Iterative post-order walk (explicit stacks) — see ``ser``.
+    """
+    work = [(obj, False)]
+    vals = []
+    while work:
+        node, expanded = work.pop()
+        if isinstance(node, bytes):
+            vals.append(hashlib.sha256(b"\x01" + node).digest())
+        elif expanded:
+            right = vals.pop()
+            left = vals.pop()
+            vals.append(hashlib.sha256(b"\x02" + left + right).digest())
+        else:
+            if not isinstance(node, tuple) or len(node) != 2:
+                raise ChiaSignError("bad s-expression node")
+            first, rest = node
+            work.append((node, True))
+            work.append((rest, False))
+            work.append((first, False))
+    return vals[0]
 
 
 def int_to_bytes(v: int) -> bytes:
@@ -150,37 +184,43 @@ def _list(items) -> bytes:
     return out
 
 
-def deser(data: bytes):
-    """Deserialize CLVM bytes into s-expr (bytes atoms / tuple pairs)."""
-    def go(pos):
-        if pos >= len(data):
-            raise ChiaSignError("truncated CLVM")
-        b = data[pos]
-        if b == 0xFF:
-            first, pos = go(pos + 1)
-            rest, pos = go(pos)
-            return (first, rest), pos
-        if b <= 0x7F:
-            return bytes([b]), pos + 1
-        if b <= 0xBF:
-            n = b & 0x3F
-            pos += 1
-        elif b <= 0xDF:
-            n = ((b & 0x1F) << 8) | data[pos + 1]
-            pos += 2
-        elif b <= 0xEF:
-            n = ((b & 0x0F) << 16) | (data[pos + 1] << 8) | data[pos + 2]
-            pos += 3
-        elif b <= 0xF7:
-            n = ((b & 0x07) << 24) | (data[pos + 1] << 16) | (data[pos + 2] << 8) | data[pos + 3]
-            pos += 4
-        else:
-            raise ChiaSignError("bad CLVM atom prefix")
-        return data[pos:pos + n], pos + n
-    obj, pos = go(0)
-    if pos != len(data):
-        raise ChiaSignError("trailing bytes in CLVM")
-    return obj
+def _read_atom(data: bytes, p: int):
+    """Read one serialized atom at ``p``; returns (atom, end_pos).
+
+    Accepts the 1..4-byte length prefixes (atoms up to 2**27-1 bytes),
+    rejects the 5-byte prefix, back-references (0xfe) and anything
+    truncated — always with ChiaSignError.
+    """
+    b = data[p]
+    if b <= 0x7F:
+        return bytes([b]), p + 1
+    if b <= 0xBF:
+        n = b & 0x3F
+        width = 1
+    elif b <= 0xDF:
+        n = b & 0x1F
+        width = 2
+    elif b <= 0xEF:
+        n = b & 0x0F
+        width = 3
+    elif b <= 0xF7:
+        n = b & 0x07
+        width = 4
+    else:
+        raise ChiaSignError("bad CLVM atom prefix")
+    if p + width > len(data):
+        raise ChiaSignError("truncated CLVM")
+    for i in range(1, width):
+        n = (n << 8) | data[p + i]
+    p += width
+    if p + n > len(data):
+        raise ChiaSignError("truncated CLVM")
+    return data[p:p + n], p + n
+
+
+# Parser work items: parse one object / cons the last two parsed objects.
+_PARSE = 0
+_CONS = 1
 
 
 def deser_partial(data: bytes, pos: int = 0):
@@ -188,34 +228,40 @@ def deser_partial(data: bytes, pos: int = 0):
 
     Returns ``(sexpr, end_pos)`` so callers can walk concatenated
     programs (e.g. puzzle reveal followed by solution in a CoinSpend).
+    Iterative: nesting depth is bounded by the input length, not by the
+    Python stack, and every malformed input raises ChiaSignError.
     """
-    def go(p):
+    if pos < 0:
+        raise ChiaSignError("bad CLVM offset")
+    ops = [_PARSE]
+    vals = []
+    p = pos
+    while ops:
+        op = ops.pop()
+        if op == _CONS:
+            rest = vals.pop()
+            first = vals.pop()
+            vals.append((first, rest))
+            continue
         if p >= len(data):
             raise ChiaSignError("truncated CLVM")
-        b = data[p]
-        if b == 0xFF:
-            first, p = go(p + 1)
-            rest, p = go(p)
-            return (first, rest), p
-        if b <= 0x7F:
-            return bytes([b]), p + 1
-        if b <= 0xBF:
-            n = b & 0x3F
+        if data[p] == 0xFF:
             p += 1
-        elif b <= 0xDF:
-            n = ((b & 0x1F) << 8) | data[p + 1]
-            p += 2
-        elif b <= 0xEF:
-            n = ((b & 0x0F) << 16) | (data[p + 1] << 8) | data[p + 2]
-            p += 3
-        elif b <= 0xF7:
-            n = ((b & 0x07) << 24) | (data[p + 1] << 16) | (data[p + 2] << 8) | data[p + 3]
-            p += 4
-        else:
-            raise ChiaSignError("bad CLVM atom prefix")
-        return data[p:p + n], p + n
-    obj, end = go(pos)
-    return obj, end
+            ops.append(_CONS)
+            ops.append(_PARSE)
+            ops.append(_PARSE)
+            continue
+        atom, p = _read_atom(data, p)
+        vals.append(atom)
+    return vals[0], p
+
+
+def deser(data: bytes):
+    """Deserialize CLVM bytes into s-expr (bytes atoms / tuple pairs)."""
+    obj, pos = deser_partial(data, 0)
+    if pos != len(data):
+        raise ChiaSignError("trailing bytes in CLVM")
+    return obj
 
 
 def bech32m_encode(hrp: str, payload: bytes) -> str:
@@ -256,9 +302,6 @@ def quote(obj):
     """(q . obj) — dotted quote. Valid when obj is a LIST (CLVM quote returns
     it unevaluated). Matches chia's clvm_quote! for the delegated puzzle."""
     return _cons(b"\x01", obj)
-
-
-# (quote_atom removed — _unwrap_quote handles atoms via (f (q X)))
 
 
 # ---------------------------------------------------------------------------
@@ -362,36 +405,97 @@ def synthetic_pk(wallet_pk_bytes: bytes,
 # Puzzle, puzzle hash, address
 # ---------------------------------------------------------------------------
 
-def _unwrap_quote(sexpr):
-    """(f (q X)) — CLVM's (q X) returns (X); f unwraps to X."""
-    return (b"\x05", (_list([b"\x01", sexpr]), b""))
+def _standard_curry(synthetic_pk_bytes: bytes):
+    """The canonical curry of p2_delegated_puzzle_or_hidden_puzzle:
 
+        (a (q . MOD) (c (q . PK) 1))
 
-def standard_puzzle_reveal(synthetic_pk_bytes: bytes) -> bytes:
-    """Curried p2_delegated_puzzle_or_hidden_puzzle.
-
-    (a (f (q MOD)) (c (f (q pk)) 1)): CLVM (q X) evaluates to (X), so f
-    unwraps to the program/atom. MOD is embedded as a parsed s-expression.
-    When applied to a solution S the module receives (pk . S).
+    i.e. ``(2 (1 . MOD) (4 (1 . PK) 1))`` — exactly what chia-blockchain's
+    ``puzzle_for_synthetic_public_key`` (``Program.curry``) and every stock
+    wallet build, so its tree hash is the puzzle hash a stock wallet derives
+    from the same key. Pinned against chia-blockchain in
+    tests/test_chia_sign.py.
     """
     if len(synthetic_pk_bytes) != 48:
         raise ChiaSignError("synthetic public key must be 48 bytes")
     mod = deser(P2_DELEGATED_PUZZLE_OR_HIDDEN_PUZZLE)
-    inner = _cons(b"\x04", _cons(_unwrap_quote(synthetic_pk_bytes),
+    inner = _cons(b"\x04", _cons(_cons(b"\x01", synthetic_pk_bytes),
                                  _cons(b"\x01", NIL)))
-    curried = _cons(b"\x02", _cons(_unwrap_quote(mod), _cons(inner, NIL)))
-    return ser(curried)
+    return _cons(b"\x02", _cons(_cons(b"\x01", mod), _cons(inner, NIL)))
+
+
+def standard_puzzle_reveal(synthetic_pk_bytes: bytes) -> bytes:
+    """Serialized canonical curry — the standard-transaction puzzle reveal."""
+    return ser(_standard_curry(synthetic_pk_bytes))
 
 
 def puzzle_hash_for_synthetic_pk(synthetic_pk_bytes: bytes) -> bytes:
-    """sha256tree of the curried standard puzzle."""
+    """sha256tree of the canonical curry == the standard puzzle hash."""
+    return sha256tree(_standard_curry(synthetic_pk_bytes))
+
+
+# --- LEGACY (pre-fix) shape --------------------------------------------------
+#
+# Before the 2026-10 Chialisp audit (finding S1) the daemon built its
+# "curry" as (a (f (q MOD)) (c (f (q PK)) 1)). That program RUNS like the
+# canonical curry (same conditions) but is a different program, so its
+# tree hash is a different puzzle hash and a different address — one no
+# stock wallet derives from the key. The functions below reproduce that
+# shape ONLY so coins already received at those legacy addresses can be
+# found by the relay scan and swept by build_standard_spend. Nothing must
+# ever print, serve or hand out a legacy address again.
+
+def _legacy_unwrap_quote(sexpr):
+    """(f (q X)) — CLVM's (q X) returns (X); f unwraps to X. Legacy only."""
+    return (b"\x05", (_list([b"\x01", sexpr]), b""))
+
+
+def _legacy_curry(synthetic_pk_bytes: bytes):
     if len(synthetic_pk_bytes) != 48:
         raise ChiaSignError("synthetic public key must be 48 bytes")
     mod = deser(P2_DELEGATED_PUZZLE_OR_HIDDEN_PUZZLE)
-    inner = _cons(b"\x04", _cons(_unwrap_quote(synthetic_pk_bytes),
+    inner = _cons(b"\x04", _cons(_legacy_unwrap_quote(synthetic_pk_bytes),
                                  _cons(b"\x01", NIL)))
-    curried = _cons(b"\x02", _cons(_unwrap_quote(mod), _cons(inner, NIL)))
-    return sha256tree(curried)
+    return _cons(b"\x02", _cons(_legacy_unwrap_quote(mod), _cons(inner, NIL)))
+
+
+def legacy_standard_puzzle_reveal(synthetic_pk_bytes: bytes) -> bytes:
+    """Pre-fix, NON-standard reveal (a (f (q MOD)) (c (f (q PK)) 1)).
+
+    Sweep-only: spends coins that already sit at a legacy address.
+    """
+    return ser(_legacy_curry(synthetic_pk_bytes))
+
+
+def legacy_puzzle_hash_for_synthetic_pk(synthetic_pk_bytes: bytes) -> bytes:
+    """Pre-fix, NON-standard puzzle hash. Scan-only (see above)."""
+    return sha256tree(_legacy_curry(synthetic_pk_bytes))
+
+
+def scan_puzzle_hashes(master_sk: bytes, count: int) -> tuple:
+    """Every puzzle hash this key set may hold coins at, as hex.
+
+    Returns ``(puzzle_hashes, index_for_ph)``: the standard hashes for
+    indices ``0..count-1`` FIRST (so ``puzzle_hashes[0]`` is the primary,
+    standard receive puzzle hash), then the legacy hashes for the same
+    indices so coins received before the S1 fix stay visible and
+    spendable. ``index_for_ph`` maps each hex hash to its derivation
+    index.
+    """
+    if count <= 0:
+        raise ChiaSignError("scan count must be positive")
+    standard = []
+    legacy = []
+    index_for_ph = {}
+    for i in range(count):
+        spk = synthetic_pk(wallet_pk(master_sk, i))
+        std = puzzle_hash_for_synthetic_pk(spk).hex()
+        old = legacy_puzzle_hash_for_synthetic_pk(spk).hex()
+        standard.append(std)
+        legacy.append(old)
+        index_for_ph[std] = i
+        index_for_ph[old] = i
+    return standard + legacy, index_for_ph
 
 
 def _bech32_polymod(values) -> int:
@@ -634,19 +738,30 @@ def build_standard_spend(master_sk: bytes, index: int, coin: tuple,
 
     Returns {"coin_spend": bytes, "signature": bytes(96),
              "puzzle_reveal": bytes, "solution": bytes,
-             "synthetic_pk": bytes, "puzzle_hash": bytes}.
+             "synthetic_pk": bytes, "puzzle_hash": bytes, "legacy": bool}.
     coin: (parent_coin_id, puzzle_hash, amount). outputs: [(puzzle_hash, amount)].
+    The coin must sit at the standard puzzle hash for this key/index or
+    at the pre-fix legacy hash (sweep); any other puzzle hash is refused.
     """
     wsk = wallet_sk(master_sk, index)
     wpk = pk_bytes(wsk)
     ssk = synthetic_sk(wsk)
     spk = synthetic_pk(wpk)
     ph = puzzle_hash_for_synthetic_pk(spk)
-    if ph != coin[1]:
+    if coin[1] == ph:
+        reveal = standard_puzzle_reveal(spk)
+        legacy = False
+    elif coin[1] == legacy_puzzle_hash_for_synthetic_pk(spk):
+        # A coin received at the pre-fix address (see the LEGACY section):
+        # spend it with the reveal that actually hashes to its puzzle
+        # hash so it can be swept to a standard address.
+        ph = coin[1]
+        reveal = legacy_standard_puzzle_reveal(spk)
+        legacy = True
+    else:
         raise ChiaSignError("coin puzzle hash does not match this key/index")
     conditions = _list(conditions_from_outputs(outputs))
     solution = ser(standard_solution_sexpr(conditions))
-    reveal = standard_puzzle_reveal(spk)
     sig = sign_coin_spend(ssk, coin, conditions, network_id)
     if not verify_coin_spend_signature(spk, coin, conditions, network_id, sig):
         raise ChiaSignError("self-verification of coin signature failed")
@@ -658,6 +773,7 @@ def build_standard_spend(master_sk: bytes, index: int, coin: tuple,
         "solution": solution,
         "synthetic_pk": spk,
         "puzzle_hash": ph,
+        "legacy": legacy,
     }
 
 
