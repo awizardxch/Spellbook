@@ -1894,7 +1894,7 @@ class Daemon:
         rpc = self._chia_relay_rpc(network)
 
         # Verify the relay is on the expected network before touching keys.
-        st = rpc.status()
+        st = rpc.status(network)
         if st.get("network") != network:
             raise chia_relay.RelayError(
                 f"relay network {st.get('network')!r} != expected {network!r} "
@@ -1911,7 +1911,7 @@ class Daemon:
         # before the S1 fix stay visible and get swept.
         puzzle_hashes, index_for_ph = self._own_puzzle_hashes(chain)
 
-        coins = rpc.coins(puzzle_hashes)
+        coins = rpc.coins(puzzle_hashes, network)
         unspent = [c for c in coins if c.get("spent_height") is None]
         # Sort by amount descending for simple largest-first selection.
         unspent.sort(key=lambda c: int(c.get("amount_mojos", 0)),
@@ -1970,7 +1970,7 @@ class Daemon:
                 "fund a single coin covering the amount")
 
         bundle_hex = chia_sign.build_spend_bundle(spends).hex()
-        res = rpc.broadcast(bundle_hex)
+        res = rpc.broadcast(bundle_hex, network)
         # The relay returns mempool status as an int (1=SUCCESS, 2=PENDING,
         # 3=FAILED) plus a status_name string.  Check the name — comparing
         # the int to "FAILED" would never match and a failed broadcast
@@ -2410,14 +2410,14 @@ class Daemon:
         from spellbook import chia_relay, chia_sign
         network = chia.NETWORKS[chain]
         rpc = self._chia_relay_rpc(network)
-        st = rpc.status()
+        st = rpc.status(network)
         if st.get("network") != network:
             raise chia_relay.RelayError(
                 f"relay network {st.get('network')!r} != expected "
                 f"{network!r} — refusing")
         master_sk = self._chia_master_sk(chain)
         puzzle_hashes, index_for_ph = self._own_puzzle_hashes(chain)
-        coins = rpc.coins(puzzle_hashes)
+        coins = rpc.coins(puzzle_hashes, network)
         unspent = [c for c in coins if c.get("spent_height") is None]
         return rpc, network, master_sk, unspent, index_for_ph, puzzle_hashes
 
@@ -2536,7 +2536,7 @@ class Daemon:
         consumes velocity fail-closed).
         """
         from spellbook import chia_relay
-        res = rpc.broadcast(bundle_bytes.hex())
+        res = rpc.broadcast(bundle_bytes.hex(), network)
         status_name = res.get("status_name", "")
         if status_name == "FAILED" or res.get("status") == 3:
             raise chia_relay.RelayError(
