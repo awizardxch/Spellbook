@@ -447,7 +447,8 @@ def test_rt_status_ignores_foreign_selected_wallet(tmp_path, monkeypatch):
     fake.addresses[foreign_fp] = "txch1foreignwallethere"
     fake.selected = foreign_fp  # Sage left logged into the foreign wallet
     monkeypatch.setattr(chia, "SageRpc", lambda *a, **k: fake)
-    out = d.rt_status({}, "muse_test")
+    # Live balances are opt-in (each is a network round-trip).
+    out = d.rt_status({"balances": True}, "muse_test")
     assert out["ok"] is True
     bal = out["balances"]["chia-testnet"]
     assert "error" not in bal, bal
@@ -466,7 +467,7 @@ def test_rt_status_imports_daemon_key_before_any_spend(tmp_path, monkeypatch):
     d, seed_hex = _daemon_with_seed(tmp_path, monkeypatch)
     fake = _FakeSage("x")  # no keys imported yet
     monkeypatch.setattr(chia, "SageRpc", lambda *a, **k: fake)
-    out = d.rt_status({}, "muse_test")
+    out = d.rt_status({"balances": True}, "muse_test")
     bal = out["balances"]["chia-testnet"]
     assert "error" not in bal, bal
     derived = _kdf.derive_labeled(bytes.fromhex(seed_hex), "chia-testnet",
