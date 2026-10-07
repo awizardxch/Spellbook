@@ -31,10 +31,11 @@ import struct
 import subprocess
 import sys
 import time
+import traceback
 import urllib.parse
 
 from spellbook import chia, chia_relay, evm, kdf, sign as spellsign
-from spellbook import chia_sign
+from spellbook import chia_offer, chia_sign
 from spellbook import doctor as doctor_mod
 from spellbook import solana as solana_mod
 from spellbook import version as version_mod
@@ -50,7 +51,7 @@ REQUEST_ROUTES = {
     "request_spend", "queue_read", "status", "addresses", "doctor",
     "ledger_read", "sign_musebook_request", "chia_read",
     "offer_make", "offer_take", "offer_cancel",
-    "offer_import", "offer_delete", "offer_combine",
+    "offer_import", "offer_combine",
     "nft_mint", "nft_update", "nft_collection_update", "nft_redownload",
     "nft_assign_did",
     "did_create", "did_update", "did_transfer", "did_normalize",
@@ -65,6 +66,12 @@ REQUEST_ROUTES = {
 }
 APPROVE_ROUTES = {
     "queue_approve", "queue_reject", "publish_directory_entry",
+    # offer_delete drops Sage's LOCAL record of an offer — not an on-chain
+    # cancel. For an offer this wallet made, that record is the only
+    # handle offer_cancel has while the offer string stays valid in the
+    # wild, so a requester must not be able to make a live offer
+    # uncancellable: the human (approve token) decides deletes.
+    "offer_delete",
 }
 
 # v1 transfer schema — plain transfers only (S13). Unknown fields are
@@ -646,12 +653,18 @@ class Daemon:
         try:
             return handler(params, req.get("muse_id", "?"))
         except (evm.EvmError, chia.SageError, chia_relay.RelayError,
-                solana_mod.SolanaError, dex_mod.DexError) as e:
+                solana_mod.SolanaError, dex_mod.DexError,
+                chia_offer.OfferError, chia_sign.ChiaSignError) as e:
             # A request handler must never let a validation/broadcast
             # error escape as a dropped connection: return a structured
             # failure instead (e.g. an invalid fee_mojos raised from
-            # _fee_of outside a handler-local try/except).
+            # _fee_of outside a handler-local try/except, or an offer
+            # string that parses but decodes to no settlement output).
             return {"ok": False, "error": str(e)}
+        except RecursionError:
+            # Untrusted CLVM / JSON shapes must never take the process
+            # down; the parsers are iterative, this is the backstop.
+            return {"ok": False, "error": "request too deeply nested"}
 
     # ------------------------------------------------------------ chain execution
     def _signing_seed(self):
@@ -1892,16 +1905,11 @@ class Daemon:
         # in standard mode it is the BLS key_gen master key (same for both
         # networks — only the bech32m HRP differs).
         master_sk = self._chia_master_sk(chain)
-        # Scan the first N derivation indices for coins.
-        scan_n = int(self.chia_cfg.get("relay_scan_indices", 10))
-        puzzle_hashes = []
-        index_for_ph = {}
-        for i in range(scan_n):
-            wsk = chia_sign.wallet_sk(master_sk, i)
-            spk = chia_sign.synthetic_pk(chia_sign.pk_bytes(wsk))
-            ph = chia_sign.puzzle_hash_for_synthetic_pk(spk)
-            puzzle_hashes.append(ph.hex())
-            index_for_ph[ph.hex()] = i
+        # Scan the first N derivation indices for coins — standard puzzle
+        # hashes first (puzzle_hashes[0] is the primary receive/change
+        # address), then the pre-fix legacy hashes so coins received
+        # before the S1 fix stay visible and get swept.
+        puzzle_hashes, index_for_ph = self._own_puzzle_hashes(chain)
 
         coins = rpc.coins(puzzle_hashes)
         unspent = [c for c in coins if c.get("spent_height") is None]
@@ -2408,18 +2416,55 @@ class Daemon:
                 f"relay network {st.get('network')!r} != expected "
                 f"{network!r} — refusing")
         master_sk = self._chia_master_sk(chain)
-        scan_n = int(self.chia_cfg.get("relay_scan_indices", 10))
-        puzzle_hashes = []
-        index_for_ph = {}
-        for i in range(scan_n):
-            wsk = chia_sign.wallet_sk(master_sk, i)
-            spk = chia_sign.synthetic_pk(chia_sign.pk_bytes(wsk))
-            ph = chia_sign.puzzle_hash_for_synthetic_pk(spk)
-            puzzle_hashes.append(ph.hex())
-            index_for_ph[ph.hex()] = i
+        puzzle_hashes, index_for_ph = self._own_puzzle_hashes(chain)
         coins = rpc.coins(puzzle_hashes)
         unspent = [c for c in coins if c.get("spent_height") is None]
         return rpc, network, master_sk, unspent, index_for_ph, puzzle_hashes
+
+    def _own_puzzle_hashes(self, chain: str) -> tuple:
+        """(puzzle_hashes, index_for_ph) for every address this wallet owns.
+
+        The standard puzzle hashes of the first ``relay_scan_indices``
+        derivation indices come first — ``puzzle_hashes[0]`` is the
+        primary (index 0, standard) receive and change puzzle hash —
+        followed by the pre-fix legacy hashes for the same indices
+        (chia_sign.scan_puzzle_hashes), so coins received at a legacy
+        address are still scanned, spendable and sweepable. Nothing
+        prints or hands out a legacy address.
+        """
+        master_sk = self._chia_master_sk(chain)
+        scan_n = int(self.chia_cfg.get("relay_scan_indices", 10))
+        return chia_sign.scan_puzzle_hashes(master_sk, scan_n)
+
+    @staticmethod
+    def _resolve_receive_address(network: str, recv, puzzle_hashes: list,
+                                 index_for_ph: dict) -> tuple:
+        """S2: where the requested leg of an offer WE make is paid.
+
+        The requester may only name one of this wallet's OWN puzzle
+        hashes (the scanned set, legacy included); ``None`` means the
+        primary address (standard, index 0). Returns
+        ``(address, puzzle_hash_bytes)``; raises ChiaSignError for an
+        undecodable, wrong-network or foreign address. The approver sees
+        the result in the queue entry — never an attacker-chosen payee
+        behind a fair-looking swap.
+        """
+        hrp = chia_sign.ADDRESS_PREFIX[network]
+        if recv is None:
+            ph = bytes.fromhex(puzzle_hashes[0])
+            return chia_sign.address_for_puzzle_hash(ph, hrp), ph
+        if not isinstance(recv, str) or not recv:
+            raise chia_sign.ChiaSignError("receive_address must be a string")
+        if not recv.strip().lower().startswith(hrp + "1"):
+            raise chia_sign.ChiaSignError(
+                f"bad receive_address for {network}: expected a {hrp}1… address")
+        ph = chia_sign.puzzle_hash_for_address(recv)
+        if ph.hex() not in index_for_ph:
+            raise chia_sign.ChiaSignError(
+                "receive_address is not one of this wallet's own addresses "
+                "(first relay_scan_indices derivation indices) — the "
+                "requested leg of an offer always pays this wallet; refusing")
+        return recv, ph
 
     def _open_offer_coin_ids(self) -> set:
         """Coin ids encumbered by locally-stored open native offers.
@@ -2542,6 +2587,10 @@ class Daemon:
         receive_ph = bytes.fromhex(params["_receive_ph"])
         (rpc, network, master_sk, unspent, index_for_ph,
          puzzle_hashes) = self._native_relay_coins(chain)
+        if receive_ph.hex() not in index_for_ph:
+            # Belt and braces for S2: the approved intent must pay us.
+            raise chia_relay.RelayError(
+                "approved receive puzzle hash is not ours — refusing")
         need = sum(m for _, m in offered) + fee
         # Coins committed to other open offers are encumbered — a coin
         # can back only one open offer at a time.
@@ -2593,10 +2642,10 @@ class Daemon:
         self._chia_offer_guards(params, chain)
         try:
             parsed = chia_offer.parse_offer(params["offer"])
+            legs = chia_offer.summarize_offer(parsed)
         except chia_offer.OfferError as e:
             raise chia_relay.RelayError(
                 f"offer failed native parse: {e}") from e
-        legs = chia_offer.summarize_offer(parsed)
         give = legs["requested"]  # what we must pay (maker's requested)
         get = legs["offered"]     # what we receive (maker's offered)
         want_give = [(it["asset"], it["amount_mojos"])
@@ -2703,13 +2752,10 @@ class Daemon:
         """
         from spellbook import chia_relay, chia_sign
         recv = p.get("receive_address")
-        if not isinstance(recv, str) or not recv:
-            return {"ok": False,
-                    "error": "native offer_make needs receive_address "
-                             "(requested XCH needs a puzzle hash)"}
         network = chia.NETWORKS[chain]
         prefix = chia.PREFIXES[network]
-        if not recv.startswith(prefix):
+        if recv is not None and (not isinstance(recv, str)
+                                 or not recv.startswith(prefix)):
             return {"ok": False,
                     "error": f"bad receive_address for {chain}: expected a "
                              f"{prefix}… address"}
@@ -2718,16 +2764,20 @@ class Daemon:
                     "error": "native XCH offers need a configured Chia relay "
                              f"(chia.relay_urls[{network}]) — refusing"}
         try:
-            receive_ph = chia_sign.puzzle_hash_for_address(recv)
-            (_rpc, _net, _master, unspent, _idx,
-             _phs) = self._native_relay_coins(chain)
+            (_rpc, _net, _master, unspent, index_for_ph,
+             puzzle_hashes) = self._native_relay_coins(chain)
+            # S2: the requested leg pays one of OUR addresses only
+            # (default: the primary address); anything else is refused.
+            recv, receive_ph = self._resolve_receive_address(
+                network, recv, puzzle_hashes, index_for_ph)
             have = sum(int(c.get("amount_mojos", 0)) for c in unspent)
             need = sum(m for _, m in offered) + p.get("fee_mojos", 0)
             if have < need:
                 raise chia_relay.RelayError(
                     f"insufficient XCH via relay: have {have} mojos, "
                     f"need {need}")
-        except (chia_relay.RelayError, ValueError) as e:
+        except (chia_relay.RelayError, chia_sign.ChiaSignError,
+                ValueError) as e:
             return {"ok": False, "error": str(e)}
         params = {"intent": "offer_make", "chain": chain,
                   "transport": "native",
@@ -2737,6 +2787,7 @@ class Daemon:
                                 for a, m in requested],
                   "fee_mojos": p.get("fee_mojos", 0),
                   "purpose": p.get("purpose", ""),
+                  "receive_address": recv,
                   "_receive_ph": receive_ph.hex()}
         if p.get("expires_at_second") is not None:
             params["expires_at_second"] = p["expires_at_second"]
@@ -2756,7 +2807,13 @@ class Daemon:
             parsed = chia_offer.parse_offer(p["offer"])
         except chia_offer.OfferError:
             return None  # not native-parseable: caller tries Sage
-        legs = chia_offer.summarize_offer(parsed)
+        try:
+            legs = chia_offer.summarize_offer(parsed)
+        except chia_offer.OfferError as e:
+            # Native-shaped but malformed (e.g. a maker spend that creates
+            # no settlement output): a structured refusal, never an
+            # exception out of the handler.
+            return {"ok": False, "error": f"offer failed native parse: {e}"}
         give = legs["requested"]
         get = legs["offered"]
         if not self._offer_native_route(chain):
@@ -4546,17 +4603,27 @@ class Daemon:
             requested = _resolve_offer_nft_legs(rpc, requested, "requested")
         except chia.SageError as e:
             return {"ok": False, "error": str(e)}
+        # S2: Sage pays the requested leg to receive_address, so it must
+        # be one of THIS wallet's own addresses (default: the primary
+        # standard address) — the requester never picks the payee.
+        try:
+            network = chia.NETWORKS[chain]
+            puzzle_hashes, index_for_ph = self._own_puzzle_hashes(chain)
+            recv, receive_ph = self._resolve_receive_address(
+                network, recv, puzzle_hashes, index_for_ph)
+        except chia_sign.ChiaSignError as e:
+            return {"ok": False, "error": str(e)}
         params = {"intent": "offer_make", "chain": chain,
                   "offered": [{"asset": a, "amount_mojos": m}
                               for a, m in offered],
                   "requested": [{"asset": a, "amount_mojos": m}
                                 for a, m in requested],
                   "fee_mojos": p.get("fee_mojos", 0),
-                  "purpose": p.get("purpose", "")}
+                  "purpose": p.get("purpose", ""),
+                  "receive_address": recv,
+                  "_receive_ph": receive_ph.hex()}
         if expires is not None:
             params["expires_at_second"] = expires
-        if recv:
-            params["receive_address"] = recv
         entries = [(chain, a, m) for a, m in offered]
         return self._run_fund_intent(params, muse_id, entries, "offer_make")
 
@@ -5490,6 +5557,11 @@ class Daemon:
                     "requested": p.get("requested"),
                     "fee_mojos": p.get("fee_mojos", 0),
                     "expires_at_second": p.get("expires_at_second"),
+                    # S2: where the requested leg pays — always one of
+                    # this wallet's own addresses, shown so the approver
+                    # can see it.
+                    "receive_address": p.get("receive_address"),
+                    "receive_ph": p.get("_receive_ph"),
                     "destination": None, "asset": "offer", "amount": None,
                 })
             elif intent == "offer_take":
@@ -5952,27 +6024,42 @@ def serve(sock_path: str, daemon: Daemon):
     print(f"spellbookd listening on {sock_path}", flush=True)
     while True:
         conn, _ = srv.accept()
+        _serve_connection(conn, daemon)
+
+
+def _serve_connection(conn, daemon) -> None:
+    """Answer one client connection: one JSON line in, one JSON line out.
+
+    A request can never terminate the process. Anything daemon.handle
+    lets escape is logged as a traceback (frames and source only — no
+    request body, no token) and answered with
+    ``{"ok": false, "error": "internal error"}``.
+    """
+    try:
+        uid = peer_uid(conn)
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = conn.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
         try:
-            uid = peer_uid(conn)
-            buf = b""
-            while not buf.endswith(b"\n"):
-                chunk = conn.recv(65536)
-                if not chunk:
-                    break
-                buf += chunk
-            try:
-                req = json.loads(buf.decode())
-            except (ValueError, UnicodeDecodeError):
-                conn.sendall(b'{"ok": false, "error": "bad json"}\n')
-                continue
-            resp = daemon.handle(req, uid)
-            conn.sendall((json.dumps(resp) + "\n").encode())
-        except OSError:
-            # The client went away mid-request (RST, EPIPE on send). Drop
-            # the request; the daemon must not crash with it.
-            pass
-        finally:
-            conn.close()
+            req = json.loads(buf.decode())
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            conn.sendall(b'{"ok": false, "error": "bad json"}\n')
+            return
+        try:
+            payload = json.dumps(daemon.handle(req, uid))
+        except Exception:  # noqa: BLE001 — the daemon must outlive any request
+            traceback.print_exc(file=sys.stderr)
+            payload = json.dumps({"ok": False, "error": "internal error"})
+        conn.sendall((payload + "\n").encode())
+    except OSError:
+        # The client went away mid-request (RST, EPIPE on send). Drop
+        # the request; the daemon must not crash with it.
+        pass
+    finally:
+        conn.close()
 
 
 def main():
