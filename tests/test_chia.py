@@ -235,6 +235,8 @@ def _daemon_with_seed(tmp_path, monkeypatch):
     (data_home / "com.rigidnetwork.sage").mkdir(parents=True)
     cfg = {
         "seed_path": str(tmp_path / "seed.key"),
+        "allowed_request_uids": [os.getuid()],
+        "allowed_approve_uids": [os.getuid()],
         "chia_enabled": True,
         "chia": {
             "sage_bin": "/nonexistent/sage",

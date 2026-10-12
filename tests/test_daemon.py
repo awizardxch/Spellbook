@@ -230,7 +230,10 @@ def test_s4_queue_by_default_end_to_end(tmp_path):
     _write(tmp_path / "request.token", req)
     _write(tmp_path / "approve.token", "bb" * 32)
     _write(tmp_path / "policy.json", "{}")
-    _write(tmp_path / "spellbook.json", json.dumps({}))
+    _write(tmp_path / "spellbook.json", json.dumps({
+        "allowed_request_uids": [os.getuid()],
+        "allowed_approve_uids": [os.getuid()],
+    }))
     _write(tmp_path / "ledger.jsonl", "")
     d = Daemon(str(tmp_path))
     resp = d.handle({"token": req, "route": "request_spend", "muse_id": "m",
@@ -279,6 +282,8 @@ def _evm_daemon(tmp_path, monkeypatch):
     _write(tmp_path / "seed.key", seed_hex)
     cfg = {
         "seed_path": str(tmp_path / "seed.key"),
+        "allowed_request_uids": [os.getuid()],
+        "allowed_approve_uids": [os.getuid()],
         "evm": {"chains": {"evm-46630": {"enabled": True,
                                          "rpc_url": "http://fake"}}},
     }

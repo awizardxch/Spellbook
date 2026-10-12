@@ -23,6 +23,7 @@ Nothing here touches mainnet without the explicit mainnet_submit_enabled flag.
 """
 import argparse
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -66,6 +67,7 @@ REQUEST_ROUTES = {
 }
 APPROVE_ROUTES = {
     "queue_approve", "queue_reject", "publish_directory_entry",
+    "mint_sign_ref",
     # offer_delete drops Sage's LOCAL record of an offer — not an on-chain
     # cancel. For an offer this wallet made, that record is the only
     # handle offer_cancel has while the offer string stays valid in the
@@ -448,6 +450,12 @@ class Daemon:
         self.policy = load_policy(config_dir)
         self.request_token = token_auth.load_token(os.path.join(config_dir, "request.token"))
         self.approve_token = token_auth.load_token(os.path.join(config_dir, "approve.token"))
+        # f-01: secret for daemon-issued message_sign approval refs. Random
+        # per process start, never persisted: a restart invalidates any
+        # outstanding refs (fail closed). Refs are single-use, 5-minute
+        # expiry, and bind the exact request params.
+        self._sign_ref_secret = os.urandom(32)
+        self._used_sign_refs = set()
         self.ledger = Ledger(os.path.join(config_dir, "ledger.jsonl"))
         self.queue_path = os.path.join(config_dir, "queue.json")
         self.velocity_path = os.path.join(config_dir, "velocity.jsonl")
@@ -625,13 +633,24 @@ class Daemon:
         role = self._auth(req.get("token", ""))
         if role is None:
             return {"ok": False, "error": "bad token"}
-        # Peer-UID enforcement (S2): when the config names the UIDs allowed
-        # per role, the kernel's credential is ENFORCED — a stolen token from
-        # the wrong OS user is denied and the attempt is ledgered.
+        # Peer-UID enforcement (S2, f-04): the kernel's peer credential is
+        # ENFORCED — a stolen token presented from the wrong OS user is
+        # denied and the attempt is ledgered. This is default-on: an
+        # unconfigured allowlist fails closed instead of silently disabling
+        # enforcement. Set allowed_request_uids / allowed_approve_uids in
+        # spellbook.json (see docs/HUMAN_GUIDE.md §8).
         allowed_key = ("allowed_request_uids" if role == "request"
                        else "allowed_approve_uids")
         allowed = self.cfg.get(allowed_key)
-        if allowed is not None and peer_uid not in allowed:
+        if allowed is None:
+            self.ledger.append(req.get("muse_id", "?"),
+                               _redacted(req).encode(),
+                               None, "denied:uid-allowlist-unconfigured")
+            return {"ok": False,
+                    "error": f"peer UID allowlist not configured: set "
+                             f"{allowed_key!r} in spellbook.json to the OS "
+                             f"UIDs permitted this role"}
+        if peer_uid not in allowed:
             self.ledger.append(req.get("muse_id", "?"),
                                _redacted(req).encode(),
                                None, "denied:uid-not-allowed")
@@ -2524,7 +2543,7 @@ class Daemon:
                    if skipped else ""))
         return selected, total
 
-    def _relay_broadcast_strict(self, rpc, bundle_bytes: bytes) -> str:
+    def _relay_broadcast_strict(self, rpc, bundle_bytes: bytes, network: str) -> str:
         """Broadcast with strict local/relay/peer txid identity.
 
         The bundle txid is deterministically sha256 of its serialized
@@ -2675,7 +2694,7 @@ class Daemon:
             change_ph=recv_ph,
             fee=fee,
         )
-        txid = self._relay_broadcast_strict(rpc, result.bundle_bytes)
+        txid = self._relay_broadcast_strict(rpc, result.bundle_bytes, network)
         if self._offer_load(parsed.offer_id) is not None:
             self._offer_mark(parsed.offer_id, "taken", {"take_txid": txid})
         return {"submitted": True, "tx_hash": txid,
@@ -2731,7 +2750,7 @@ class Daemon:
                                    mc["amount"])
             bundle = chia_offer.cancel_offer(master_sk, network, coin, idx,
                                              change_ph, fee=fee)
-            txid = self._relay_broadcast_strict(rpc, bundle)
+            txid = self._relay_broadcast_strict(rpc, bundle, network)
             self._offer_mark(oid, "cancelled", {"cancel_txid": txid})
             results.append({"offer_id": oid, "tx_hash": txid})
         out = {"submitted": True, "tx_hash": results[0]["tx_hash"],
@@ -5199,6 +5218,53 @@ class Daemon:
                   "purpose": p.get("purpose", "")}
         return self._queue_tx_intent(params, muse_id, "multi_send")
 
+    def _sign_ref_canonical(self, params: dict) -> str:
+        """Canonical params digest a sign ref binds (excludes the ref itself)."""
+        sub = {k: v for k, v in params.items() if k != "human_approval_ref"}
+        return hashlib.sha256(
+            json.dumps(sub, sort_keys=True).encode()).hexdigest()
+
+    def _mint_sign_ref(self, params: dict) -> str:
+        """Mint a daemon-issued approval ref for message_sign params.
+
+        Approve-token route only. Binds the exact canonical params, 5-minute
+        expiry, single-use. The HMAC secret is per-process and never leaves
+        the daemon, so a ref cannot be forged by a request-token holder.
+        """
+        exp = int(time.time()) + 300
+        phash = self._sign_ref_canonical(params)
+        body = f"{exp}.{phash}"
+        sig = hmac.new(self._sign_ref_secret, body.encode(),
+                       hashlib.sha256).hexdigest()
+        return f"sr1.{body}.{sig}"
+
+    def _verify_sign_ref(self, ref: str, params: dict) -> bool:
+        """Verify a daemon-issued sign ref against the request params.
+
+        Fails closed: any malformed, expired, reused, forged, or
+        param-mismatched ref returns False (caller queues normally).
+        """
+        try:
+            parts = ref.split(".")
+            if len(parts) != 4 or parts[0] != "sr1":
+                return False
+            _, exp_s, phash, sig = parts
+            if int(exp_s) < int(time.time()):
+                return False
+            body = f"{exp_s}.{phash}"
+            expect = hmac.new(self._sign_ref_secret, body.encode(),
+                              hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(expect, sig):
+                return False
+            if phash != self._sign_ref_canonical(params):
+                return False
+            if ref in self._used_sign_refs:
+                return False
+            self._used_sign_refs.add(ref)
+            return True
+        except (ValueError, TypeError):
+            return False
+
     def rt_message_sign(self, p: dict, muse_id: str) -> dict:
         fields = set(p)
         if (not fields.issubset(MESSAGE_SIGN_FIELDS) or "chain" not in p
@@ -5305,24 +5371,25 @@ class Daemon:
         # A signature is a capability even though no funds move: it always
         # queues for a human, no amount policy. The approved message and
         # signing identity are re-verified at execution.
-        # Exception: if the agent provides a human_approval_ref (documenting
-        # that the human approved in chat/conversation), execute immediately.
-        # The ref is logged for audit. This supports the agent-as-delegate
-        # model where chat approval is the human's authorization.
+        # f-01: a human_approval_ref executes immediately ONLY when it is a
+        # daemon-issued signed ref (minted via the approve-token-only
+        # mint_sign_ref route) that verifies against these exact params.
+        # A self-asserted ref fails closed: it is ignored and the request
+        # queues normally. The request token alone can never authorize a
+        # signature.
         approval_ref = p.get("human_approval_ref")
-        if approval_ref and isinstance(approval_ref, str) and approval_ref.strip():
-            params["human_approval_ref"] = approval_ref.strip()
+        if (approval_ref and isinstance(approval_ref, str)
+                and self._verify_sign_ref(approval_ref.strip(), params)):
             try:
                 result = self._execute_message_sign(params)
             except Exception as e:
                 return {"ok": False, "error": f"message_sign execution failed: {e}"}
-            # Log the chat-approved execution for audit
             canon = json.dumps(params, sort_keys=True).encode()
             self.ledger.append(muse_id, canon, None,
-                               f"chat-approved:{approval_ref.strip()}")
+                               "chat-approved:verified-ref")
             result["human_approval_ref"] = approval_ref.strip()
             result["note"] = (result.get("note", "") +
-                              f" [human approved via chat: {approval_ref.strip()}]")
+                              " [human approved via verified daemon ref]")
             return {"ok": True, "decision": "executed", **result}
         canon = json.dumps(params, sort_keys=True).encode()
         qid = str(self.next_qid); self.next_qid += 1
@@ -5332,6 +5399,39 @@ class Daemon:
         self.ledger.append(muse_id, canon, None, f"queued:{qid}")
         return {"ok": True, "decision": "queued", "queue_id": qid,
                 "reason": "message signing always requires human approval"}
+
+    def rt_mint_sign_ref(self, p: dict, muse_id: str) -> dict:
+        """Mint a daemon-issued approval ref for a message_sign request.
+
+        Approve-token only. The human's tooling calls this after the human
+        approves in chat/conversation; the returned ref is single-use,
+        expires in 5 minutes, and binds the exact params. The agent then
+        presents it as human_approval_ref to execute immediately.
+        A self-asserted string can never mint a valid ref.
+        """
+        p = p or {}
+        # Canonicalize exactly as rt_message_sign will, so the ref binds.
+        for field in ("chain", "message"):
+            if not p.get(field):
+                return {"ok": False,
+                        "error": f"mint_sign_ref needs {field!r}"}
+        if not p.get("address") and not p.get("public_key"):
+            return {"ok": False,
+                    "error": "mint_sign_ref needs address or public_key"}
+        params = {"intent": "message_sign", "chain": p["chain"],
+                  "message": p["message"],
+                  "sign_type": p.get("sign_type", "personal"),
+                  "purpose": p.get("purpose", "")}
+        if p.get("address"):
+            params["address"] = p["address"]
+        if p.get("public_key"):
+            params["public_key"] = p["public_key"]
+        ref = self._mint_sign_ref(params)
+        canon = json.dumps(params, sort_keys=True).encode()
+        self.ledger.append(muse_id, canon, None, "sign-ref-minted")
+        return {"ok": True, "human_approval_ref": ref,
+                "expires_in": 300,
+                "note": "single-use; present as human_approval_ref within 5 minutes"}
 
     # ----------------------- wallet-local metadata (direct, no queue)
 

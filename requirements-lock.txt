@@ -1,0 +1,25 @@
+# Spellbook crypto dependency lockfile (f-03).
+#
+# Every package here touches signing or key derivation. Versions are pinned
+# exact and each artifact carries its SHA256 hash: install with
+#   pip install --require-hashes -r requirements-lock.txt
+# so a supply-chain swap fails the install instead of landing silently.
+#
+# Bumping any version requires a security review of the new release before
+# it ships (changelog + diff of the signing-relevant code paths).
+#
+# Hashes below are for the reference platform (CPython 3.12, manylinux
+# x86_64). Add hashes for other platforms before shipping multi-arch.
+
+coincurve==21.0.0 \
+    --hash=sha256:1b04778b75339c6e46deb9ae3bcfc2250fbe48d1324153e4310fc4996e135715
+py_ecc==8.0.0 \
+    --hash=sha256:c0b2dfc4bde67a55122a392591a10e851a986d5128f680628c80b405f7663e13
+blspy==2.0.3 \
+    --hash=sha256:903afd454563ce26c6b55c9b11500b688503103f96673e37b8424a1af0a47e96
+pycryptodome==3.23.0 \
+    --hash=sha256:c8987bd3307a39bc03df5c8e0e3d8be0c4c3518b7f044b0f4c15d1aa78f52575
+pynacl==1.6.2 \
+    --hash=sha256:c8a231e36ec2cab018c4ad4358c386e36ede0319a0c41fed24f840b1dac59f6
+solders==0.29.0 \
+    --hash=sha256:00524baf575ae5edb2ba43cdb1d80491c59efdc16b48fec96a6f929c0401d0e4

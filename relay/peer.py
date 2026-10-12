@@ -24,6 +24,8 @@ Message flow
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import logging
 import os
 import socket
@@ -108,11 +110,15 @@ class ChiaPeer:
         session: aiohttp.ClientSession,
         on_coin_states: Optional[Callable[[List[CoinState]], Awaitable[None]]] = None,
         on_peak: Optional[Callable[[int], Awaitable[None]]] = None,
+        cert_pin: Optional[str] = None,
     ) -> None:
         self.host = host
         self.port = port
         self._ssl = ssl_context
         self._network_id = network_id
+        # f-02: expected SHA256 hex of the peer's TLS cert. When set, the
+        # presented cert must match or the connection is dropped.
+        self._cert_pin = cert_pin
         self._session = session
         self._on_coin_states = on_coin_states
         self._on_peak = on_peak
@@ -144,6 +150,31 @@ class ChiaPeer:
     @property
     def label(self) -> str:
         return f"{self.host}:{self.port}"
+
+    def _verify_cert_pin(self) -> None:
+        """f-02: verify the peer's TLS cert against the configured pin.
+
+        Raises HandshakeError on mismatch. Unpinned hosts log a warning;
+        the network_id handshake pin remains the primary authentication.
+        """
+        if not self._cert_pin:
+            log.warning(
+                "%s: no TLS cert pin configured; relying on network_id "
+                "handshake pin only", self.label)
+            return
+        try:
+            # aiohttp internals: reach the underlying SSLObject.
+            transport = self._ws._response.connection.transport  # type: ignore[attr-defined]
+            ssl_obj = transport.get_extra_info("ssl_object")
+            der = ssl_obj.getpeercert(binary_form=True)
+        except Exception as e:  # noqa: BLE001
+            raise HandshakeError(
+                f"{self.label}: could not obtain peer cert: {e}") from e
+        digest = hashlib.sha256(der).hexdigest()
+        if not hmac.compare_digest(digest, self._cert_pin.lower()):
+            raise HandshakeError(
+                f"{self.label}: TLS cert pin mismatch")
+        log.info("%s: TLS cert pin verified", self.label)
 
     # -- lifecycle -------------------------------------------------------
     async def connect(self) -> None:
@@ -196,6 +227,7 @@ class ChiaPeer:
                 "chia does not gate wallets on protocol version",
                 self.label, hs_resp.protocol_version, hs.protocol_version,
             )
+        self._verify_cert_pin()
         log.info("handshake complete with %s (protocol %s)", self.label, hs_resp.protocol_version)
 
     async def close(self) -> None:
@@ -387,6 +419,11 @@ class ManagerConfig:
     fallback_cache_s: float = 60.0
     # Minimum interval between Coinset API calls (client-side rate limit).
     coinset_min_interval_s: float = 2.0
+    # f-02: optional TLS cert pins per peer host: {"host": "sha256 hex"}.
+    # When a pin is configured for a host, the peer's presented cert must
+    # match or the connection is dropped. Unpinned hosts log a warning;
+    # the network_id handshake pin remains the primary peer authentication.
+    peer_cert_pins: dict = field(default_factory=dict)
 
 
 def _coin_state_to_dict(cs: CoinState) -> dict:
@@ -574,6 +611,7 @@ class PeerManager:
                 host, port, self._ssl, self.config.network_id, self._session,
                 on_coin_states=self._ingest_coin_states,
                 on_peak=self._ingest_peak,
+                cert_pin=self.config.peer_cert_pins.get(host),
             )
             try:
                 await peer.connect()

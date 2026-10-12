@@ -62,9 +62,10 @@ spellbook.json (all fields optional unless noted):
                           solana-mainnet additionally need
                           mainnet_submit_enabled. Amounts are lamports
                           (asset "SOL").
-  allowed_request_uids  : [uid, ...] allowed to use the request token (optional —
-                          when set, the kernel peer UID is ENFORCED, not observed)
-  allowed_approve_uids  : [uid, ...] allowed to use the approve token (optional)
+  allowed_request_uids  : [uid, ...] allowed to use the request token (f-04:
+                          default-on — when absent, ALL requests fail closed;
+                          the kernel peer UID is ENFORCED, not observed)
+  allowed_approve_uids  : [uid, ...] allowed to use the approve token (same)
 
 policy.json: the D9 default-off policy knobs, keyed "chain:asset".
 """

@@ -60,14 +60,14 @@ class FakeRelayRpc:
         self.broadcast_result = {"ok": True, "status": 1,
                                  "status_name": "SUCCESS", "error": None}
 
-    def status(self):
+    def status(self, network=None):
         return {"ok": True, "network": "testnet11", "peak_height": 4715326,
                 "peers": [], "peers_connected": 3}
 
-    def coins(self, puzzle_hashes):
+    def coins(self, puzzle_hashes, network=None):
         return list(self.coins_list)
 
-    def broadcast(self, spend_bundle):
+    def broadcast(self, spend_bundle, network=None):
         self.broadcast_body = spend_bundle
         local_txid = hashlib.sha256(bytes.fromhex(spend_bundle)).hexdigest()
         res = dict(self.broadcast_result)
@@ -82,7 +82,7 @@ def env(tmp_path, monkeypatch):
     _write(os.path.join(cfgdir, "seed.key"), TEST_SEED_HEX)
     _write(os.path.join(cfgdir, "request.token"), "11" * 32)
     _write(os.path.join(cfgdir, "approve.token"), "22" * 32)
-    _write(os.path.join(cfgdir, "spellbook.json"), json.dumps({
+    _write(os.path.join(cfgdir, "spellbook.json"), json.dumps({"allowed_request_uids": [os.getuid()], "allowed_approve_uids": [os.getuid()], 
         "seed_path": os.path.join(cfgdir, "seed.key"),
         "labels": ["default"],
         "chia": {
@@ -277,7 +277,7 @@ class TestNativeOfferMake:
         _write(os.path.join(cfgdir, "seed.key"), TEST_SEED_HEX)
         _write(os.path.join(cfgdir, "request.token"), "11" * 32)
         _write(os.path.join(cfgdir, "approve.token"), "22" * 32)
-        _write(os.path.join(cfgdir, "spellbook.json"), json.dumps({
+        _write(os.path.join(cfgdir, "spellbook.json"), json.dumps({"allowed_request_uids": [os.getuid()], "allowed_approve_uids": [os.getuid()], 
             "seed_path": os.path.join(cfgdir, "seed.key"),
             "labels": ["default"],
             "chia": {"network": "testnet11", "fee_mojos": 0},
