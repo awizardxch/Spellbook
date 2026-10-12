@@ -53,14 +53,14 @@ class FakeRelayRpc:
         self.broadcast_txid = None
         self.coin = None
 
-    def status(self):
+    def status(self, network=None):
         return {"ok": True, "network": "testnet11", "peak_height": 4715326,
                 "peers": [], "peers_connected": 3}
 
-    def coins(self, puzzle_hashes):
+    def coins(self, puzzle_hashes, network=None):
         return [self.coin] if self.coin else []
 
-    def broadcast(self, spend_bundle):
+    def broadcast(self, spend_bundle, network=None):
         # The daemon must send the documented field name; the fake speaks
         # the real contract: txids are sha256 of the bundle bytes it
         # received, exactly like relay/server.py computes them.
@@ -85,7 +85,7 @@ def daemon(tmp_path, monkeypatch):
     _write(os.path.join(cfgdir, "seed.key"), TEST_SEED_HEX)
     _write(os.path.join(cfgdir, "request.token"), "11" * 32)
     _write(os.path.join(cfgdir, "approve.token"), "22" * 32)
-    _write(os.path.join(cfgdir, "spellbook.json"), json.dumps({
+    _write(os.path.join(cfgdir, "spellbook.json"), json.dumps({"allowed_request_uids": [os.getuid()], "allowed_approve_uids": [os.getuid()], 
         "seed_path": os.path.join(cfgdir, "seed.key"),
         "labels": ["default"],
         "chia": {
@@ -114,12 +114,12 @@ def _make_daemon_with_chia_cfg(tmp_path, monkeypatch, chia_cfg):
     _write(os.path.join(cfgdir, "seed.key"), TEST_SEED_HEX)
     _write(os.path.join(cfgdir, "request.token"), "11" * 32)
     _write(os.path.join(cfgdir, "approve.token"), "22" * 32)
-    _write(os.path.join(cfgdir, "spellbook.json"), json.dumps({
+    _write(os.path.join(cfgdir, "spellbook.json"), json.dumps({"allowed_request_uids": [os.getuid()], "allowed_approve_uids": [os.getuid()], 
         "seed_path": os.path.join(cfgdir, "seed.key"),
         "labels": ["default"],
         "chia": chia_cfg,
     }))
-    _write(os.path.join(cfgdir, "policy.json"), json.dumps({}))
+    _write(os.path.join(cfgdir, "policy.json"), json.dumps({"allowed_request_uids": [os.getuid()], "allowed_approve_uids": [os.getuid()], }))
     _write(os.path.join(cfgdir, "ledger.jsonl"), "")
     created = []
     behaviors = {}
@@ -195,7 +195,7 @@ class TestRelayTransportSelection:
 
         def factory(url, token="", token_provider=None, timeout=60):
             fake = FakeRelayRpc(url, token)
-            fake.status = lambda: dict(mainnet_fake_status)
+            fake.status = lambda network=None: dict(mainnet_fake_status)
             for k, v in behaviors.get(url, {}).items():
                 setattr(fake, k, v)
             created.append(fake)
@@ -243,7 +243,7 @@ class TestRelayTransportSelection:
 
         def factory(url, token="", token_provider=None, timeout=60):
             fake = FakeRelayRpc(url, token)
-            fake.status = lambda: {"ok": True, "network": "mainnet",
+            fake.status = lambda network=None: {"ok": True, "network": "mainnet",
                                    "peak_height": 1, "peers": [],
                                    "peers_connected": 1}
             created.append(fake)
@@ -422,7 +422,7 @@ class TestAuditFixes20260921:
 
         def factory(url, token="", token_provider=None, timeout=60):
             fake = FakeRelayRpc(url, token)
-            fake.status = lambda: {"ok": True, "network": "mainnet",
+            fake.status = lambda network=None: {"ok": True, "network": "mainnet",
                                    "peak_height": 1, "peers": [],
                                    "peers_connected": 1}
             for k, v in behaviors.get(url, {}).items():
@@ -530,7 +530,7 @@ def _daemon_with_token(tmp_path, monkeypatch, token_value):
     _write(os.path.join(cfgdir, "seed.key"), TEST_SEED_HEX)
     _write(os.path.join(cfgdir, "request.token"), "11" * 32)
     _write(os.path.join(cfgdir, "approve.token"), "22" * 32)
-    _write(os.path.join(cfgdir, "spellbook.json"), json.dumps({
+    _write(os.path.join(cfgdir, "spellbook.json"), json.dumps({"allowed_request_uids": [os.getuid()], "allowed_approve_uids": [os.getuid()], 
         "seed_path": os.path.join(cfgdir, "seed.key"),
         "labels": ["default"],
         "chia": {

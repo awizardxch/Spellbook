@@ -6,6 +6,7 @@ contract_deploy, contract_call, contract_call_view.
 - Daemon tests reuse the fake-Rpc pattern from test_daemon.py: no network.
 """
 import json
+import os
 import sys
 
 import pytest
@@ -178,6 +179,8 @@ def _daemon(tmp_path, monkeypatch, policy_extra=None, rpc_cls=None):
     (tmp_path / "seed.key").write_text(seed_hex)
     (tmp_path / "seed.key").chmod(0o600)
     cfg = {"seed_path": str(tmp_path / "seed.key"),
+           "allowed_request_uids": [os.getuid()],
+           "allowed_approve_uids": [os.getuid()],
            "evm": {"chains": {"evm-46630": {"enabled": True,
                                             "rpc_url": "http://fake"}}}}
     policy = {"auto_approve_below": {"evm-46630:native": 10 ** 30}}

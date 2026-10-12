@@ -177,8 +177,11 @@ def make_peer_ssl_context(cert_path: Path, key_path: Path):
     """Client TLS context for Chia peers.
 
     Presents our shared-CA-signed cert (required: nodes run CERT_REQUIRED).
-    Does NOT verify the peer's certificate — peer authentication is the
-    handshake network_id pin in peer.py, not TLS.
+    Does NOT verify the peer's certificate against a CA — Chia full nodes
+    use self-signed certs. Peer authentication is the handshake network_id
+    pin in peer.py, with optional TLS cert pinning via
+    ManagerConfig.peer_cert_pins (f-02): when a pin is configured for a
+    host, ChiaPeer._verify_cert_pin drops the connection on mismatch.
     """
     import ssl  # noqa: PLC0415
 

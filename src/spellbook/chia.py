@@ -113,9 +113,15 @@ class SageRpc:
                     f"running with this data dir?")
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.check_hostname = False
-        # Self-signed cert shared between client and server; trust is the
-        # daemon-owned data dir, not a CA. No hostname to check on loopback.
-        ctx.verify_mode = ssl.CERT_NONE
+        # f-02: the Sage server cert is self-signed; pin it as the trust
+        # anchor instead of trusting whoever answers the port. The daemon
+        # owns the data dir, so the cert file itself is the root of trust.
+        # No hostname to check on loopback.
+        ctx.verify_mode = ssl.CERT_REQUIRED
+        try:
+            ctx.load_verify_locations(cafile=crt)
+        except Exception as e:
+            raise SageError(f"could not load Sage server cert as trust anchor: {e}") from e
         try:
             ctx.load_cert_chain(certfile=crt, keyfile=key)
         except Exception as e:

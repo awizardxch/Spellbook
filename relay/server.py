@@ -611,6 +611,23 @@ async def handle_broadcasts(request: web.Request) -> web.Response:
 # App wiring
 # ---------------------------------------------------------------------------
 
+def _peer_cert_pins_from_env() -> dict:
+    """f-02: parse RELAY_PEER_CERT_PINS JSON into {host: sha256 hex}."""
+    import json as _json
+    raw = os.environ.get("RELAY_PEER_CERT_PINS", "").strip()
+    if not raw:
+        return {}
+    try:
+        pins = _json.loads(raw)
+    except ValueError:
+        log.warning("RELAY_PEER_CERT_PINS is not valid JSON; ignoring")
+        return {}
+    if not isinstance(pins, dict):
+        log.warning("RELAY_PEER_CERT_PINS must be a JSON object; ignoring")
+        return {}
+    return {str(h): str(v).lower() for h, v in pins.items()}
+
+
 async def on_startup(app: web.Application) -> None:
     import aiohttp  # noqa: PLC0415
 
@@ -644,6 +661,9 @@ async def on_startup(app: web.Application) -> None:
             ],
             fallback_cache_s=float(os.environ.get("RELAY_FALLBACK_CACHE_S", "60")),
             coinset_min_interval_s=float(os.environ.get("RELAY_COINSET_MIN_INTERVAL_S", "2.0")),
+            # f-02: optional TLS cert pins per peer host (RELAY_PEER_CERT_PINS
+            # JSON). Unpinned hosts log a warning at connect.
+            peer_cert_pins=_peer_cert_pins_from_env(),
         )
         manager = PeerManager(mgr_cfg, ssl_ctx, state.session)
         await manager.start()
