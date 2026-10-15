@@ -76,6 +76,12 @@ APPROVE_ROUTES = {
     # uncancellable: the human (approve token) decides deletes.
     "offer_delete",
 }
+# Intents that never auto-approve, whatever auto_approve_below says. Policy
+# caps still deny them; a human always sees them. offer_cancel and
+# message_sign queue on their own routes; these go through _run_fund_intent.
+ALWAYS_QUEUE_INTENTS = {
+    "option_exercise", "option_transfer", "did_transfer", "nft_assign_did",
+}
 
 # v1 transfer schema — plain transfers only (S13). Unknown fields are
 # rejected; anything shaped like a contract call is denied, not coerced.
@@ -409,6 +415,16 @@ def _summary_legs(summary: dict, side: str) -> list:
             raise chia.SageError("offer leg amount must be positive")
         out.append((asset, amount))
     return out
+
+
+def _merge_legs(legs: list) -> list:
+    """Sum [(asset, amount)] per asset, first-seen order. Policy evaluates
+    one entry per asset so the per-spend and velocity caps see the total
+    the wallet spends, never a split."""
+    totals: dict = {}
+    for asset, amount in legs:
+        totals[asset] = totals.get(asset, 0) + amount
+    return list(totals.items())
 
 
 def _redacted(req: dict) -> str:
@@ -3286,7 +3302,14 @@ class Daemon:
         return out
 
     def _execute_option_exercise_via_sage(self, params: dict) -> dict:
-        """Exercise approved options via Sage RPC (on-chain)."""
+        """Exercise approved options via Sage RPC (on-chain).
+
+        The strike legs the human approved are re-read from Sage here and
+        must match exactly — an option whose strike no longer reads the
+        same is refused (the approved intent is what executes, nothing
+        else). A queued intent without strike legs predates this check
+        and is refused outright.
+        """
         rpc, fee = self._tx_intent_rpc(params)
         ids = self._validated_option_ids(params)
         owned = self._owned_option_ids(rpc)
@@ -3294,6 +3317,17 @@ class Daemon:
             if i not in owned:
                 raise chia.SageError(
                     f"option {i[:16]}… is not in this wallet — refusing")
+        want = params.get("_strike")
+        if not isinstance(want, list):
+            raise chia.SageError(
+                "option_exercise intent carries no approved strike legs — "
+                "refusing; re-request so the strike is judged by policy")
+        now = self._option_strike_legs(rpc, ids)
+        if sorted(now) != sorted((it["asset"], it["amount_mojos"])
+                                 for it in want):
+            raise chia.SageError(
+                "option strike changed since approval — refusing to "
+                "exercise")
         t0 = time.time()
         res = rpc.exercise_options(ids, fee_mojos=fee,
                                    auto_submit=True)
@@ -4579,6 +4613,30 @@ class Daemon:
             value = params.get("value_wei", 0)
             return [(chain, "native", value)] if value else []
         fee = params.get("fee_mojos", 0)
+        if intent == "option_exercise":
+            # The strike is paid to the option's creator (Sage
+            # exercise_options settles it to creator_puzzle_hash): one give
+            # leg per strike asset, read from Sage at request time and
+            # re-verified at execution. The exercised option singleton
+            # itself is a non-fungible move, counted as its own entry.
+            legs = [("native", fee)] if fee else []
+            for leg in params.get("_strike") or []:
+                legs.append((leg["asset"], leg["amount_mojos"]))
+            for oid in params.get("option_ids") or []:
+                legs.append((f"option:{oid}", 1))
+            return [(chain, a, m) for a, m in _merge_legs(legs)]
+        if intent in ("option_transfer", "did_transfer", "nft_assign_did"):
+            # Non-fungible moves are never a zero-value fee: each singleton
+            # that changes hands (or ownership binding) is its own entry.
+            prefix = {"option_transfer": "option", "did_transfer": "did",
+                      "nft_assign_did": "nft"}[intent]
+            id_key = {"option_transfer": "option_ids",
+                      "did_transfer": "did_ids",
+                      "nft_assign_did": "nft_ids"}[intent]
+            legs = [("native", fee)] if fee else []
+            for i in params.get(id_key) or []:
+                legs.append((f"{prefix}:{i}", 1))
+            return [(chain, a, m) for a, m in _merge_legs(legs)]
         if intent == "option_mint":
             leg = params.get("underlying") or {}
             aid = leg.get("asset_id")
@@ -4611,10 +4669,10 @@ class Daemon:
         asset = params.get("asset", "native")
         amount = params.get("amount_mojos", params.get("amount_wei",
                             params.get("amount_lamports")))
-        if intent in ("nft_mint", "nft_assign_did", "did_create",
-                      "did_transfer", "did_normalize", "option_transfer",
-                      "option_exercise", "cat_issue", "clawback_finalize",
-                      "coin_combine", "coin_split", "coin_autocombine"):
+        if intent in ("nft_mint", "did_create", "did_normalize", "cat_issue",
+                      "clawback_finalize", "coin_combine", "coin_split",
+                      "coin_autocombine"):
+            # Creations and self-to-self coin ops: only the fee leaves.
             return [(chain, "native", fee)]
         return [(chain, asset, amount)]
 
@@ -4641,6 +4699,14 @@ class Daemon:
                                "contract action — human approval required")
         else:
             verdict, reason = self._decide_fund_intent(entries)
+        if verdict == "approved" and params.get("intent") in ALWAYS_QUEUE_INTENTS:
+            # Policy caps still deny; they never auto-approve these. An
+            # option exercise pays the strike to whoever minted the option,
+            # and option/DID/NFT moves hand singletons to any destination —
+            # a human sees every one of them.
+            verdict, reason = ("queued",
+                               f"{params['intent']} always requires human "
+                               "approval")
         if verdict == "queued":
             qid = str(self.next_qid); self.next_qid += 1
             self.queue[qid] = {"params": params, "muse_id": muse_id,
@@ -5112,12 +5178,58 @@ class Daemon:
             return err
         try:
             ids = self._validated_option_ids(p)
+            # Exercising pays each option's strike to its creator. Read the
+            # strike (asset + amount) from Sage now so policy judges it as
+            # a give leg and the human sees it in the queue; execution
+            # re-reads and refuses on any change.
+            rpc, _, _ = self._chia_sage_rpc(p["chain"])
+            strike = self._option_strike_legs(rpc, ids)
         except chia.SageError as e:
             return {"ok": False, "error": str(e)}
         params = {"intent": "option_exercise", "chain": p["chain"],
                   "option_ids": ids, "fee_mojos": self._fee_of(p),
-                  "purpose": p.get("purpose", "")}
+                  "purpose": p.get("purpose", ""),
+                  "_strike": [{"asset": a, "amount_mojos": m}
+                              for a, m in strike]}
         return self._queue_tx_intent(params, muse_id, "option_exercise")
+
+    @staticmethod
+    def _option_strike_legs(rpc, option_ids: list) -> list:
+        """[(asset, amount)] the wallet pays to exercise `option_ids`,
+        merged per asset, from Sage's OptionRecord (strike_asset,
+        strike_amount). Every option must be in this wallet; a strike in
+        anything but XCH or a CAT is refused (policy cannot price it)."""
+        by_id = {}
+        for o in rpc.get_options(offset=0, limit=1000):
+            if isinstance(o, dict) and o.get("launcher_id"):
+                by_id[str(o["launcher_id"])] = o
+        legs = []
+        for oid in option_ids:
+            rec = by_id.get(oid)
+            if rec is None:
+                raise chia.SageError(
+                    f"option {oid[:16]}… is not in this wallet — refusing")
+            sa = rec.get("strike_asset") or {}
+            kind = sa.get("kind") or "token"
+            if kind != "token":
+                raise chia.SageError(
+                    f"option {oid[:16]}… strike is a {kind!r} asset — "
+                    "refusing (only XCH/CAT strikes are supported)")
+            aid = sa.get("asset_id")
+            asset = "native" if not aid else str(aid).lower()
+            if asset != "native" and not _HEX64.fullmatch(asset):
+                raise chia.SageError(
+                    f"option {oid[:16]}… has a malformed strike asset id")
+            try:
+                amount = chia.amount_to_int(rec.get("strike_amount"))
+            except chia.SageError as e:
+                raise chia.SageError(
+                    f"option {oid[:16]}… has a bad strike amount: {e}") from e
+            if amount <= 0:
+                raise chia.SageError(
+                    f"option {oid[:16]}… reports a non-positive strike")
+            legs.append((asset, amount))
+        return _merge_legs(legs)
 
     def rt_cat_issue(self, p: dict, muse_id: str) -> dict:
         fields = set(p)
@@ -5917,6 +6029,10 @@ class Daemon:
                             "address", "public_key", "message", "sign_type"):
                     if p.get(key) is not None:
                         detail[key] = p[key]
+                if p.get("_strike") is not None:
+                    # What exercising pays (to the option creator), per
+                    # asset — the human approves the strike, not just ids.
+                    detail["strike_legs"] = p["_strike"]
                 entry.update(detail)
             out.append(entry)
         return out

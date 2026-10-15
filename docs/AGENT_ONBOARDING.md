@@ -67,6 +67,11 @@ It provisions:
   Chia call says the wallet is "not provisioned", ask your human to run the
   command it names.
 
+Intents that always wait for the human, whatever `auto_approve_below`
+says: `offer_cancel`, `message_sign`, `option_exercise` (its strike is
+counted as a spend in the strike asset), `option_transfer`,
+`did_transfer`, `nft_assign_did`.
+
 Client:
 
 ```python
