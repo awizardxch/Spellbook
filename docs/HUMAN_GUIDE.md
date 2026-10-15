@@ -20,10 +20,12 @@ Two things, both delivered to you at install, out-of-band:
   token ever lands in your agent's environment, logs, or chat, say so
   immediately and re-provision — an agent that can approve its own spends
   is not a Spellbook agent.
-- **The paper backup**: two 24-word mnemonic sets, printed once on the
-  install terminal, never logged. Write both down on paper, offline, two
-  copies in two places, then confirm receipt and have your agent drop the
-  words from its context. SET 1 imports into stock wallets (Sage,
+- **The paper backup**: two 24-word mnemonic sets. The installer never
+  prints them. `sudo spellbook export` shows them on your own terminal
+  (then clears the screen and asks for 3 words back); if you can only
+  reach your agent, the seal ceremony page decrypts an envelope your agent
+  relays without ever seeing the words. Write both down on paper,
+  offline, two copies in two places. SET 1 imports into stock wallets (Sage,
   MetaMask); SET 2 recovers through the Spellbook daemon only.
 - **The seal password** (you choose it; see [SEALED_SEED.md](SEALED_SEED.md)).
   It locks a copy of the seed that survives your agent's VM being wiped.

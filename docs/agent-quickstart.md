@@ -91,7 +91,7 @@ exists. Read it through the API — never the file (P6).
 
 ```bash
 export SPELLBOOK_SOCKET=/run/spellbook/spellbook.sock
-export SPELLBOOK_REQUEST_TOKEN=<hex>   # your token, not the human's
+export SPELLBOOK_REQUEST_TOKEN_FILE=/etc/spellbook/request.token   # a path; the token stays in the file
 spellbook status
 spellbook queue
 spellbook addresses

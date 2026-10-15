@@ -3,6 +3,7 @@
 
 Request-token commands (the agent's side):
   spellbook status | queue | ledger | addresses
+  spellbook sign-dashboard-challenge --challenge <str>   # dashboard login (§8)
   spellbook doctor [--repair]            # read-only install health, self-repair
   spellbook version                      # local vs daemon version
   spellbook upgrade --check              # latest release vs local
@@ -26,9 +27,19 @@ Approve-token commands (the human's own tooling — separate device per O5):
   spellbook approve <queue_id>
   spellbook reject <queue_id>
 
+Paper backup, no socket, no token (S3; review S-05):
+  spellbook export [--prefix /opt/spellbook]
+    HUMAN at a terminal: shows the two 24-word sets (never raw keys) on
+    /dev/tty once, waits for Enter, clears the screen, then asks for 3
+    SET 1 words back. Refuses without a TTY and refuses the agent's OS
+    user. Run it as root or the spellbook user: `sudo spellbook export`.
+  spellbook export --reveal-key <b64 SPKI> [--prefix /opt/spellbook]
+    the seal ceremony (ceremony/seal-password-encryptor.html Steps 1-2):
+    prints only an envelope encrypted to the human's reveal key.
+
 Token resolution per subcommand:
-  request side: --token-file, else $SPELLBOOK_REQUEST_TOKEN
-  approve side: --token-file, else $SPELLBOOK_APPROVE_TOKEN
+  request side: --token-file, else $SPELLBOOK_REQUEST_TOKEN_FILE, else $SPELLBOOK_REQUEST_TOKEN
+  approve side: --token-file, else $SPELLBOOK_APPROVE_TOKEN_FILE, else $SPELLBOOK_APPROVE_TOKEN
 Socket: --socket, else $SPELLBOOK_SOCKET (default /run/spellbook/spellbook.sock)
 """
 import argparse
@@ -41,13 +52,22 @@ from spellbook.client import AgentClient, HumanClient, SpellbookError
 DEFAULT_SOCKET = "/run/spellbook/spellbook.sock"
 
 
+def _token_path(args, env_name: str) -> str:
+    # --token-file, else $<ENV>_FILE (a 0600 file — what the installer
+    # writes for the agent, review S-05).
+    return args.token_file or os.environ.get(env_name + "_FILE", "").strip()
+
+
 def _token(args, env_name: str) -> str:
-    if args.token_file:
-        with open(args.token_file) as f:
+    path = _token_path(args, env_name)
+    if path:
+        with open(path) as f:
             return f.read().strip()
     tok = os.environ.get(env_name, "").strip()
     if not tok:
-        raise SystemExit(f"no token: pass --token-file or set ${env_name}")
+        raise SystemExit(
+            f"no token: pass --token-file, or set ${env_name}_FILE (preferred) "
+            f"or ${env_name}")
     return tok
 
 
@@ -79,6 +99,10 @@ def cmd_addresses(a, client):
     _show(client.addresses())
 
 
+def cmd_sign_dashboard_challenge(a, client):
+    _show(client.sign_dashboard_challenge(a.challenge))
+
+
 # ---------------------------------------------------------------- lifecycle:
 # version / upgrade / doctor (SPEC §12b item 4). These are local-first: they
 # never need the approve token, and version/upgrade --check work with no
@@ -88,6 +112,13 @@ def _optional_token(a, env_name: str):
     if a.token_file:
         with open(a.token_file) as f:
             return f.read().strip()
+    path = _token_path(a, env_name)
+    if path:
+        try:
+            with open(path) as f:
+                return f.read().strip() or None
+        except OSError:
+            return None
     return os.environ.get(env_name, "").strip() or None
 
 
@@ -618,6 +649,18 @@ def cmd_option_update(a, client: AgentClient):
                                visible=not a.hidden))
 
 
+def cmd_sage_provision(a):
+    """One-time, human-run: start Sage, pin its server certificate into
+    spellbook.json (chia.sage_cert_fingerprint) and import the daemon's
+    key when Sage does not hold it yet. Runs as the daemon user against
+    the config dir — no socket, no token. The daemon itself never imports
+    keys at runtime; it only logs in by fingerprint."""
+    from spellbook.daemon import Daemon
+    d = Daemon(a.config_dir)
+    out = d.sage_provision(a.chain)
+    _show(out)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="spellbook")
     ap.add_argument("--socket")
@@ -625,12 +668,39 @@ def main(argv=None):
     ap.add_argument("--muse-id")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
+    sp = sub.add_parser(
+        "sage-provision",
+        help="one-time: pin Sage's cert and import the daemon key "
+             "(run as the daemon user; the daemon never imports at runtime)")
+    sp.add_argument("--config-dir", required=True)
+    sp.add_argument("--chain", default="chia-testnet")
+
     status_p = sub.add_parser("status")
     status_p.add_argument("--balances", action="store_true",
                           help="include live on-chain balances (slow; can exceed the client timeout)")
     sub.add_parser("queue")
     sub.add_parser("ledger")
     sub.add_parser("addresses")
+
+    sd = sub.add_parser(
+        "sign-dashboard-challenge",
+        help="have the daemon sign a dashboard login challenge "
+             "(docs/AGENT_ONBOARDING.md §8); the seed stays in the daemon")
+    sd.add_argument("--challenge", required=True,
+                    help="the exact string from GET /api/auth/challenge")
+
+    ex = sub.add_parser(
+        "export",
+        help="the paper backup: on a terminal for the human (refuses pipes "
+             "and the agent's user), or encrypted to a ceremony reveal key")
+    ex.add_argument("--prefix", default="/opt/spellbook",
+                    help="the daemon's config dir (default /opt/spellbook)")
+    ex.add_argument("--reveal-key", default=None,
+                    help="base64 SPKI public key from the seal ceremony page "
+                         "(Step 1); '-' reads it from stdin. Prints only the "
+                         "encrypted envelope.")
+    ex.add_argument("--no-verify", action="store_true",
+                    help="terminal mode: skip the 3-word SET 1 check")
 
     # Lifecycle (SPEC §12b item 4): local-first, no approve token ever.
     sub.add_parser("version")
@@ -1033,6 +1103,20 @@ def main(argv=None):
 
     a = ap.parse_args(argv)
 
+    if a.cmd == "sage-provision":
+        try:
+            cmd_sage_provision(a)
+        except Exception as e:  # SageError, config errors — fail loudly
+            raise SystemExit(f"spellbook sage-provision: {e}")
+        return
+    if a.cmd == "export":
+        from spellbook.export import run_export
+        reveal = a.reveal_key
+        if reveal == "-":
+            reveal = sys.stdin.read()
+        raise SystemExit(run_export(a.prefix, reveal_key=reveal,
+                                    verify=not a.no_verify))
+
     try:
         if a.cmd in ("version", "upgrade", "doctor", "dex-quote", "cast"):
             # Lifecycle + read-only commands are local-first and never take
@@ -1057,6 +1141,7 @@ def main(argv=None):
                                                muse_id=_muse_id(a))
             {"status": cmd_status, "queue": cmd_queue, "ledger": cmd_ledger,
              "addresses": cmd_addresses, "request-spend": cmd_request_spend,
+             "sign-dashboard-challenge": cmd_sign_dashboard_challenge,
              "dex-swap": cmd_dex_swap, "dex-lp-add": cmd_dex_lp_add,
              "dex-lp-remove": cmd_dex_lp_remove,
              "dex-lp-claim": cmd_dex_lp_claim,

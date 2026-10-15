@@ -15,7 +15,8 @@ spend queue, 24h velocity accounting rebuilt from disk, the §2 KDF
 addresses, EVM testnet submission (build/sign/broadcast with pre-broadcast
 verification; mainnet refuses without explicit config), live EVM balances,
 Chia/XCH submission via Sage RPC (daemon-spawned `sage rpc start`, local
-mTLS, key import with local fingerprint verification, testnet11;
+mTLS with the server certificate pinned, login by a locally derived
+fingerprint after one-time `spellbook sage-provision`, testnet11;
 chia-mainnet refuses without the explicit flag), live XCH balances, and
 Ed25519 identity signing behind the S1 gate (Option B adopted).
 
@@ -43,14 +44,37 @@ from spellbook import version as version_mod
 from spellbook.config import load_config, load_policy
 from spellbook.ledger import Ledger
 from spellbook.policy import evaluate
-from spellbook.seed import load_seed
+from spellbook.seed import header_lines, load_seed
+from spellbook import seedrole
 from spellbook import tokens as token_auth
 from spellbook import dex as dex_mod
 from spellbook import abi as abi_mod
 
+
+class DashboardSignWindow:
+    """Sliding one-minute cap for sign_dashboard_challenge (pure, testable)."""
+
+    def __init__(self, per_minute: int, clock=time.monotonic):
+        if (isinstance(per_minute, bool) or not isinstance(per_minute, int)
+                or per_minute < 1):
+            raise ValueError("per_minute must be a positive integer")
+        self.per_minute = per_minute
+        self._clock = clock
+        self._stamps: list[float] = []
+
+    def allow(self) -> bool:
+        now = self._clock()
+        self._stamps = [t for t in self._stamps if now - t < 60.0]
+        if len(self._stamps) >= self.per_minute:
+            return False
+        self._stamps.append(now)
+        return True
+
+
 REQUEST_ROUTES = {
     "request_spend", "queue_read", "status", "addresses", "doctor",
-    "ledger_read", "sign_musebook_request", "chia_read",
+    "ledger_read", "sign_musebook_request", "sign_dashboard_challenge",
+    "chia_read",
     "offer_make", "offer_take", "offer_cancel",
     "offer_import", "offer_combine",
     "nft_mint", "nft_update", "nft_collection_update", "nft_redownload",
@@ -74,6 +98,12 @@ APPROVE_ROUTES = {
     # wild, so a requester must not be able to make a live offer
     # uncancellable: the human (approve token) decides deletes.
     "offer_delete",
+}
+# Intents that never auto-approve, whatever auto_approve_below says. Policy
+# caps still deny them; a human always sees them. offer_cancel and
+# message_sign queue on their own routes; these go through _run_fund_intent.
+ALWAYS_QUEUE_INTENTS = {
+    "option_exercise", "option_transfer", "did_transfer", "nft_assign_did",
 }
 
 # v1 transfer schema — plain transfers only (S13). Unknown fields are
@@ -304,6 +334,7 @@ def _validate_offer_legs(items, side: str) -> list:
     if not isinstance(items, list) or not items:
         raise chia.SageError(f"offer {side} must be a non-empty list")
     out = []
+    seen = set()
     for it in items:
         if not isinstance(it, dict):
             raise chia.SageError(f"offer {side} leg must be an object")
@@ -313,16 +344,24 @@ def _validate_offer_legs(items, side: str) -> list:
             kind, ref = chia_asset_kind(asset)
         except chia.SageError as e:
             raise chia.SageError(f"offer {side}: {e}") from e
-        if not isinstance(amount, int) or amount <= 0:
+        if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
             raise chia.SageError(
                 f"offer {side}: amount_mojos must be a positive integer")
         if kind == "nft":
             if amount != 1:
                 raise chia.SageError(
                     f"offer {side}: NFT legs must have amount_mojos 1")
-            out.append((f"nft:{ref}", amount))
+            leg = (f"nft:{ref}", amount)
         else:
-            out.append((asset if kind == "native" else ref, amount))
+            leg = (asset if kind == "native" else ref, amount)
+        # Sage sums duplicate legs; policy would judge each alone. Refuse
+        # the split at request time, on the native and the Sage path.
+        if leg[0] in seen:
+            raise chia.SageError(
+                f"offer {side}: asset {leg[0][:20]}… listed twice — "
+                "merge the legs")
+        seen.add(leg[0])
+        out.append(leg)
     return out
 
 
@@ -374,20 +413,36 @@ def _resolve_nft_launcher(rpc, ref: str) -> str | None:
 def _summary_legs(summary: dict, side: str) -> list:
     """Convert a Sage OfferSummary's maker/taker legs to [(asset, amount)].
 
-    Sage's summary uses {"asset": {"asset_id": <hex>|null,
-    "kind": "token"|"nft"|...}, "amount": ...}; asset_id null means XCH.
-    NFT legs come back as "nft:<launcher-id>". DID/option legs raise —
-    offers only carry fungible and NFT legs.
+    Sage's summary (sage/src/utils/offer_summary.rs) uses
+    {"asset": {"asset_id": <hex>|null, "kind": "token"|"nft"|"did"|
+    "option"}, "amount", "royalty", "nft_royalty", "option_assets"};
+    asset_id null means XCH. NFT legs come back as "nft:<launcher-id>".
+
+    Policy must see everything the wallet spends, so:
+      - on the "taker" side (what WE pay when taking) the `royalty` Sage
+        reports for the asset — the NFT royalty the taker also pays, up to
+        655.35 % — is added to the leg's amount in the same asset;
+      - a leg with `option_assets`, or any kind other than token/nft
+        (DID and option singletons), raises: policy cannot price them;
+      - the same asset twice raises: Sage sums duplicates, policy never
+        sees a leg twice.
     """
     legs = summary.get(side)
     if not isinstance(legs, list):
         raise chia.SageError(f"offer summary has no {side!r} legs: "
                              f"{str(summary)[:200]}")
     out = []
+    seen = set()
     for leg in legs:
-        a = (leg or {}).get("asset") or {}
+        if not isinstance(leg, dict):
+            raise chia.SageError("offer leg must be an object")
+        a = leg.get("asset") or {}
         kind = (a.get("kind") or "token")
         asset_id = a.get("asset_id")
+        if leg.get("option_assets") is not None:
+            raise chia.SageError(
+                "offer leg carries option_assets — option legs are not "
+                "supported in offers")
         if kind == "nft":
             if not asset_id or not _HEX64.fullmatch(str(asset_id)):
                 raise chia.SageError(
@@ -402,12 +457,59 @@ def _summary_legs(summary: dict, side: str) -> list:
                 f"offer leg kind {kind!r} not supported")
         try:
             amount = chia.amount_to_int(leg.get("amount"))
+            royalty = chia.amount_to_int(leg.get("royalty", 0) or 0)
         except chia.SageError as e:
             raise chia.SageError(f"bad offer leg amount: {e}") from e
+        if amount < 0 or royalty < 0:
+            raise chia.SageError("offer leg amount must not be negative")
+        if side == "taker":
+            # What we pay: the leg plus the royalty Sage adds for it.
+            amount += royalty
         if amount <= 0:
             raise chia.SageError("offer leg amount must be positive")
+        if asset in seen:
+            raise chia.SageError(
+                f"offer {side} names {asset[:20]}… twice — refusing")
+        seen.add(asset)
         out.append((asset, amount))
     return out
+
+
+def _merge_legs(legs: list) -> list:
+    """Sum [(asset, amount)] per asset, first-seen order. Policy evaluates
+    one entry per asset so the per-spend and velocity caps see the total
+    the wallet spends, never a split."""
+    totals: dict = {}
+    for asset, amount in legs:
+        totals[asset] = totals.get(asset, 0) + amount
+    return list(totals.items())
+
+
+def _plain_transfer_asset(chain: str, asset) -> str:
+    """The one policy/velocity key for a plain EVM or Solana transfer.
+
+    The EVM and Solana transfer executors send only the chain's native
+    coin; they never read `asset`. So `asset` must name that native coin,
+    or a token-shaped label (e.g. a token address that also keys DEX
+    policy) would be judged under the token's limits while native coin
+    leaves the wallet. EVM: "native". Solana: "SOL" (the documented
+    label) or "native" (the request default), kept as given so existing
+    policy keys still match. Raises ValueError otherwise.
+    """
+    if chain in solana_mod.NETWORKS:
+        if asset in ("SOL", "native"):
+            return asset
+        raise ValueError(
+            f"asset {asset!r} is not supported on {chain}: plain transfers "
+            "send native SOL only (asset \"SOL\")")
+    if chain in evm.CHAINS:
+        if asset == "native":
+            return "native"
+        raise ValueError(
+            f"asset {asset!r} is not supported on {chain}: plain transfers "
+            "send the native coin only (asset \"native\"); token transfers "
+            "have no execution path")
+    return asset
 
 
 def _redacted(req: dict) -> str:
@@ -423,7 +525,7 @@ def _atomic_write_json(path: str, obj):
         f.flush()
         os.fsync(f.fileno())
     os.chmod(tmp, 0o600)
-    os.rename(tmp, path)
+    os.replace(tmp, path)  # atomic on POSIX; also overwrites on Windows
 
 
 def _refuse_if_locked(seed_path: str, std_seed_path: str | None):
@@ -485,6 +587,19 @@ class Daemon:
                 self.cfg.get("std_seed_path")
                 if self.cfg.get("key_derivation") == "standard" else None)
         self.seed = load_seed(seed_path) if seed_path else None
+        # S-04 / S1: under key_derivation=kdf this seed is the wallet root
+        # for every chain. If it is also a Musebook identity seed, whoever
+        # holds the identity holds the wallet offline and this daemon is
+        # decoration. Refuse to start unless the operator opted in
+        # explicitly (allow_identity_seed_as_wallet_root, documented
+        # unsafe). Only the file's `#` header lines are inspected here —
+        # never the hex. The key derivation itself is unchanged (S1 open).
+        seed_file_headers = None
+        if seed_path:
+            with open(seed_path) as f:
+                seed_file_headers = header_lines(f.read())
+        self.identity_seed_markers = seedrole.check_wallet_root(
+            self.cfg, seed_file_headers)
         # Standard-recovery wallet (SPEC §2b): the 64-byte BIP-39 seed whose
         # keys derive the way stock wallets do (Sage / MetaMask). Required
         # exactly when key_derivation == "standard" — the daemon refuses to
@@ -514,6 +629,9 @@ class Daemon:
             self._identity_key = SigningKey(self.seed)
         else:
             self._identity_key = None
+        # sign_dashboard_challenge rate cap: a sliding one-minute window.
+        self._dashboard_sign_window = DashboardSignWindow(
+            self.cfg.get("dashboard_sign_per_minute", 30))
         # EVM chain wiring (SPEC §10): {"chains": {chain: {"rpc_url": str,
         # "enabled": bool}}, "mainnet_submit_enabled": bool}. No chains
         # configured -> approved spends do not submit (honest note, no-op).
@@ -559,6 +677,12 @@ class Daemon:
         # the configured data home and talks to it over local mTLS. If Sage
         # is down, Chia spends fail closed in _execute_chia_spend.
         self._sage_proc = None
+        # Binding to the Sage we start: the child's pid, and whether the
+        # port was already answering before we started anything. Trust is
+        # decided by the certificate pin (chia.sage_cert_fingerprint /
+        # wallet.crt) on every connection; these are belt-and-braces.
+        self._sage_started_pid = None
+        self._sage_listener_preexisting = False
 
     # ------------------------------------------------------------ state
     def _load_queue(self):
@@ -895,6 +1019,11 @@ class Daemon:
         if chain in chia.NETWORKS:
             return self._execute_chia_spend(params)
         if chain in solana_mod.NETWORKS:
+            # Second layer for S-09 (queued items approved later included).
+            try:
+                _plain_transfer_asset(chain, params.get("asset", "native"))
+            except ValueError as e:
+                raise solana_mod.SolanaError(str(e)) from e
             return self._execute_solana_spend(params)
         if chain not in evm.CHAINS:
             return {"submitted": False,
@@ -915,6 +1044,15 @@ class Daemon:
             return self._execute_contract_deploy(params)
         if intent == "contract_call":
             return self._execute_contract_call(params)
+        if intent is not None:
+            raise evm.EvmError(f"intent {intent!r} has no EVM execution path")
+        # A plain transfer sends native wei and never reads `asset`, so
+        # the approved label must be the native coin (S-09; also covers
+        # items queued before the request-time check existed).
+        try:
+            _plain_transfer_asset(chain, params.get("asset", "native"))
+        except ValueError as e:
+            raise evm.EvmError(str(e)) from e
         entry = (self.evm_cfg.get("chains") or {}).get(chain) or {}
         if not entry.get("enabled") or not entry.get("rpc_url"):
             return {"submitted": False,
@@ -1481,6 +1619,8 @@ class Daemon:
         logs = rcpt.get("logs", []) if isinstance(rcpt, dict) else []
         return {"submitted": True, "tx_hash": tx_hash, "block": block,
                 "logs": logs, "from": sender}
+
+    def _sage_rpc_ready(self) -> bool:
         """True if something answers on the Sage RPC port (TCP only)."""
         port = int(self.chia_cfg.get("rpc_port", 9257))
         try:
@@ -1490,17 +1630,45 @@ class Daemon:
         except OSError:
             return False
 
+    def _sage_client(self) -> "chia.SageRpc":
+        """A pinned SageRpc for the configured data dir.
+
+        Every Sage conversation goes through here so the server-cert pin
+        (wallet.crt on disk, and chia.sage_cert_fingerprint when recorded)
+        is enforced on every connection, status reads included.
+        """
+        data_home = self.chia_cfg.get("sage_data_home")
+        if not data_home:
+            raise chia.SageError(
+                "no chia.sage_data_home configured — cannot reach Sage RPC")
+        data_dir = os.path.join(data_home, "com.rigidnetwork.sage")
+        if not os.path.isdir(data_dir):
+            raise chia.SageError(
+                f"Sage data dir {data_dir} missing — refusing")
+        return chia.SageRpc(
+            data_dir, port=int(self.chia_cfg.get("rpc_port", 9257)),
+            cert_fingerprint=self.chia_cfg.get("sage_cert_fingerprint"))
+
     def _ensure_sage_rpc(self) -> None:
         """Start `sage rpc start` if nothing answers on the RPC port.
 
         Idempotent and crash-tolerant: if the port already answers (e.g. an
-        orphaned Sage from a previous daemon run using the same data dir),
-        we just use it — the mTLS certs on disk decide trust, not the pid.
-        Raises chia.SageError if Sage cannot be brought up.
+        orphaned Sage from a previous daemon run using the same data dir)
+        it is used ONLY if its TLS certificate matches the pinned
+        wallet.crt — a listener that answered before this daemon started a
+        child is remembered as pre-existing and must pass the pin probe
+        before any request is sent. The pid of a child we start is
+        recorded as belt-and-braces; the pin is what decides trust.
+        Raises chia.SageError if Sage cannot be brought up or does not
+        present the pinned certificate.
         """
         if not self.cfg.get("chia_enabled", True):
             raise chia.SageError("chia is not enabled in this install")
         if self._sage_rpc_ready():
+            if self._sage_proc is None or self._sage_proc.poll() is not None:
+                # Nobody we started is alive, yet the port answers.
+                self._sage_listener_preexisting = True
+            self._sage_probe()
             return
         if self._sage_proc is not None and self._sage_proc.poll() is None:
             # We started one and it's still alive but not answering yet —
@@ -1527,9 +1695,12 @@ class Daemon:
                     stdin=subprocess.DEVNULL, start_new_session=True)
             except Exception as e:
                 raise chia.SageError(f"could not start sage rpc: {e}") from e
+            self._sage_started_pid = self._sage_proc.pid
+            self._sage_listener_preexisting = False
         deadline = time.time() + 45
         while time.time() < deadline:
             if self._sage_rpc_ready():
+                self._sage_probe()
                 return
             if self._sage_proc is not None and self._sage_proc.poll() is not None:
                 raise chia.SageError(
@@ -1539,16 +1710,50 @@ class Daemon:
         raise chia.SageError(
             "sage rpc did not answer on its port within 45s — see sage-rpc.log")
 
+    def _sage_probe(self) -> None:
+        """Handshake with the listener and verify the certificate pin
+        before anything is sent. Called whenever the port answers — both
+        for a child we started and for a pre-existing listener."""
+        try:
+            self._sage_client().probe()
+        except chia.SageError as e:
+            origin = ("a listener that was already on the port"
+                      if getattr(self, "_sage_listener_preexisting", False)
+                      else "the Sage child this daemon started")
+            raise chia.SageError(
+                f"refusing {origin} (port "
+                f"{int(self.chia_cfg.get('rpc_port', 9257))}): {e}") from e
+
+    def _chia_expected_fingerprint(self, chain):
+        """The daemon's wallet fingerprint for `chain`, derived locally."""
+        master_sk = self._chia_master_sk(chain)
+        from spellbook import chia_sign
+        return chia.chia_fingerprint(chia_sign.pk_bytes(master_sk).hex())
+
+    @staticmethod
+    def _sage_fingerprints(rpc) -> set:
+        have = set()
+        for k in rpc.get_keys():
+            try:
+                have.add(int(k.get("fingerprint")))
+            except (TypeError, ValueError):
+                continue
+        return have
+
     def _chia_wallet(self, rpc, chain):
         """Select the daemon-owned wallet for `chain` on Sage.
 
-        Switches Sage to the chain's network, imports the daemon's BLS
-        master key when missing (verifying the fingerprint locally — never
-        trusting the RPC's word for which key it imported), and logs in.
+        Switches Sage to the chain's network and logs in by the locally
+        derived fingerprint. The key is NEVER imported here: provisioning
+        (`spellbook sage-provision`, a one-time human step at install)
+        is the only path that sends the secret to Sage, and the daemon
+        fails closed when the fingerprint is absent. The legacy runtime
+        import survives only behind `chia.sage_runtime_key_import: true`,
+        which is documented as unsafe and defaults off.
         Returns (fingerprint, address).
 
-        In standard mode the imported key is the BLS key_gen master key, so
-        Sage operates the exact wallet the mnemonic opens in stock Sage —
+        In standard mode the provisioned key is the BLS key_gen master key,
+        so Sage operates the exact wallet the mnemonic opens in stock Sage —
         the daemon and Sage agree on every address.
 
         Every balance read goes through here. Sage's /get_sync_status
@@ -1557,27 +1762,69 @@ class Daemon:
         into the destination wallet to derive its address) would otherwise
         make status report someone else's balance as the agent's. O10
         requires the agent to surface its own balance/address, so status
-        selects — and if needed imports — the daemon's own wallet first.
+        selects the daemon's own wallet first.
         """
         network = chia.NETWORKS[chain]
         rpc.set_network(network)
-        master_sk = self._chia_master_sk(chain)
-        from spellbook import chia_sign
-        expected_fp = chia.chia_fingerprint(chia_sign.pk_bytes(master_sk).hex())
-        have = set()
-        for k in rpc.get_keys():
-            try:
-                have.add(int(k.get("fingerprint")))
-            except (TypeError, ValueError):
-                continue
-        if expected_fp not in have:
-            got = rpc.import_key("spellbook-default", master_sk.hex())
-            if got != expected_fp:
+        expected_fp = self._chia_expected_fingerprint(chain)
+        if expected_fp not in self._sage_fingerprints(rpc):
+            if not self.chia_cfg.get("sage_runtime_key_import", False):
                 raise chia.SageError(
-                    f"imported fingerprint {got} != derived {expected_fp} "
-                    "— refusing to use an unexpected key")
+                    f"Sage holds no key with fingerprint {expected_fp} — "
+                    "the wallet is not provisioned; run `spellbook "
+                    f"sage-provision --config-dir <prefix> --chain {chain}` "
+                    "once as the daemon user (the daemon never imports "
+                    "keys at runtime)")
+            self._sage_import_key(rpc, chain, expected_fp)
         rpc.login(expected_fp)
         return expected_fp, rpc.wallet_address(expected_fp, network)
+
+    def _sage_import_key(self, rpc, chain, expected_fp) -> int:
+        """Send the derived master key to Sage once, verifying the returned
+        fingerprint locally — never trusting the RPC's word for which key
+        it imported. Only provisioning (or the unsafe runtime flag) calls
+        this, and only over a pinned connection."""
+        master_sk = self._chia_master_sk(chain)
+        got = rpc.import_key("spellbook-default", master_sk.hex())
+        if got != expected_fp:
+            raise chia.SageError(
+                f"imported fingerprint {got} != derived {expected_fp} "
+                "— refusing to use an unexpected key")
+        return got
+
+    def sage_provision(self, chain: str = "chia-testnet") -> dict:
+        """One-time provisioning (`spellbook sage-provision`): start Sage,
+        pin its certificate into the daemon config, and import the
+        daemon's key if Sage does not already hold it.
+
+        Returns {"fingerprint", "cert_fingerprint", "imported": bool,
+        "address"}. Writes chia.sage_cert_fingerprint into spellbook.json
+        (atomic, mode 600) when it is not recorded yet; a recorded pin that
+        no longer matches wallet.crt fails closed inside SageRpc.
+        """
+        if chain not in chia.NETWORKS:
+            raise chia.SageError(f"unknown Chia chain {chain!r}")
+        if self._signing_seed() is None:
+            raise chia.SageError("no seed configured — nothing to provision")
+        self._ensure_sage_rpc()
+        rpc = self._sage_client()
+        rpc.set_network(chia.NETWORKS[chain])
+        expected_fp = self._chia_expected_fingerprint(chain)
+        imported = False
+        if expected_fp not in self._sage_fingerprints(rpc):
+            self._sage_import_key(rpc, chain, expected_fp)
+            imported = True
+        rpc.login(expected_fp)
+        addr = rpc.wallet_address(expected_fp, chia.NETWORKS[chain])
+        if not self.chia_cfg.get("sage_cert_fingerprint"):
+            cfg_path = os.path.join(self.config_dir, "spellbook.json")
+            with open(cfg_path) as f:
+                raw = json.load(f)
+            raw.setdefault("chia", {})["sage_cert_fingerprint"] = rpc.pin
+            _atomic_write_json(cfg_path, raw)
+            self.chia_cfg["sage_cert_fingerprint"] = rpc.pin
+        return {"fingerprint": expected_fp, "cert_fingerprint": rpc.pin,
+                "imported": imported, "address": addr}
 
     # The six standing requirements for any token launch, mint, or
     # issuance. mint_gate.json must attest ALL of them, name the EXACT
@@ -2068,19 +2315,14 @@ class Daemon:
     def _chia_sage_rpc(self, chain: str):
         """Start/connect Sage RPC and select the daemon's wallet for `chain`.
 
-        Shared setup for all Sage-path Chia spends (XCH, CAT, NFT): ensures
-        `sage rpc start` answers, switches to the chain's network, and
-        imports + logs in the daemon's KDF-derived BLS key. Returns
+        Shared setup for all Sage-path Chia spends (XCH, CAT, NFT) and
+        status reads: ensures `sage rpc start` answers and presents the
+        pinned certificate, switches to the chain's network, and logs in
+        the daemon's provisioned BLS key by fingerprint. Returns
         (rpc, fingerprint, sender_address).
         """
         self._ensure_sage_rpc()
-        data_home = self.chia_cfg.get("sage_data_home")
-        data_dir = os.path.join(data_home, "com.rigidnetwork.sage")
-        if not os.path.isdir(data_dir):
-            raise chia.SageError(
-                f"Sage data dir {data_dir} missing after startup — refusing")
-        rpc = chia.SageRpc(data_dir,
-                           port=int(self.chia_cfg.get("rpc_port", 9257)))
+        rpc = self._sage_client()
         expected_fp, sender = self._chia_wallet(rpc, chain)
         return rpc, expected_fp, sender
 
@@ -2810,7 +3052,7 @@ class Daemon:
                   "_receive_ph": receive_ph.hex()}
         if p.get("expires_at_second") is not None:
             params["expires_at_second"] = p["expires_at_second"]
-        entries = [(chain, a, m) for a, m in offered]
+        entries = self._velocity_entries(params)
         return self._run_fund_intent(params, muse_id, entries, "offer_make")
 
     def _rt_offer_take_native(self, p: dict, chain: str, muse_id: str) -> dict:
@@ -2857,7 +3099,7 @@ class Daemon:
                   "purpose": p.get("purpose", ""),
                   "_give": [{"asset": a, "amount_mojos": m} for a, m in give],
                   "_get": [{"asset": a, "amount_mojos": m} for a, m in get]}
-        entries = [(chain, a, m) for a, m in give]
+        entries = self._velocity_entries(params)
         return self._run_fund_intent(params, muse_id, entries, "offer_take")
 
     def _rt_offer_cancel_native(self, p: dict, chain: str, ids: list,
@@ -3175,7 +3417,14 @@ class Daemon:
         return out
 
     def _execute_option_exercise_via_sage(self, params: dict) -> dict:
-        """Exercise approved options via Sage RPC (on-chain)."""
+        """Exercise approved options via Sage RPC (on-chain).
+
+        The strike legs the human approved are re-read from Sage here and
+        must match exactly — an option whose strike no longer reads the
+        same is refused (the approved intent is what executes, nothing
+        else). A queued intent without strike legs predates this check
+        and is refused outright.
+        """
         rpc, fee = self._tx_intent_rpc(params)
         ids = self._validated_option_ids(params)
         owned = self._owned_option_ids(rpc)
@@ -3183,6 +3432,17 @@ class Daemon:
             if i not in owned:
                 raise chia.SageError(
                     f"option {i[:16]}… is not in this wallet — refusing")
+        want = params.get("_strike")
+        if not isinstance(want, list):
+            raise chia.SageError(
+                "option_exercise intent carries no approved strike legs — "
+                "refusing; re-request so the strike is judged by policy")
+        now = self._option_strike_legs(rpc, ids)
+        if sorted(now) != sorted((it["asset"], it["amount_mojos"])
+                                 for it in want):
+            raise chia.SageError(
+                "option strike changed since approval — refusing to "
+                "exercise")
         t0 = time.time()
         res = rpc.exercise_options(ids, fee_mojos=fee,
                                    auto_submit=True)
@@ -3583,9 +3843,9 @@ class Daemon:
     def _execute_chia_spend_via_sage(self, params: dict) -> dict:
         """Build, sign, and submit an approved XCH transfer via Sage RPC.
 
-        Flow: switch Sage to the right network, ensure the KDF-derived BLS
-        key is imported (verifying the fingerprint locally — never trusting
-        the RPC's word for which key it imported), log in, send via
+        Flow: switch Sage to the right network, log in by the locally
+        derived fingerprint (the key was provisioned once by `spellbook
+        sage-provision`; a missing key fails closed), send via
         /send_xch with auto_submit, then confirm the outgoing transaction
         appears in /get_transactions paying our destination our amount.
 
@@ -3668,6 +3928,13 @@ class Daemon:
             if kind == "nft" and p.get("amount_mojos") != 1:
                 return {"ok": False, "error":
                         "NFT transfer amount must be 1 (singleton asset)"}
+        else:
+            # EVM/Solana executors send the native coin only: the label
+            # policy judges must be that coin, keyed one way (S-09).
+            try:
+                asset = _plain_transfer_asset(p["chain"], asset)
+            except ValueError as e:
+                return {"ok": False, "error": str(e)}
         d = evaluate(self.policy, p["chain"], asset,
                      amount, p.get("destination", ""),
                      self.spent_last_24h(p["chain"], asset))
@@ -4368,8 +4635,18 @@ class Daemon:
         if self._signing_seed() is None:
             raise chia.SageError("no seed configured — cannot sign")
         fee = params.get("fee_mojos", 0)
-        if not isinstance(fee, int) or fee < 0:
+        if isinstance(fee, bool) or not isinstance(fee, int) or fee < 0:
             raise chia.SageError("fee_mojos must be a non-negative integer")
+        mx = self._max_fee_mojos()
+        if fee > mx:
+            raise chia.SageError(
+                f"fee_mojos {fee} exceeds chia.max_offer_fee_mojos {mx} "
+                "— refusing")
+
+    def _max_fee_mojos(self) -> int:
+        from spellbook.config import DEFAULT_MAX_OFFER_FEE_MOJOS
+        return int(self.chia_cfg.get("max_offer_fee_mojos",
+                                     DEFAULT_MAX_OFFER_FEE_MOJOS))
 
     def _check_offer_balances(self, rpc, legs: list, fee_mojos: int) -> None:
         """Fail closed when the wallet cannot fund the offer's give side.
@@ -4439,12 +4716,16 @@ class Daemon:
         """
         intent = params.get("intent")
         chain = params["chain"]
-        if intent == "offer_make":
-            return [(chain, it["asset"], it["amount_mojos"])
-                    for it in params["offered"]]
-        if intent == "offer_take":
-            return [(chain, it["asset"], it["amount_mojos"])
-                    for it in params["_give"]]
+        if intent in ("offer_make", "offer_take"):
+            # Merge per asset (Sage sums duplicate legs) and count the
+            # offer fee against native: policy sees exactly what the
+            # wallet spends, never a split leg or an uncounted fee.
+            side = "offered" if intent == "offer_make" else "_give"
+            legs = [(it["asset"], it["amount_mojos"]) for it in params[side]]
+            fee = params.get("fee_mojos", 0)
+            if fee:
+                legs.append(("native", fee))
+            return [(chain, a, m) for a, m in _merge_legs(legs)]
         if intent in ("offer_cancel", "message_sign"):
             return []
         if intent == "dex_swap":
@@ -4468,6 +4749,30 @@ class Daemon:
             value = params.get("value_wei", 0)
             return [(chain, "native", value)] if value else []
         fee = params.get("fee_mojos", 0)
+        if intent == "option_exercise":
+            # The strike is paid to the option's creator (Sage
+            # exercise_options settles it to creator_puzzle_hash): one give
+            # leg per strike asset, read from Sage at request time and
+            # re-verified at execution. The exercised option singleton
+            # itself is a non-fungible move, counted as its own entry.
+            legs = [("native", fee)] if fee else []
+            for leg in params.get("_strike") or []:
+                legs.append((leg["asset"], leg["amount_mojos"]))
+            for oid in params.get("option_ids") or []:
+                legs.append((f"option:{oid}", 1))
+            return [(chain, a, m) for a, m in _merge_legs(legs)]
+        if intent in ("option_transfer", "did_transfer", "nft_assign_did"):
+            # Non-fungible moves are never a zero-value fee: each singleton
+            # that changes hands (or ownership binding) is its own entry.
+            prefix = {"option_transfer": "option", "did_transfer": "did",
+                      "nft_assign_did": "nft"}[intent]
+            id_key = {"option_transfer": "option_ids",
+                      "did_transfer": "did_ids",
+                      "nft_assign_did": "nft_ids"}[intent]
+            legs = [("native", fee)] if fee else []
+            for i in params.get(id_key) or []:
+                legs.append((f"{prefix}:{i}", 1))
+            return [(chain, a, m) for a, m in _merge_legs(legs)]
         if intent == "option_mint":
             leg = params.get("underlying") or {}
             aid = leg.get("asset_id")
@@ -4500,10 +4805,10 @@ class Daemon:
         asset = params.get("asset", "native")
         amount = params.get("amount_mojos", params.get("amount_wei",
                             params.get("amount_lamports")))
-        if intent in ("nft_mint", "nft_assign_did", "did_create",
-                      "did_transfer", "did_normalize", "option_transfer",
-                      "option_exercise", "cat_issue", "clawback_finalize",
-                      "coin_combine", "coin_split", "coin_autocombine"):
+        if intent in ("nft_mint", "did_create", "did_normalize", "cat_issue",
+                      "clawback_finalize", "coin_combine", "coin_split",
+                      "coin_autocombine"):
+            # Creations and self-to-self coin ops: only the fee leaves.
             return [(chain, "native", fee)]
         return [(chain, asset, amount)]
 
@@ -4530,6 +4835,14 @@ class Daemon:
                                "contract action — human approval required")
         else:
             verdict, reason = self._decide_fund_intent(entries)
+        if verdict == "approved" and params.get("intent") in ALWAYS_QUEUE_INTENTS:
+            # Policy caps still deny; they never auto-approve these. An
+            # option exercise pays the strike to whoever minted the option,
+            # and option/DID/NFT moves hand singletons to any destination —
+            # a human sees every one of them.
+            verdict, reason = ("queued",
+                               f"{params['intent']} always requires human "
+                               "approval")
         if verdict == "queued":
             qid = str(self.next_qid); self.next_qid += 1
             self.queue[qid] = {"params": params, "muse_id": muse_id,
@@ -4643,7 +4956,7 @@ class Daemon:
                   "_receive_ph": receive_ph.hex()}
         if expires is not None:
             params["expires_at_second"] = expires
-        entries = [(chain, a, m) for a, m in offered]
+        entries = self._velocity_entries(params)
         return self._run_fund_intent(params, muse_id, entries, "offer_make")
 
     def rt_offer_take(self, p: dict, muse_id: str) -> dict:
@@ -4690,7 +5003,7 @@ class Daemon:
                   "purpose": p.get("purpose", ""),
                   "_give": [{"asset": a, "amount_mojos": m} for a, m in give],
                   "_get": [{"asset": a, "amount_mojos": m} for a, m in get]}
-        entries = [(chain, a, m) for a, m in give]
+        entries = self._velocity_entries(params)
         return self._run_fund_intent(params, muse_id, entries, "offer_take")
 
     def rt_offer_cancel(self, p: dict, muse_id: str) -> dict:
@@ -5001,12 +5314,58 @@ class Daemon:
             return err
         try:
             ids = self._validated_option_ids(p)
+            # Exercising pays each option's strike to its creator. Read the
+            # strike (asset + amount) from Sage now so policy judges it as
+            # a give leg and the human sees it in the queue; execution
+            # re-reads and refuses on any change.
+            rpc, _, _ = self._chia_sage_rpc(p["chain"])
+            strike = self._option_strike_legs(rpc, ids)
         except chia.SageError as e:
             return {"ok": False, "error": str(e)}
         params = {"intent": "option_exercise", "chain": p["chain"],
                   "option_ids": ids, "fee_mojos": self._fee_of(p),
-                  "purpose": p.get("purpose", "")}
+                  "purpose": p.get("purpose", ""),
+                  "_strike": [{"asset": a, "amount_mojos": m}
+                              for a, m in strike]}
         return self._queue_tx_intent(params, muse_id, "option_exercise")
+
+    @staticmethod
+    def _option_strike_legs(rpc, option_ids: list) -> list:
+        """[(asset, amount)] the wallet pays to exercise `option_ids`,
+        merged per asset, from Sage's OptionRecord (strike_asset,
+        strike_amount). Every option must be in this wallet; a strike in
+        anything but XCH or a CAT is refused (policy cannot price it)."""
+        by_id = {}
+        for o in rpc.get_options(offset=0, limit=1000):
+            if isinstance(o, dict) and o.get("launcher_id"):
+                by_id[str(o["launcher_id"])] = o
+        legs = []
+        for oid in option_ids:
+            rec = by_id.get(oid)
+            if rec is None:
+                raise chia.SageError(
+                    f"option {oid[:16]}… is not in this wallet — refusing")
+            sa = rec.get("strike_asset") or {}
+            kind = sa.get("kind") or "token"
+            if kind != "token":
+                raise chia.SageError(
+                    f"option {oid[:16]}… strike is a {kind!r} asset — "
+                    "refusing (only XCH/CAT strikes are supported)")
+            aid = sa.get("asset_id")
+            asset = "native" if not aid else str(aid).lower()
+            if asset != "native" and not _HEX64.fullmatch(asset):
+                raise chia.SageError(
+                    f"option {oid[:16]}… has a malformed strike asset id")
+            try:
+                amount = chia.amount_to_int(rec.get("strike_amount"))
+            except chia.SageError as e:
+                raise chia.SageError(
+                    f"option {oid[:16]}… has a bad strike amount: {e}") from e
+            if amount <= 0:
+                raise chia.SageError(
+                    f"option {oid[:16]}… reports a non-positive strike")
+            legs.append((asset, amount))
+        return _merge_legs(legs)
 
     def rt_cat_issue(self, p: dict, muse_id: str) -> dict:
         fields = set(p)
@@ -5806,6 +6165,10 @@ class Daemon:
                             "address", "public_key", "message", "sign_type"):
                     if p.get(key) is not None:
                         detail[key] = p[key]
+                if p.get("_strike") is not None:
+                    # What exercising pays (to the option creator), per
+                    # asset — the human approves the strike, not just ids.
+                    detail["strike_legs"] = p["_strike"]
                 entry.update(detail)
             out.append(entry)
         return out
@@ -5946,15 +6309,14 @@ class Daemon:
         if (signing_seed is not None and self.cfg.get("chia_enabled", True)
                 and self.chia_cfg.get("sage_data_home")):
             try:
-                data_dir = os.path.join(self.chia_cfg["sage_data_home"],
-                                        "com.rigidnetwork.sage")
-                rpc = chia.SageRpc(
-                    data_dir, port=int(self.chia_cfg.get("rpc_port", 9257)))
-                # Select the daemon's own wallet first: Sage reports the
-                # *selected* wallet, which may be a foreign one left logged
-                # in by earlier tooling. Never report another wallet's
-                # balance/address as the agent's (O10).
-                _, addr = self._chia_wallet(rpc, "chia-testnet")
+                # The same guarded path every spend uses: pinned server
+                # cert, pre-existing-listener probe, login by fingerprint
+                # only (never an import). Select the daemon's own wallet
+                # first: Sage reports the *selected* wallet, which may be a
+                # foreign one left logged in by earlier tooling. Never
+                # report another wallet's balance/address as the agent's
+                # (O10).
+                rpc, _, addr = self._chia_sage_rpc("chia-testnet")
                 st = rpc.sync_status()
                 balances["chia-testnet"] = {
                     "address": addr,
@@ -6081,6 +6443,70 @@ class Daemon:
         signed = self._identity_key.sign(canonical)
         self.ledger.append(muse_id, canonical, None, "musebook-sign")
         return {"ok": True, "signature_hex": signed.signature.hex()}
+
+    def rt_sign_dashboard_challenge(self, p: dict, muse_id: str) -> dict:
+        """Sign the holdings dashboard's login challenge (review S-04).
+
+        The agent never needs the raw identity seed: it fetches the
+        challenge, has the daemon sign it under DASHBOARD_CHALLENGE_PREFIX
+        and POSTs {challenge, signature, pubkey} to /api/auth/verify. The
+        daemon builds the signed bytes itself from the one typed field and
+        refuses anything not shaped like a dashboard challenge, so the
+        route signs neither arbitrary bytes nor another domain's canonical
+        string (P1). Same S1 gate as sign_musebook_request, rate-capped per
+        minute, every signature ledgered.
+
+        The dashboard binds nothing to the key: a login proves possession of
+        some Ed25519 key and opens a read-only view of the addresses the
+        agent names. So the route does not wait on S1. With identity
+        signing on it signs with the muse's identity key (the pubkey those
+        muses already log in with); otherwise with a login key the daemon
+        generates once and keeps beside its config, derived from no seed.
+        """
+        if "challenge" not in p:
+            return {"ok": False, "error": "missing field challenge"}
+        try:
+            canonical = spellsign.build_dashboard_challenge_canonical(p["challenge"])
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        if not self._dashboard_sign_window.allow():
+            self.ledger.append(muse_id, canonical, None,
+                               "denied:dashboard-sign-rate")
+            return {"ok": False,
+                    "error": "dashboard signing rate cap reached; retry later"}
+        key = self._dashboard_key()
+        signed = key.sign(canonical)
+        self.ledger.append(muse_id, canonical, None, "dashboard-challenge-sign")
+        return {"ok": True,
+                "signature_hex": signed.signature.hex(),
+                "pubkey_hex": bytes(key.verify_key).hex(),
+                "prefix": spellsign.DASHBOARD_CHALLENGE_PREFIX}
+
+    DASHBOARD_KEY_FILE = "dashboard_ed25519.key"
+
+    def _dashboard_key(self):
+        """The key sign_dashboard_challenge signs with (see its docstring).
+
+        The dedicated key is 32 random bytes, created once with O_EXCL and
+        mode 0600 in the daemon's own directory, never derived from or
+        related to any wallet seed, and never returned by any route.
+        """
+        if self._identity_key is not None:
+            return self._identity_key
+        from nacl.signing import SigningKey
+        path = os.path.join(self.config_dir, self.DASHBOARD_KEY_FILE)
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            with open(path, "rb") as f:
+                raw = f.read()
+            if len(raw) != 32:
+                raise ValueError(f"{path} is not a 32-byte key")
+            return SigningKey(raw)
+        raw = os.urandom(32)
+        with os.fdopen(fd, "wb") as f:
+            f.write(raw)
+        return SigningKey(raw)
 
     def rt_publish_directory_entry(self, p: dict, muse_id: str) -> dict:
         # Approve token only (checked in handle()). Distinct prefix (P1).

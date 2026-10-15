@@ -36,9 +36,9 @@ sudo SPELLBOOK_RELEASE_KEY_FPR=<fingerprint-from-town-thread> \
 
 The installer verifies the release (SHA-256 + GPG signature from the pinned
 fingerprint — fail closed), provisions everything below, and prints an
-`AGENT HANDOFF` block: your request token goes in your environment; the
-approve token file and the paper backup go to your human out-of-band, and
-you never retain them. Then `spellbook doctor` and `spellbook version` to
+`AGENT HANDOFF` block: your request token is a 0600 file you own (only
+its path is printed); the approve token file and the paper backup go to
+your human out-of-band, and you never see them. Then `spellbook doctor` and `spellbook version` to
 confirm.
 
 (If your human prefers to drive, they run the same command without
@@ -49,16 +49,32 @@ It provisions:
 - `spellbookd` + `spellbook` CLI (pip-installable package in `src/`)
 - the Chia **relay** (`relay/`, deployed separately — see §3)
 - two bearer tokens: a **request token** (yours, the agent) and an
-  **approval token** (the human's). Both print once; the request token
-  lives in your environment, never in chat, logs, or code.
-- the paper backup (§6): displayed **once** on first install and also saved
-  to `$PREFIX/paper-backup.txt` — your human stores it somewhere safe
-  (ideally off the machine) and deletes it there.
+  **approval token** (the human's). Neither is ever printed: yours is
+  written to `/etc/spellbook/request.token` (0600, owned by your OS user;
+  override with `SPELLBOOK_AGENT_TOKEN_FILE`) and you point
+  `SPELLBOOK_REQUEST_TOKEN_FILE` at it — never paste its content into
+  chat, logs, code or a tool argument.
+- the paper backup (§6): never printed by the installer and never saved
+  to a text file; `spellbook export` shows it to the human (§6).
 - **Sage is on-demand, not always-on.** The daemon spawns `sage rpc start`
   itself when a Chia request needs it — never start Sage yourself, and do
   not treat a down Sage (e.g. the `status` balance warning) as a problem.
   It only needs to run while a Chia request or trading interaction is
   active.
+- **Sage is provisioned once, at install.** `spellbook sage-provision`
+  (the installer runs it as the daemon user) pins Sage's RPC certificate
+  into the config and imports the daemon's key. At runtime the daemon only
+  logs in by fingerprint and refuses any listener on the Sage port whose
+  certificate is not the pinned one; it never sends the key again. If a
+  Chia call says the wallet is "not provisioned", ask your human to run the
+  command it names.
+
+Intents that always wait for the human, whatever `auto_approve_below`
+says: `offer_cancel`, `message_sign`, `option_exercise` (its strike is
+counted as a spend in the strike asset), `option_transfer`,
+`did_transfer`, `nft_assign_did`. Offer fees are counted against native
+policy and capped by `chia.max_offer_fee_mojos`; an offer may name each
+asset once; taking an NFT offer counts the royalty you also pay.
 
 Client:
 
@@ -110,8 +126,8 @@ The rules that keep this safe:
   never regenerates keys, never mints tokens, never hand-edits config, never
   reconstructs the ledger — state problems fail closed with guidance for
   the human.
-- Upgrades print no key material, ever. The paper backup prints once, on
-  fresh install only.
+- Upgrades print no key material, ever. Nothing prints key material:
+  the paper backup leaves the machine only through `spellbook export` (§6).
 
 ## 1c. Where everything lives (file locations)
 
@@ -274,21 +290,30 @@ other chain.
 
 ## 6. Paper-backup model (two mnemonic sets)
 
-`install.sh` shows the backup **once**, on first install — displayed on the
-terminal and also saved to `$PREFIX/paper-backup.txt`. Your human stores it
-somewhere safe (ideally off the machine) and deletes it there. Upgrades
-never print key material.
+`install.sh` prints no mnemonic, no raw key and no token — nothing secret on any stdout. It leaves the machine only through
+`spellbook export`: on the human's own terminal (`sudo spellbook export`
+— words on `/dev/tty`, a pause, a screen clear, then 3 SET 1 words asked
+back; it refuses pipes and the agent's OS user), or, when the human can
+only reach you, encrypted to the seal ceremony's reveal key
+(`sudo spellbook export --reveal-key <public key>` prints only an
+envelope the human's page decrypts). You relay ciphertext and never see a
+word. No raw private keys are shown either way.
+On a fresh install run from a real terminal the installer runs the
+terminal export itself at the end. Installs made before this change saved
+the whole backup to `$PREFIX/paper-backup.txt`; an upgrade warns while it
+exists — your human moves it off the machine and shreds it, you never
+read it.
 
 - **SET 1 — STANDARD RECOVERY (primary: the daemon's live keys).**
   A second, independent 24-word BIP-39 mnemonic whose keys derive the
   way stock wallets do (Sage for Chia, MetaMask for EVM). The 24 words
-  *and* the printed raw private keys import directly into stock wallets
-  and yield the same addresses the daemon uses.
+  import directly into stock wallets and yield the same addresses the
+  daemon uses. `std_entropy.key` (0600, daemon user) keeps them showable
+  by `spellbook export`; a restored install has no such file and its
+  SET 1 lives on the paper copy only.
 - **SET 2 — SPELLBOOK DAEMON SEED (secondary).** The daemon's custom-KDF
   seed. Its 24 words recover through the Spellbook daemon **only** —
-  they do **not** work in Sage or MetaMask. Its raw keys (EVM scalar →
-  MetaMask, BLS scalar → Sage) do import directly and yield the same
-  addresses the daemon would use.
+  they do **not** work in Sage or MetaMask.
 
 Rule: write both sets down on paper, offline, at install. Verify after
 any import by comparing the shown addresses.
@@ -353,11 +378,25 @@ allowlist. Each agent session is bound to the agent's **own** watch
 addresses and sees only its own wallet. (Humans use a viewer token in the
 browser; that path is not for agents.)
 
-Auth model: the server issues a short-lived, single-use challenge; you
-sign the exact challenge string locally and POST the signature with your
-public key and addresses. The server verifies the signature against the
-**presented** public key — the signature proves possession of the key,
-not membership in any list.
+Auth model: the server issues a short-lived, single-use challenge; your
+**daemon** signs it (route `sign_dashboard_challenge`, under the fixed
+domain prefix `musebook-dashboard-v1:`) and you POST the signature with
+the public key the daemon returns and your addresses. The server verifies
+the signature against the **presented** public key — the signature proves
+possession of the key, not membership in any list.
+
+**You never hold the identity seed.** Do not put it in your environment,
+a `.env`, a JSON key file, a config file or a tool argument — not even
+"just for the dashboard". Under `key_derivation=kdf` that seed can be the
+root of every wallet key (review S-04; S1 still open), and a seed an agent
+can read is a wallet in every transcript and log the agent writes. The
+daemon holds it; you hold a request token.
+
+The route answers only when the daemon's `musebook_signing_mode` is
+`daemon` (the S1 gate). With signing disabled (the installer default) it
+returns an error naming S1: ask your human whether to enable it. There is
+no agent-side fallback, and a signature over the bare challenge is
+rejected by the dashboard.
 
 ### Getting your human's viewer token (the 4-step version)
 
@@ -367,10 +406,10 @@ repeating it):
 
 1. **Get a challenge:** `GET <dashboard>/api/auth/challenge` →
    `{ challenge, expiresAt }` (5 minutes, single use).
-2. **Sign it:** sign the `challenge` string verbatim (UTF-8 bytes) with
-   your Ed25519 identity key (`~/.config/spellbook/agent_ed25519.json`).
-   The private key never leaves your machine — only the 128-hex-char
-   signature is sent.
+2. **Have your daemon sign it:** `spellbook sign-dashboard-challenge
+   --challenge "$CH"` (or `AgentClient.sign_dashboard_challenge(ch)`) →
+   `{signature_hex, pubkey_hex, prefix}`. The daemon signs
+   `musebook-dashboard-v1:` + the challenge; the key never leaves it.
 3. **Verify:** `POST <dashboard>/api/auth/verify` with
    `{ challenge, signature, pubkey, wallets }` → `{ ok: true, viewerToken }`
    (you also get your own 12h agent session cookie).
@@ -381,20 +420,25 @@ repeating it):
    paste it into the viewer field and get a read-only view of your
    wallets. Bearer <redacted>: treat it like a password.
 
-Copy-paste Python (needs `cryptography`, stdlib otherwise):
+Copy-paste Python (the client library; the request token comes from its
+file, never inline):
 
 ```python
-import json, urllib.request
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+import json, os, urllib.request
+from spellbook.client import AgentClient
 
 BASE = "https://<your-dashboard-host>"  # e.g. https://spellbook.awizard.dev
+agent = AgentClient(
+    socket_path=os.environ.get("SPELLBOOK_SOCKET", "/run/spellbook/spellbook.sock"),
+    token_hex=open(os.environ["SPELLBOOK_REQUEST_TOKEN_FILE"]).read(),
+    muse_id="your-muse-id",
+)
 
 with urllib.request.urlopen(f"{BASE}/api/auth/challenge", timeout=20) as r:
     challenge = json.load(r)["challenge"]
 
-key = json.load(open("/home/<you>/.config/spellbook/agent_ed25519.json"))
-sig = Ed25519PrivateKey.from_private_bytes(
-    bytes.fromhex(key["seed_hex"])).sign(challenge.encode()).hex()
+signed = agent.sign_dashboard_challenge(challenge)  # {signature_hex, pubkey_hex, prefix}
+sig = signed["signature_hex"]
 
 wallets = [{"label": "Spellbook", "addresses": {
     # from `spellbook addresses`; bind only the sides you want shown
@@ -403,7 +447,7 @@ wallets = [{"label": "Spellbook", "addresses": {
     "chia": [...], "chia_mainnet": [...],
 }}]
 body = json.dumps({"challenge": challenge, "signature": sig,
-                   "pubkey": key["pubkey_hex"], "wallets": wallets}).encode()
+                   "pubkey": signed["pubkey_hex"], "wallets": wallets}).encode()
 req = urllib.request.Request(f"{BASE}/api/auth/verify", data=body,
                              headers={"Content-Type": "application/json"})
 with urllib.request.urlopen(req, timeout=30) as r:
@@ -417,11 +461,15 @@ Base: the operator's dashboard deployment, e.g.
 `https://spellbook.awizard.dev`.
 
 1. `GET /api/auth/challenge` → `{ challenge, expiresAt }`
-   - `challenge` is a `<base64url>.<hmac>` string. Sign it **verbatim**.
+   - `challenge` is a `<base64url>.<hmac>` string. Pass it **verbatim**.
    - Valid 5 minutes, single use (replay rejected).
-2. Sign `challenge` as UTF-8 bytes with your Ed25519 identity key.
-   The private key never leaves your machine — only the 64-byte
-   signature (128 hex chars) is sent.
+2. Have your daemon sign it: `spellbook sign-dashboard-challenge
+   --challenge "$CH"`. The signed bytes are UTF-8 of
+   `musebook-dashboard-v1:` + challenge. The route accepts only the
+   dashboard's own challenge grammar (`<base64url>.<hex>`, at most 512
+   chars), is rate-capped (`dashboard_sign_per_minute`, default 30) and
+   ledgers every signature. Only the 64-byte signature (128 hex chars)
+   and the public key are sent.
 3. `POST /api/auth/verify`
    `{ challenge, signature, pubkey, addresses }` →
    sets an httpOnly session cookie (12h) and returns
@@ -486,35 +534,21 @@ Base: the operator's dashboard deployment, e.g.
 
 Without a session, `/api/holdings` returns `401`.
 
-### Signing examples
+### Signing: the daemon does it
 
-Node (no dependencies):
-
-```js
-import { createPrivateKey, sign } from "node:crypto";
-// seed: your 32-byte Ed25519 seed (never transmitted anywhere)
-const seed = Buffer.from(process.env.MY_ED25519_SEED_HEX, "hex");
-const pkcs8 = Buffer.concat([
-  Buffer.from("302e020100300506032b657004220420", "hex"), seed,
-]);
-const key = createPrivateKey({ key: pkcs8, format: "der", type: "pkcs8" });
-const signatureHex = sign(null, Buffer.from(challenge, "utf8"), key).toString("hex");
-```
-
-Python (`cryptography` package):
-
-```python
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(seed_hex))
-signature_hex = key.sign(challenge.encode("utf-8")).hex()
-```
+There is deliberately no "sign it yourself" example. A signature over the
+bare challenge is rejected (the dashboard verifies
+`musebook-dashboard-v1:` + challenge), and the only process that should
+be able to produce the prefixed one is your daemon.
 
 ### curl cookbook
 
 ```bash
 BASE=https://spellbook.awizard.dev
 CH=$(curl -s $BASE/api/auth/challenge | python3 -c "import json,sys; print(json.load(sys.stdin)['challenge'])")
-# sign $CH locally -> $SIG (128 hex), then:
+SIGNED=$(spellbook --token-file "$SPELLBOOK_REQUEST_TOKEN_FILE" sign-dashboard-challenge --challenge "$CH")
+SIG=$(printf '%s' "$SIGNED" | python3 -c "import json,sys; print(json.load(sys.stdin)['signature_hex'])")
+PUBKEY=$(printf '%s' "$SIGNED" | python3 -c "import json,sys; print(json.load(sys.stdin)['pubkey_hex'])")
 curl -s -c jar.txt -b jar.txt -X POST $BASE/api/auth/verify \
   -H 'Content-Type: application/json' \
   -d "{\"challenge\":\"$CH\",\"signature\":\"$SIG\",\"pubkey\":\"$PUBKEY\",\"addresses\":{\"evm\":[\"$EVM\"],\"solana\":[\"$SOL\"],\"chia\":[\"$CHIA\"]}}"

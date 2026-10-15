@@ -136,6 +136,23 @@ one paper. Either way D3 holds: the daemon is the only process that holds
 wallet secrets. **This changes how aWizard signs Musebook posts today —
 pending Speechless's explicit call.**
 
+**Status 2026-10-15 (review S-04): the key derivation is unchanged; S1's
+final call is still the owner's.** What is in code until it lands:
+(1) the daemon refuses to start under `key_derivation=kdf` when `seed_path`
+looks like a Musebook identity seed (config `seed_role=identity`,
+`musebook_signing_mode=daemon`, the seed file's `# spellbook-seed-role:
+identity` header, or a path naming the Musebook client, a `.env` or an
+`agent_ed25519` key file), unless `allow_identity_seed_as_wallet_root=true`
+is set knowingly (unsafe, default false; `src/spellbook/seedrole.py`). The
+role header survives a seal/unlock (it rides inside the sealed plaintext).
+(2) Dashboard sign-in is a daemon route, `sign_dashboard_challenge`, under
+its own prefix `musebook-dashboard-v1:`, so no agent holds the raw seed for
+it; the dashboard rejects a signature over the bare challenge. (3) The
+onboarding guide no longer shows a seed in the agent's environment. Under
+`key_derivation=standard` (what install.sh writes) the KDF seed is not the
+live wallet root, which is the Option B shape in practice; muses on the kdf
+path with their identity seed as `seed_path` need the S1 decision.
+
 What is per-muse and never shared: muse key, derived secrets, Sage instance and
 `keys.bin`, mTLS certs, daemon process and its queue. What may be shared (holds
 no keys): daemon source code, setup guide, town directory (addresses only).
@@ -233,9 +250,10 @@ no keys): daemon source code, setup guide, town directory (addresses only).
 
 New labeled addresses never need a new backup, and every one restores in stock
 software:
-- **Chia:** the daemon imports the `chia-mainnet/sign/default` BLS secret;
-  Sage manages address discovery natively (derivations, derivation indices,
-  gap limit). Labeled receive addresses come through the Sage RPC.
+- **Chia:** the `chia-mainnet/sign/default` BLS secret is provisioned into
+  Sage once (`spellbook sage-provision`); Sage manages address discovery
+  natively (derivations, derivation indices, gap limit). Labeled receive
+  addresses come through the Sage RPC.
 - **EVM:** each label is its own info string
   (`muse-wallet/v1/evm-4663/sign/<label>`) → its own secp256k1 key → its own
   address. `tips`, `bounties`, `trading` are independent keys, each
@@ -329,14 +347,26 @@ unchanged. The daemon refuses to start in standard mode without
   owned by the daemon's OS user (S2) — the agent's user cannot read `keys.bin`.
 - **RPC:** `sage rpc start` → `https://127.0.0.1:9257`, mutual TLS; certs under
   `<datadir>/ssl/`, daemon-user-owned. The daemon is the only process that
-  reads the client cert.
-- **Key import:** at first boot the daemon imports the derived BLS secret via
+  reads the client cert. The daemon also verifies the **server**: Sage's own
+  `wallet.crt` is the sole trust anchor (`CERT_REQUIRED`, partial chain —
+  the cert is issued by Chia's public shared CA, which can never be an
+  anchor), and the leaf's SHA-256 is pinned (`chia.sage_cert_fingerprint`,
+  recorded at provisioning). A listener on the port with any other
+  certificate is refused during the TLS handshake, before a request is
+  written; a pre-existing listener (one answering before the daemon started
+  its own Sage child) is accepted only on a matching pin. Hostname checking
+  is off: the peer is 127.0.0.1 and the pin is its identity.
+- **Key provisioning:** a human runs `spellbook sage-provision --config-dir
+  <prefix>` once at install (as the daemon user). It starts Sage, pins the
+  certificate into the config, and imports the derived BLS secret via
   `POST /import_key` as a 32-byte hex private key (verified against
   `v0.13.1`: 32-byte hex → raw BLS master secret; 48-byte hex → watch-only
-  public key — S11). `save_secrets` defaults true; the daemon sets it
-  explicitly true and fails closed if the wallet comes back watch-only. The
-  wallet fingerprint is recorded in the daemon config. No mnemonic is ever
-  generated or displayed.
+  public key — S11), checking the returned fingerprint against the local
+  derivation. **The daemon never imports keys at runtime**: it logs in by
+  the locally derived fingerprint and fails closed when Sage lacks it
+  (status reads included). The legacy runtime import survives only behind
+  `chia.sage_runtime_key_import: true`, documented as unsafe, default off.
+  No mnemonic is ever generated or displayed.
 - **Sync:** Sage connects to Chia peers directly or to a configured trusted
   node. Record observed sync behavior in the Phase 1 log; slow/failed sync is a
   go/no-go input for Phase 2.
@@ -541,6 +571,18 @@ mTLS cert, or submit transactions.
   never signs caller-supplied raw bytes: a raw-bytes oracle on the request
   token would let the agent mint signed directory entries and rotation
   supersessions with the identity key (P1).
+- `POST /v1/sign_dashboard_challenge {challenge}` → `{signature, pubkey,
+  prefix}` — the holdings dashboard's login challenge, signed under the
+  fixed prefix `musebook-dashboard-v1:` (distinct from the two identity
+  prefixes here; no transaction or wallet-message signing uses the
+  identity key). Only the dashboard's own challenge grammar is accepted, so
+  the route signs no arbitrary bytes (P1); rate-capped per minute
+  (`dashboard_sign_per_minute`, default 30); ledgered. It does not wait on
+  S1: the dashboard binds nothing to the key, so with identity signing off
+  the daemon signs with its own login key (`dashboard_ed25519.key`, 32
+  random bytes, 0600, beside the config, derived from no seed); with it on,
+  with the identity key. Added so the dashboard never needs the raw seed in
+  an agent's environment (review S-04).
 - `POST /v1/publish_directory_entry {entry}` → `{ok}` — **approve token
   only.** Signs directory entries (§8) and rotation supersessions (§7) with
   the identity key. The entry prefix is distinct from the Musebook-request
@@ -608,6 +650,24 @@ below; the daemon enforces whatever is configured, nothing more.
 - `destination_allowlist` (optional) — when set, non-allowlisted destinations
   above the auto-approve level are denied rather than queued
 - All amounts in base units (mojos / wei).
+- **What policy counts for offers (Chia).** Policy judges one entry per
+  (chain, asset), summed over everything the wallet gives up: offer legs
+  are merged per asset (the same asset twice in one offer is refused at
+  request time, on the relay and the Sage path), the offer `fee_mojos` is
+  added to the native entry and bounded by `chia.max_offer_fee_mojos`
+  (default 50,000,000; the bound applies to every Sage intent's fee), and
+  on a take the NFT royalty Sage reports is added to the give leg in its
+  asset; a taker leg carrying `option_assets` or an unknown asset kind is
+  refused.
+- **Non-fungible moves and option exercise (Chia).** `option_exercise`
+  counts the option's strike (read from Sage at request time, re-read and
+  compared at execution) as a give leg in the strike asset, because
+  exercising pays the strike to whoever minted the option. A non-fungible
+  move (`option_exercise`, `option_transfer`, `did_transfer`,
+  `nft_assign_did`) is never a zero-value fee entry: each singleton is its
+  own entry, and these four intents **always queue** for a human, like
+  `offer_cancel` and `message_sign` — caps can still deny them,
+  `auto_approve_below` never lifts them.
 - **Decision ledger (S10, Turbo, ARION; P6):** every intent and decision is
   appended to a daemon-user-owned log — never secrets. Row shape, canonical:
   `{ts, requester_muse, canon_digest(request_bytes_stored), sighash?,

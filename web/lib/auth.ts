@@ -312,10 +312,22 @@ export function mintChallenge(): Challenge | null {
 }
 
 /**
+ * Domain prefix the agent's daemon signs the challenge under
+ * (`spellbook sign-dashboard-challenge`). The signed bytes are
+ * UTF-8(prefix + challenge), never the bare challenge: the point of the
+ * daemon route is that no agent holds the identity seed (review S-04), and
+ * a fixed prefix keeps a dashboard signature from being valid in any other
+ * domain the identity key signs in. Must match
+ * src/spellbook/sign.py DASHBOARD_CHALLENGE_PREFIX.
+ */
+export const DASHBOARD_CHALLENGE_PREFIX = "musebook-dashboard-v1:";
+
+/**
  * Verify a {challenge, signature, pubkey} triple. The signature must be a
- * 128-hex-char Ed25519 signature over the exact challenge string, made by
- * the presented 64-hex-char pubkey (self-asserted agent identity — any
- * agent that installed the Spellbook can log in).
+ * 128-hex-char Ed25519 signature over DASHBOARD_CHALLENGE_PREFIX + the
+ * exact challenge string, made by the presented 64-hex-char pubkey
+ * (self-asserted agent identity — any agent that installed the Spellbook
+ * can log in).
  */
 export function verifyChallengeSignature(
   challenge: string,
@@ -364,7 +376,7 @@ export function verifyChallengeSignature(
     });
     ok = verify(
       null,
-      Buffer.from(challenge, "utf8"),
+      Buffer.from(DASHBOARD_CHALLENGE_PREFIX + challenge, "utf8"),
       key,
       Buffer.from(signatureHex, "hex")
     );

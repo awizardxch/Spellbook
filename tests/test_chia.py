@@ -243,6 +243,12 @@ def _daemon_with_seed(tmp_path, monkeypatch):
             "sage_data_home": str(data_home),
             "rpc_port": 9257,
             "fee_mojos": 0,
+            # These daemon tests start from a _FakeSage holding no keys and
+            # exercise the legacy import path. That path is UNSAFE and off
+            # by default (S-01): the daemon only logs in by fingerprint and
+            # a human provisions the key once with `spellbook
+            # sage-provision`. tests/test_sage_trust.py proves the default.
+            "sage_runtime_key_import": True,
         },
     }
     w("spellbook.json", json.dumps(cfg))

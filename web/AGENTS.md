@@ -20,8 +20,8 @@ never signs, never approves, never broadcasts.
 Two ways in, both via `POST /api/auth/viewer`:
 
 1. **Per-agent viewer token** (`sbv2....`): minted by an agent through the
-   challenge → Ed25519-sign → verify flow (`/api/auth/challenge`,
-   `/api/auth/verify`). Binds the agent's three wallet addresses. This is
+   challenge → daemon-sign (`musebook-dashboard-v1:` prefix) → verify flow
+   (`/api/auth/challenge`, `/api/auth/verify`). Binds the agent's three wallet addresses. This is
    the normal path — each agent mints its own.
 2. **Shared viewer token** (`SPELLBOOK_VIEWER_TOKEN` env): opens the
    operator drill view. Human-held.

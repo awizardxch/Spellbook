@@ -198,6 +198,14 @@ def test_s1_gate_closed_by_default(live):
                             {"method": "POST", "path": "/api/post", "body": "{}"})
 
 
+def test_dashboard_challenge_route_works_with_identity_signing_off(live):
+    # S-04: the dashboard login does not wait on S1; with identity signing
+    # disabled the daemon signs with its own dedicated login key.
+    out = live["agent"].sign_dashboard_challenge("eyJ2IjoxfQ.00ff")
+    assert out["prefix"] == "musebook-dashboard-v1:"
+    assert len(bytes.fromhex(out["signature_hex"])) == 64
+
+
 def test_cli_status(live):
     env = dict(os.environ, SPELLBOOK_SOCKET=live["sock"],
                SPELLBOOK_REQUEST_TOKEN=live["req_token"])

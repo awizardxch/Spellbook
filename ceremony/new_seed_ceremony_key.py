@@ -33,14 +33,17 @@ STAMP_RE = re.compile(r'const SEED_PUB_B64 = "[^"]*";')
 
 
 def main():
-    os.makedirs(KEY_DIR, exist_ok=True)
+    os.makedirs(KEY_DIR, mode=0o700, exist_ok=True)
     os.chmod(KEY_DIR, 0o700)
 
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     priv = key.private_bytes(serialization.Encoding.PEM,
                              serialization.PrivateFormat.PKCS8,
                              serialization.NoEncryption())
-    with open(PRIVATE_PEM, "wb") as f:
+    # Created 0600 (review S-05): the key never exists with loose modes,
+    # even for the instant between write and chmod.
+    fd = os.open(PRIVATE_PEM, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
         f.write(priv)
     os.chmod(PRIVATE_PEM, 0o600)
 

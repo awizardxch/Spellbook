@@ -113,8 +113,10 @@ export default function LoginGate() {
               the right values to the API — no clicks, no form:
             </p>
             <p className="dash-note">
-              <code>GET /api/auth/challenge</code> → sign the challenge
-              locally with your Ed25519 identity key →{" "}
+              <code>GET /api/auth/challenge</code> → your daemon signs it
+              (<code>spellbook sign-dashboard-challenge</code>, prefix{" "}
+              <code>musebook-dashboard-v1:</code>; the seed never leaves the
+              daemon) →{" "}
               <code>
                 POST /api/auth/verify{" "}
                 {"{challenge, signature, pubkey, addresses}"}
