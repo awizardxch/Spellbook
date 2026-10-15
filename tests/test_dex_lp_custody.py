@@ -106,23 +106,32 @@ def test_permit2_from_params_is_refused(tmp_path):
         d._validate_dex_lp_add(_v4_native_add(permit2=ATTACKER))
 
 
-def test_unpinned_chain_lp_add_is_refused(tmp_path, monkeypatch):
-    from test_dex import _base_chain
-    _base_chain(monkeypatch)
+def test_unpinned_chain_lp_add_is_refused(tmp_path):
     d = _daemon(tmp_path)
     with pytest.raises(EvmError, match="no pinned v4_position_manager for "
-                                       "chain 8453"):
-        d._validate_dex_lp_add(_v4_native_add(chain="evm-8453"))
+                                       "chain 1"):
+        d._validate_dex_lp_add(_v4_native_add(chain="evm-1"))
+
+
+def _v2_add(**over):
+    p = {"intent": "dex_lp_add", "chain": CHAIN, "protocol": "v2",
+         "token_a": TOKEN, "token_b": ATTACKER,
+         "amount_a_wei": 1, "amount_b_wei": 1, "amount_a_min_wei": 0,
+         "amount_b_min_wei": 0}
+    p.update(over)
+    return p
 
 
 def test_v2_router_is_refused_without_a_pin(tmp_path):
     d = _daemon(tmp_path)
     with pytest.raises(EvmError, match="no pinned v2_router"):
-        d._validate_dex_lp_add({
-            "intent": "dex_lp_add", "chain": CHAIN, "protocol": "v2",
-            "router": ATTACKER, "token_a": TOKEN, "token_b": ATTACKER,
-            "amount_a_wei": 1, "amount_b_wei": 1, "amount_a_min_wei": 0,
-            "amount_b_min_wei": 0})
+        d._validate_dex_lp_add(_v2_add(chain="evm-1"))
+
+
+def test_v2_router_from_params_is_refused(tmp_path):
+    d = _daemon(tmp_path)
+    with pytest.raises(EvmError, match="not the pinned v2_router"):
+        d._validate_dex_lp_add(_v2_add(router=ATTACKER))
 
 
 def test_remove_and_claim_position_manager_from_params_is_refused(tmp_path):
@@ -214,8 +223,8 @@ def test_queue_entry_shows_the_lp_checks(tmp_path):
     checks = d._decoded_queue()[0]["lp_checks"]
     assert checks["contracts"]["v4_position_manager"]["address"] == POSM
     assert checks["contracts"]["permit2"]["address"] == PERMIT2
-    assert "web/lib/uniswap-v4.ts" in checks["contracts"][
-        "v4_position_manager"]["source"]
+    assert checks["contracts"]["v4_position_manager"]["source"] == (
+        "uniswap deployments.json a677c0d (2026-09-22): PositionManager")
     assert checks["legs"][0] == {"token": NATIVE, "policy_key": "native",
                                  "max_wei": 10**18}
     assert checks["refused"] is None

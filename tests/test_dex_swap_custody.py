@@ -171,12 +171,20 @@ def test_exec_target_that_is_a_token_is_refused():
 
 def test_unpinned_chain_is_refused():
     q = cd.zerox_quote()
+    q["chain_id"] = 1
+    with pytest.raises(DexError, match="no pinned allowance_holder for chain 1"):
+        _check(q, chain_id=1)
+
+
+def test_base_uses_the_same_pinned_holder():
+    q = cd.zerox_quote()
     q["chain_id"] = 8453
-    with pytest.raises(DexError, match="no pinned allowance_holder for chain 8453"):
-        _check(q, chain_id=8453)
+    plan = _check(q, chain_id=8453)
+    assert plan["to"] == cd.HOLDER and plan["allowance_target"] == cd.HOLDER
+    assert plan["decoded"]["target_source"].startswith("0x-settler README")
 
 
-# -- Universal Router (only with an operator pin: none is built in) -------
+# -- Universal Router (operator pin) --------------------------------------
 
 UR_PINS = {cd.CHAIN: {"universal_router": cd.UR}}
 
@@ -200,10 +208,20 @@ def _ur_native(*cmds):
                          deadline=1_900_000_000)
 
 
-def test_uniswap_is_refused_without_a_pinned_router():
+def test_uniswap_router_off_the_pin_list_is_refused():
+    # Without the operator pin, cd.UR is not one of the built-in routers.
     data = _ur_native((0x0B, cd.ur_wrap()), (0x00, cd.ur_v3_in(payer_user=False)))
-    with pytest.raises(DexError, match="no pinned universal_router"):
+    with pytest.raises(DexError, match="not the pinned universal_router"):
         _ur_check(data, str(cd.SELL_AMOUNT), NATIVE_SENTINEL, pins=None)
+
+
+def test_uniswap_is_refused_on_a_chain_without_a_pinned_router():
+    data = _ur_native((0x0B, cd.ur_wrap()), (0x00, cd.ur_v3_in(payer_user=False)))
+    q = _ur_quote(data, str(cd.SELL_AMOUNT), NATIVE_SENTINEL)
+    q["chain_id"] = 1
+    with pytest.raises(DexError, match="no pinned universal_router for chain 1"):
+        validate_swap_intent_against_quote(cd.swap_intent(
+            venue="uniswap", sell_token=NATIVE_SENTINEL, chain_id=1), q)
 
 
 def test_universal_router_native_sell_is_accepted_with_a_pin():
@@ -250,7 +268,8 @@ def test_universal_router_sell_amount_larger_is_refused():
 
 
 @pytest.mark.parametrize("cmd,name", [(0x05, "TRANSFER"), (0x06, "PAY_PORTION"),
-                                      (0x0A, "PERMIT2_PERMIT"), (0x10, "V4_SWAP")])
+                                      (0x0A, "PERMIT2_PERMIT"),
+                                      (0x01, "V3_SWAP_EXACT_OUT")])
 def test_universal_router_unbounded_commands_are_refused(cmd, name):
     data = cd.ur_execute(bytes([0x00, cmd]),
                          [cd.ur_v3_in(), cd.ur_sweep(recipient=cd.ATTACKER)])
@@ -260,13 +279,21 @@ def test_universal_router_unbounded_commands_are_refused(cmd, name):
 
 # -- daemon: request time, overrides, execution ---------------------------
 
-def test_request_for_unpinned_chain_is_refused(tmp_path, monkeypatch):
+def test_request_for_unpinned_chain_is_refused(tmp_path):
     from spellbook.evm import EvmError
-    from test_dex import _base_chain, _daemon, _swap_params
-    _base_chain(monkeypatch)
+    from test_dex import _daemon, _swap_params
     d = _daemon(tmp_path)
-    with pytest.raises(EvmError, match="no pinned allowance_holder for chain 8453"):
-        d._validate_dex_swap(_swap_params(chain="evm-8453"))
+    with pytest.raises(EvmError, match="no pinned allowance_holder for chain 1"):
+        d._validate_dex_swap(_swap_params(chain="evm-1"))
+
+
+def test_request_on_base_is_accepted(tmp_path):
+    from test_dex import _daemon, _swap_params
+    d = _daemon(tmp_path)
+    for venue in ("matcha", "cast"):
+        intent = d._validate_dex_swap(_swap_params(chain="evm-8453",
+                                                   venue=venue))
+        assert intent["chain_id"] == 8453
 
 
 def test_operator_override_pins_a_chain_and_is_logged(tmp_path, monkeypatch, capsys):
