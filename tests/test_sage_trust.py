@@ -88,10 +88,7 @@ class _Listener:
             tls = self.ctx.wrap_socket(conn, server_side=True)
             self.box["handshake"] = True
             tls.settimeout(2)
-            try:
-                data = tls.recv(65536)
-            except Exception:
-                data = b""
+            data = self._read_request(tls)
             self.box["data"] = data
             if data:
                 body = json.dumps({"keys": []}).encode()
@@ -106,6 +103,34 @@ class _Listener:
                 conn.close()
             except Exception:
                 pass
+
+    @staticmethod
+    def _read_request(tls) -> bytes:
+        """Read one whole HTTP request (headers + Content-Length body).
+        Replying with request bytes still unread makes Linux reset the
+        connection on close, which drops the reply in flight."""
+        data = b""
+        try:
+            while b"\r\n\r\n" not in data:
+                chunk = tls.recv(65536)
+                if not chunk:
+                    return data
+                data += chunk
+            head, _, body = data.partition(b"\r\n\r\n")
+            length = 0
+            for line in head.split(b"\r\n")[1:]:
+                name, _, value = line.partition(b":")
+                if name.strip().lower() == b"content-length":
+                    length = int(value.strip())
+            while len(body) < length:
+                chunk = tls.recv(65536)
+                if not chunk:
+                    break
+                body += chunk
+                data += chunk
+        except Exception:
+            pass
+        return data
 
     def join(self):
         self.thread.join(5)
