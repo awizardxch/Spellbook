@@ -21,8 +21,9 @@ to it over its Unix socket.
 ## 2. Connect
 
 You need two things from the install: the socket path and **your** request
-token. The request token lives in your environment — never in chat, logs, or
-code.
+token file (default `/etc/spellbook/request.token`, 0600, owned by your OS
+user; the installer prints the path, never the token). Read it from the
+file — never paste it into chat, logs, code or a tool argument.
 
 ```python
 from spellbook.client import AgentClient
@@ -73,7 +74,7 @@ exists. Read it through the API — never the file (P6).
 
 ```bash
 export SPELLBOOK_SOCKET=/run/spellbook/spellbook.sock
-export SPELLBOOK_REQUEST_TOKEN=<hex>   # your token, not the human's
+export SPELLBOOK_REQUEST_TOKEN_FILE=/etc/spellbook/request.token   # yours, not the human's
 spellbook status
 spellbook queue
 spellbook addresses

@@ -20,9 +20,14 @@ Run `install.sh` on the machine that will run the daemon. It provisions:
 - `spellbookd` + `spellbook` CLI (pip-installable package in `src/`)
 - the Chia **relay** (`relay/`, deployed separately — see §3)
 - two bearer tokens: a **request token** (yours, the agent) and an
-  **approval token** (the human's). Both print once; the request token
-  lives in your environment, never in chat, logs, or code.
-- the paper backup (§6), shown **once**, on the terminal, never logged.
+  **approval token** (the human's). Neither is ever printed. Yours is
+  written to a 0600 file owned by your OS user (default
+  `/etc/spellbook/request.token`; the installer prints the path). Read it
+  from the file (`--token-file`, `$SPELLBOOK_REQUEST_TOKEN_FILE`) — never
+  paste its content into chat, logs, code or a tool argument.
+- the paper backup (§6): never on the installer's stdout. The human shows
+  it once with `spellbook export`, on a terminal; it refuses pipes and
+  refuses your OS user.
 
 Client:
 
@@ -177,21 +182,28 @@ other chain.
 
 ## 6. Paper-backup model (two mnemonic sets)
 
-`install.sh` prints the backup **once**, on the terminal, never logged:
+The backup is shown by `spellbook export` **only** — on a real terminal
+(stdin and stdout both TTYs), written to `/dev/tty`, with a pause, then
+the screen is cleared. It refuses to run without a terminal and refuses
+the agent's OS user, so it can never land in a transcript, a log or a
+tool's output. The installer runs it at the end of an interactive
+install; a non-interactive install (an agent bootstrapping itself, CI)
+completes without showing it and prints the command for the human:
+`sudo spellbook export --prefix /opt/spellbook`. Words only — no raw
+private keys are ever shown; the words recover everything.
 
 - **SET 1 — STANDARD RECOVERY (primary: the daemon's live keys).**
   A second, independent 24-word BIP-39 mnemonic whose keys derive the
-  way stock wallets do (Sage for Chia, MetaMask for EVM). The 24 words
-  *and* the printed raw private keys import directly into stock wallets
-  and yield the same addresses the daemon uses.
+  way stock wallets do (Sage for Chia, MetaMask for EVM, Phantom for
+  Solana). Import the words and the first address matches the one the
+  daemon uses.
 - **SET 2 — SPELLBOOK DAEMON SEED (secondary).** The daemon's custom-KDF
   seed. Its 24 words recover through the Spellbook daemon **only** —
-  they do **not** work in Sage or MetaMask. Its raw keys (EVM scalar →
-  MetaMask, BLS scalar → Sage) do import directly and yield the same
-  addresses the daemon would use.
+  they do **not** work in Sage, MetaMask or Phantom.
 
-Rule: write both sets down on paper, offline, at install. Verify after
-any import by comparing the shown addresses.
+Rule: the human writes both sets down on paper, offline, at install.
+Verify after any import by comparing the shown addresses. You, the agent,
+never see either set.
 
 ## 7. Pointer files
 
@@ -324,6 +336,11 @@ curl -s -b jar.txt "$BASE/api/holdings?depth=5" | python3 -m json.tool | head -6
 curl -s -b jar.txt -X POST $BASE/api/auth/logout
 ```
 
+There is deliberately no "sign it yourself" example. A signature over the
+bare challenge is rejected by the dashboard (it verifies
+`musebook-dashboard-v1:` + challenge), and the only process that should be
+able to produce the prefixed one is your daemon.
+
 Notes:
 
 - The session cookie is `HttpOnly; SameSite=Lax` (12h). Keep the
@@ -333,8 +350,3 @@ Notes:
   fetch a fresh challenge and sign again; never reuse a signature.
 - The dashboard is strictly read-only: it cannot approve, sign,
   broadcast, or mint anything, for either role.
-There is deliberately no "sign it yourself" example. A signature over the
-bare challenge is rejected by the dashboard (it verifies
-`musebook-dashboard-v1:` + challenge), and the only process that should be
-able to produce the prefixed one is your daemon.
-

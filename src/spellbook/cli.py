@@ -22,9 +22,16 @@ Approve-token commands (the human's own tooling — separate device per O5):
   spellbook approve <queue_id>
   spellbook reject <queue_id>
 
+Human-only, no socket, no token (S3; review S-05):
+  spellbook export [--prefix /opt/spellbook]
+    shows the paper backup (the two 24-word sets, no raw keys) on the
+    terminal once, waits for Enter, clears the screen. Refuses without a
+    TTY and refuses the agent's OS user. Run it yourself as root or the
+    spellbook user, e.g. `sudo spellbook export`.
+
 Token resolution per subcommand:
-  request side: --token-file, else $SPELLBOOK_REQUEST_TOKEN
-  approve side: --token-file, else $SPELLBOOK_APPROVE_TOKEN
+  request side: --token-file, else $SPELLBOOK_REQUEST_TOKEN_FILE, else $SPELLBOOK_REQUEST_TOKEN
+  approve side: --token-file, else $SPELLBOOK_APPROVE_TOKEN_FILE, else $SPELLBOOK_APPROVE_TOKEN
 Socket: --socket, else $SPELLBOOK_SOCKET (default /run/spellbook/spellbook.sock)
 """
 import argparse
@@ -38,12 +45,17 @@ DEFAULT_SOCKET = "/run/spellbook/spellbook.sock"
 
 
 def _token(args, env_name: str) -> str:
-    if args.token_file:
-        with open(args.token_file) as f:
+    # Resolution: --token-file, else $<ENV>_FILE (a 0600 file — what the
+    # installer writes for the agent), else $<ENV> (the bare value; works,
+    # but a token in the environment is a token in every child process).
+    path = args.token_file or os.environ.get(env_name + "_FILE", "").strip()
+    if path:
+        with open(path) as f:
             return f.read().strip()
     tok = os.environ.get(env_name, "").strip()
     if not tok:
-        raise SystemExit(f"no token: pass --token-file or set ${env_name}")
+        raise SystemExit(
+            f"no token: pass --token-file, or set ${env_name}_FILE (preferred) or ${env_name}")
     return tok
 
 
@@ -316,6 +328,13 @@ def main(argv=None):
     sub.add_parser("ledger")
     sub.add_parser("addresses")
 
+    ex = sub.add_parser(
+        "export",
+        help="HUMAN ONLY: show the paper backup once on this terminal, "
+             "then clear it (refuses without a TTY or as the agent's user)")
+    ex.add_argument("--prefix", default="/opt/spellbook",
+                    help="the daemon's config dir (default /opt/spellbook)")
+
     sd = sub.add_parser(
         "sign-dashboard-challenge",
         help="have the daemon sign a dashboard login challenge "
@@ -508,6 +527,10 @@ def main(argv=None):
     ou.add_argument("--hidden", action="store_true")
 
     a = ap.parse_args(argv)
+
+    if a.cmd == "export":
+        from spellbook.export import run_export
+        raise SystemExit(run_export(a.prefix))
 
     try:
         if a.cmd in ("approve", "reject"):

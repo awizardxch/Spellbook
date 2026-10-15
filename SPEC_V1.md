@@ -1064,11 +1064,21 @@ testnet-proven install with one command and no human coordination.
      The install only completes when the drill passes — every install proves
      itself on testnet before mainnet is possible. A failed drill leaves the
      machine clean and prints how to resume without reinstalling (S14).
-  5. Prints next steps: opt-in policy knobs, paper backup (§6), directory
-     entry (§8) — and says out loud that every spend queues for human
-     approval until the human configures policy (S4) — a delay, not a cap.
-- The installer never asks for keys, never transmits anything outward, and
-  never touches the real muse key — the drill uses a throwaway.
+  5. Prints next steps: opt-in policy knobs, directory entry (§8) — and
+     says out loud that every spend queues for human approval until the
+     human configures policy (S4) — a delay, not a cap. The paper backup
+     (§6) is NOT on the installer's stdout (review S-05, 2026-10-15): it
+     is shown only by `spellbook export`, which requires a terminal on
+     both stdin and stdout, refuses the agent's OS user, writes the words
+     to `/dev/tty`, pauses, and clears the screen — words only, no raw
+     keys. An interactive install runs it at the end; a non-interactive
+     one (the "one command" agent bootstrap) completes without showing it
+     and prints the command for the human. The agent's request token is
+     written to a 0600 file owned by the agent user; only its path is
+     printed. The approve token is never printed.
+- The installer never asks for keys, never prints a secret, never transmits
+  anything outward, and never touches the real muse key — the drill uses a
+  throwaway.
 
 **Upgrades**
 - New release → announcement in the town thread → each muse re-runs the

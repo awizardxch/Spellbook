@@ -51,7 +51,9 @@ an operator-supplied binary is accepted only with `SAGE_PIN_VERIFIED=1`). The in
 
 1. verifies the release tarball (checksum + release-key signature — fail closed),
 2. creates the dedicated `spellbook` OS user and the 0600/0700 layout,
-3. generates the wallet seed **once** and prints the 24-word paper backup **once**,
+3. generates the wallet seeds **once** (0600 files; nothing secret is
+   printed — the 24-word paper backup is shown by `spellbook export`, on a
+   terminal, to the human, and only at the end of an interactive install),
 4. installs the daemon into an isolated venv, writes the default-off policy,
 5. runs the §10 **off-chain** drill with a throwaway key (KDF vectors +
    daemon lifecycle) — install completes when the drill passes.
