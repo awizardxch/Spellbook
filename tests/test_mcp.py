@@ -176,31 +176,94 @@ def test_parse_error_and_batch():
     assert lines[1] == [{"jsonrpc": "2.0", "id": 1, "result": {}}]
 
 
-def test_seed_tools_drive_the_human_viewer(live, monkeypatch):
+def test_seed_tools_hand_out_the_hosted_page_only(live, monkeypatch, tmp_path):
+    """S-17/S-18: the agent's tools start no local viewer and get nothing
+    but a hosted URL (public key in the fragment); the envelope the human's
+    page returns is opened by the daemon user's key, never by the agent."""
+    from Crypto.PublicKey import RSA
+    from spellbook import ceremony
     for k, v in live["env"].items():
         monkeypatch.setenv(k, v)
+
+    def no_process(*a, **k):
+        raise AssertionError("an agent tool tried to start a process")
+    monkeypatch.setattr(subprocess, "Popen", no_process)
+    import socket
+    real_bind = socket.socket.bind
+
+    def no_listen(self, addr):
+        if self.family in (socket.AF_INET, socket.AF_INET6):
+            raise AssertionError("an agent tool tried to open a listening port")
+        return real_bind(self, addr)
+    monkeypatch.setattr(socket.socket, "bind", no_listen)
+
+    # The daemon user's key pair: the agent's environment names only the
+    # PUBLIC half.
+    key = RSA.generate(2048)
+    priv = tmp_path / "ceremony.pem"
+    priv.write_bytes(key.export_key())
+    priv.chmod(0o600)
+    pub = tmp_path / "ceremony.pub.pem"
+    pub.write_bytes(key.publickey().export_key())
+    monkeypatch.setenv("SPELLBOOK_CEREMONY_PUB", str(pub))
     tmp = live["tmp"]
+
     ok, text = agent_tools.call_tool("spellbook_seed_status")
     assert ok and json.loads(text)["state"] == "unsealed"
-    pw = "an mcp test password"
-    sealed.seal(pw, n=2 ** 10)
+    assert "serve" not in json.loads(text)["hint"]
+    # An old client still passing the local viewer's port starts nothing.
+    ok, text = agent_tools.call_tool("spellbook_seed_viewer", {"port": 0})
+    assert ok, text
+    info = json.loads(text)
+    der = key.publickey().export_key(format="DER")
+    assert info["started"] is False and info["op"] == "seal"
+    assert info["url"].startswith("https://spellbook.awizard.dev/ceremony/seal.html#k=")
+    assert "?" not in info["url"] and "127.0.0.1" not in text
+    assert info["key_fingerprint"] == ceremony.grouped(ceremony.key_fingerprint(der))
+    assert "PRIVATE" not in text and "spellbook-ceremony apply" in info["then"]
+
+    # The human's browser seals the password to the key in the fragment.
+    pw = "an mcp test seal password 9!"
+    env_seal = ceremony.seal_envelope("seal", {"password": pw}, der)
+    ok, text = agent_tools.call_tool("spellbook_ceremony_inspect",
+                                     {"envelope": env_seal})
+    assert ok and json.loads(text)["kind"] == "seal" and pw not in text
+    # The daemon user opens it (the agent has no key to do so).
+    ceremony.apply_password(env_seal, str(priv), n=2 ** 10)
     os.rename(os.path.join(tmp, "seed.key"), os.path.join(tmp, "seed.key.bak"))
     try:
         ok, text = agent_tools.call_tool("spellbook_seed_status")
         assert ok and json.loads(text)["state"] == "locked"
-        ok, text = agent_tools.call_tool("spellbook_seed_viewer", {"port": 0})
-        assert ok, text
+        ok, text = agent_tools.call_tool("spellbook_seed_viewer")
         info = json.loads(text)
-        assert info["started"] and "password" in info["tell_your_human"]
-        assert pw not in text
-        # The human's side: open the link, enter the password.
-        data = urllib.parse.urlencode({"password": pw}).encode()
-        with urllib.request.urlopen(info["url"] + "unlock", data=data) as r:
-            assert "Seed unlocked" in r.read().decode()
+        assert info["op"] == "unlock" and info["url"].endswith("&op=unlock")
+        env_unlock = ceremony.seal_envelope("unlock", {"password": pw}, der)
+        ceremony.apply_password(env_unlock, str(priv))
         ok, text = agent_tools.call_tool("spellbook_seed_status")
         assert json.loads(text)["state"] == "unlocked"
     finally:
-        os.replace(os.path.join(tmp, "seed.key.bak"), os.path.join(tmp, "seed.key"))
+        if os.path.exists(os.path.join(tmp, "seed.key.bak")):
+            os.replace(os.path.join(tmp, "seed.key.bak"),
+                       os.path.join(tmp, "seed.key"))
+        sealed_file = live["env"]["SPELLBOOK_SEALED_PATH"]
+        if os.path.exists(sealed_file):
+            os.remove(sealed_file)
+
+    ok, text = agent_tools.call_tool("spellbook_seed_viewer", {"page": "backup"})
+    info = json.loads(text)
+    assert ok and info["url"] == "https://spellbook.awizard.dev/ceremony/backup.html"
+    assert "--reveal-key" in info["then"]
+    ok, text = agent_tools.call_tool("spellbook_seed_viewer", {"page": "restore"})
+    info = json.loads(text)
+    assert ok and info["op"] == "restore" and "#k=" in info["url"]
+
+
+def test_no_agent_tool_can_start_a_viewer():
+    import inspect as _inspect
+    src = _inspect.getsource(agent_tools)
+    for banned in ("subprocess", '"serve"', "HTTPServer", "sealed.serve",
+                   "open_envelope", "apply_password", "_load_private"):
+        assert banned not in src, banned
 
 
 def test_schema_exports():
