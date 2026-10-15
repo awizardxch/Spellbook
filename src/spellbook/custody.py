@@ -66,6 +66,12 @@ import time
 CEREMONY_DIR = "ceremony"
 CEREMONY_KEY = "private.pem"
 CEREMONY_PUB = "public_b64.txt"
+# The public half as PEM, the name spellbook-ceremony (S-17) looks for.
+CEREMONY_PUB_PEM = "ceremony.pub.pem"
+# install.sh publishes a root-owned, world-readable copy here and sets
+# spellbook.json ceremony_pub_path to it: the prefix is 0700, so the
+# agent cannot read the copy beside the key.
+PUBLISHED_PUB_PATH = "/usr/local/share/spellbook/ceremony.pub.pem"
 CEREMONY_META = "key.json"
 BACKUP_STATE = "backup.json"
 LEGACY_KEY_PATH = "~/workspace/.spellbook/seed-derive/private.pem"
@@ -227,7 +233,26 @@ def _check_runner(prefix: str, cfg: dict | None) -> None:
 
 def _public_b64(key) -> tuple[str, str]:
     der = key.publickey().export_key(format="DER")  # SubjectPublicKeyInfo
-    return base64.b64encode(der).decode(), hashlib.sha256(der).hexdigest()[:32]
+    return base64.b64encode(der).decode(), key_fingerprint(der)
+
+
+def key_fingerprint(der: bytes) -> str:
+    """Full sha256 hex of the SPKI DER: what the ceremony pages show and
+    ask the human to match (spellbook.ceremony.key_fingerprint)."""
+    return hashlib.sha256(der).hexdigest()
+
+
+def grouped(fp: str) -> str:
+    return " ".join(fp[i:i + 4] for i in range(0, len(fp), 4))
+
+
+def _write_public(prefix: str, key) -> str:
+    pub, _ = _public_b64(key)
+    d = ceremony_dir(prefix)
+    _write_exclusive(os.path.join(d, CEREMONY_PUB), pub.encode(), 0o644, prefix)
+    _write_exclusive(os.path.join(d, CEREMONY_PUB_PEM),
+                     key.publickey().export_key(format="PEM"), 0o644, prefix)
+    return pub
 
 
 def _write_meta(prefix: str, origin: str) -> None:
@@ -263,8 +288,7 @@ def generate_ceremony_key(prefix: str, *, rotate: bool = False) -> dict:
     key = RSA.generate(2048)
     _write_exclusive(path, key.export_key(format="PEM", pkcs=8), 0o600, prefix)
     pub, fp = _public_b64(key)
-    _write_exclusive(os.path.join(ceremony_dir(prefix), CEREMONY_PUB),
-                     pub.encode(), 0o644, prefix)
+    _write_public(prefix, key)
     _write_meta(prefix, "generated")
     if rotate:
         require_backup(prefix)
@@ -280,7 +304,16 @@ def public_key_info(prefix: str) -> dict | None:
     except (OSError, ValueError):
         return None
     return {"public_key_b64": pub,
-            "fingerprint": hashlib.sha256(der).hexdigest()[:32]}
+            "fingerprint": key_fingerprint(der)}
+
+
+def public_pem(prefix: str) -> bytes:
+    """The daemon's ceremony PUBLIC key as PEM (for publishing)."""
+    info = public_key_info(prefix)
+    if info is None:
+        raise CustodyError("no ceremony public key: run `spellbook ceremony-key`")
+    from Crypto.PublicKey import RSA
+    return RSA.import_key(base64.b64decode(info["public_key_b64"])).export_key(format="PEM")
 
 
 def read_private_key(path: str, owner_uid: int, *, strict: bool = True):
@@ -384,9 +417,7 @@ def adopt_ceremony_key(prefix: str, src: str, *, check_runner: bool = True) -> d
     else:
         _ensure_private_dir(prefix)
         _write_exclusive(dest, pem, 0o600, prefix)
-        pub, _ = _public_b64(key)
-        _write_exclusive(os.path.join(ceremony_dir(prefix), CEREMONY_PUB),
-                         pub.encode(), 0o644, prefix)
+        _write_public(prefix, key)
         _write_meta(prefix, "adopted")
     # Read back before destroying the only other copy.
     if read_private_key(dest, owner).export_key(format="PEM", pkcs=8) != pem:

@@ -126,7 +126,8 @@ def paper_backup_text(kdf_seed: bytes | None, std_entropy: bytes | None,
                       std_words_lost: bool = False,
                       terminal: bool = True,
                       live_std_seed: bytes | None = None,
-                      confirm_code: str | None = None) -> str:
+                      confirm_code: str | None = None,
+                      ceremony_fingerprint: str | None = None) -> str:
     """The paper backup: words and addresses, never raw keys."""
     if kdf_seed is None and std_entropy is None and live_std_seed is None:
         raise ValueError("nothing to export: no seed on this install")
@@ -191,6 +192,17 @@ def paper_backup_text(kdf_seed: bytes | None, std_entropy: bytes | None,
             lines += [""] + [f"  {chain:<18}  {addr}" for chain, addr in a.items()]
     lines += ["", "Verify after any import: the addresses must match what the",
               "wallet shows."]
+    if ceremony_fingerprint is not None and terminal:
+        # Out of band for the human (S-16/S-17): only this terminal
+        # shows it; the hosted ceremony pages ask for its first hex
+        # digits so an agent-swapped key is caught.
+        lines += [
+            "",
+            "DAEMON CEREMONY KEY FINGERPRINT (sha256, public — not a secret):",
+            "  " + ceremony_fingerprint,
+            "A sealing page must show this same fingerprint before you seal",
+            "or restore anything to it. Note at least the first 16 digits.",
+        ]
     if confirm_code is not None:
         lines += [
             "",
@@ -299,6 +311,12 @@ def _live(prefix: str):
         return None, None
 
 
+def _ceremony_fp(prefix: str) -> str | None:
+    from spellbook import custody
+    info = custody.public_key_info(prefix)
+    return custody.grouped(info["fingerprint"]) if info else None
+
+
 def run_export(prefix: str, *, reveal_key: str | None = None,
                tty_path: str = "/dev/tty", verify: bool = True) -> int:
     """The CLI body. Returns the exit status; reasons go to stderr."""
@@ -325,7 +343,8 @@ def run_export(prefix: str, *, reveal_key: str | None = None,
                                  std_words_lost=std_words_lost,
                                  terminal=reveal_key is None,
                                  live_std_seed=live_std,
-                                 confirm_code=code)
+                                 confirm_code=code,
+                                 ceremony_fingerprint=_ceremony_fp(prefix))
     except PermissionError:
         print("spellbook export: cannot read the seed files — run it as root "
               "or the spellbook user (e.g. `sudo spellbook export`)",
