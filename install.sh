@@ -351,9 +351,33 @@ if [ "$UPGRADE" = "1" ]; then
   # A human-run upgrade reuses the pinned fingerprint from the root-owned
   # record; the wrapper passes it explicitly.
   [ -n "$RELEASE_KEY_FPR" ] || RELEASE_KEY_FPR="$(env_val SPELLBOOK_RELEASE_KEY_FPR)"
+  ENV_HTTPS_PROXY="$(env_val SPELLBOOK_HTTPS_PROXY || true)"
+  ENV_HTTP_PROXY="$(env_val SPELLBOOK_HTTP_PROXY || true)"
+  ENV_NO_PROXY="$(env_val SPELLBOOK_NO_PROXY || true)"
   log "upgrade mode: installed version $(cat "${PREFIX}/VERSION"), identity will be preserved"
 fi
 [ -n "$AGENT_USER" ] || fail "--agent-user is required (the OS user your agent runs as)"
+
+# Proxy (hosts whose egress goes through one, e.g. cloud agent VMs): taken
+# from this install's environment, else, on --upgrade, from the install
+# record. It is recorded in install.env so the root upgrade wrapper, which
+# refuses proxy variables from its caller, can pass it to git and to this
+# installer, and written into the daemon's unit for its own RPC calls.
+PROXY_HTTPS="${https_proxy:-${HTTPS_PROXY:-${ENV_HTTPS_PROXY:-}}}"
+PROXY_HTTP="${http_proxy:-${HTTP_PROXY:-${ENV_HTTP_PROXY:-}}}"
+PROXY_NO="${no_proxy:-${NO_PROXY:-${ENV_NO_PROXY:-}}}"
+valid_proxy_url() {
+  [ -z "$1" ] && return 0
+  printf '%s\n' "$1" \
+    | grep -Eqx '(https?|socks5h?)://([A-Za-z0-9._~%!+-]+(:[A-Za-z0-9._~%!+-]*)?@)?[A-Za-z0-9.-]+(:[0-9]{1,5})?/?'
+}
+valid_proxy_url "$PROXY_HTTPS" || fail "https_proxy is not a proxy URL (scheme://host[:port])"
+valid_proxy_url "$PROXY_HTTP" || fail "http_proxy is not a proxy URL (scheme://host[:port])"
+{ [ -z "$PROXY_NO" ] || printf '%s\n' "$PROXY_NO" | grep -Eqx '[A-Za-z0-9.*:/_-]+(,[A-Za-z0-9.*:/_-]+)*'; } \
+  || fail "no_proxy is not a comma-separated host list"
+if [ -n "$PROXY_HTTPS" ]; then export https_proxy="$PROXY_HTTPS" HTTPS_PROXY="$PROXY_HTTPS"; fi
+if [ -n "$PROXY_HTTP" ]; then export http_proxy="$PROXY_HTTP" HTTP_PROXY="$PROXY_HTTP"; fi
+if [ -n "$PROXY_NO" ]; then export no_proxy="$PROXY_NO" NO_PROXY="$PROXY_NO"; fi
 [ "$(id -u)" = "0" ] || fail "run as root (it creates the ${SPELLBOOK_USER} user)"
 id "$AGENT_USER" >/dev/null 2>&1 || fail "agent user '$AGENT_USER' does not exist"
 if [ -n "$HUMAN_USER" ]; then
@@ -904,6 +928,9 @@ SPELLBOOK_INSTALLED_TAG="${TAG:-from-dir}"
 SPELLBOOK_RELEASE_KEY_FPR="${RELEASE_KEY_FPR:-}"
 SPELLBOOK_CANONICAL_REPO="${OLD_CANONICAL_REPO}"
 SPELLBOOK_UPGRADE_DELAY_HOURS="${OLD_DELAY_HOURS}"
+SPELLBOOK_HTTPS_PROXY="${PROXY_HTTPS}"
+SPELLBOOK_HTTP_PROXY="${PROXY_HTTP}"
+SPELLBOOK_NO_PROXY="${PROXY_NO}"
 EOF
 chown root:root "${ROOT_LIB}/install.env.new.$$"; chmod 0600 "${ROOT_LIB}/install.env.new.$$"
 mv -f "${ROOT_LIB}/install.env.new.$$" "${ROOT_LIB}/install.env"
@@ -920,6 +947,18 @@ fi
 log "install record written (version ${NEW_VERSION}; self-serve upgrade ready)"
 
 log "installing the systemd unit ..."
+# The daemon makes its own HTTPS RPC calls (EVM/Solana); on hosts whose
+# egress goes through a proxy it must inherit the proxy or its RPC calls
+# die with SSL WRONG_VERSION_NUMBER (b8ac6c8; values validated above).
+PROXY_UNIT_ENV=""
+for pv in "https_proxy=${PROXY_HTTPS}" "HTTPS_PROXY=${PROXY_HTTPS}" \
+          "http_proxy=${PROXY_HTTP}" "HTTP_PROXY=${PROXY_HTTP}" \
+          "no_proxy=${PROXY_NO}" "NO_PROXY=${PROXY_NO}"; do
+  if [ -n "${pv#*=}" ]; then
+    PROXY_UNIT_ENV="${PROXY_UNIT_ENV}Environment=${pv}
+"
+  fi
+done
 cat > /etc/systemd/system/spellbookd.service <<EOF
 [Unit]
 Description=Spellbook policy daemon (per-agent wallet custody)
@@ -930,7 +969,7 @@ Type=simple
 User=${SPELLBOOK_USER}
 Group=${SPELLBOOK_USER}
 RuntimeDirectory=spellbook
-ExecStart=${VENV}/bin/spellbookd --socket ${SOCK_PATH} --config ${PREFIX}
+${PROXY_UNIT_ENV}ExecStart=${VENV}/bin/spellbookd --socket ${SOCK_PATH} --config ${PREFIX}
 Restart=on-failure
 RestartSec=5
 # No auto-update, no network egress needed. Secrets never leave this host.

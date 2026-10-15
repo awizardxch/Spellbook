@@ -83,6 +83,10 @@ checked from the installing machine against
    `GNUPGHOME`, `SPELLBOOK_*`, …), and the root-trusted files
    (`/usr/local/lib/spellbook/{install.sh,install.env,VERSION}` and every
    parent directory) root-owned, not symlinks, writable by no one else.
+   Proxy variables from the caller are refused too: a host behind a proxy
+   gets it from `install.env` (`SPELLBOOK_HTTPS_PROXY`,
+   `SPELLBOOK_HTTP_PROXY`, `SPELLBOOK_NO_PROXY`, recorded by install.sh
+   from its own environment), validated and passed to git and the installer.
 2. **Signed tag.** `refs/tags/X.Y.Z` on the canonical repo is an annotated
    tag that names itself `X.Y.Z`, with exactly one good signature by the
    pinned fingerprint. `EXPKEYSIG`, `REVKEYSIG`, `BADSIG`, `ERRSIG` are

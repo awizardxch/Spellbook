@@ -34,7 +34,7 @@
 # later, nothing is wrong); anything else refused.
 #
 # Usage: spellbook-upgrade 0.4.0
-set -eu
+set -euf   # -f: no globbing anywhere (a no_proxy value may hold "*")
 
 # ---- fixed configuration --------------------------------------------------
 # Nothing here is read from the environment. The installed copy is
@@ -83,12 +83,14 @@ for name in $(env | sed -n 's/^\([^=]*\)=.*/\1/p'); do
   case "$name" in
     LD_*|BASH_ENV|ENV|BASH_FUNC_*|SHELLOPTS|BASHOPTS|PS4|CDPATH|GLOBIGNORE|\
     GNUPGHOME|GPG_*|GIT_*|PYTHON*|PERL5*|PERLLIB|RUBY*|NODE_OPTIONS|\
-    SSL_CERT_*|CURL_CA_BUNDLE|SPELLBOOK_*|SAGE_*|CARGO_*|RUSTUP_*|TMPDIR)
+    SSL_CERT_*|CURL_CA_BUNDLE|SPELLBOOK_*|SAGE_*|CARGO_*|RUSTUP_*|TMPDIR|\
+    http_proxy|https_proxy|all_proxy|no_proxy|ftp_proxy|\
+    HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|FTP_PROXY)
       poisoned="${poisoned} ${name}" ;;
   esac
 done
 [ -z "$poisoned" ] \
-  || refuse "environment carries${poisoned}; run plain \`sudo spellbook-upgrade X.Y.Z\` (no sudo -E, no VAR=...)"
+  || refuse "environment carries${poisoned}; run plain \`sudo spellbook-upgrade X.Y.Z\` (no sudo -E, no VAR=...; a proxy belongs in ${CONF_DIR}/install.env)"
 
 # ---- 1e. root-trusted files nobody else can replace (S-29) ----------------
 # $1 = path. It and every parent must be owned by root (or REQUIRED_UID),
@@ -143,6 +145,29 @@ case "$REPO" in
   *) die "install.env SPELLBOOK_CANONICAL_REPO must be an https:// URL" ;;
 esac
 
+# Proxy: hosts whose egress goes through a proxy (cloud agent VMs) record it
+# in install.env at install time. It is taken from there only, never from
+# the caller's environment (refused above), validated, and passed by name
+# to git and the installer.
+HTTPS_PROXY_V="$(conf_val SPELLBOOK_HTTPS_PROXY)"
+HTTP_PROXY_V="$(conf_val SPELLBOOK_HTTP_PROXY)"
+NO_PROXY_V="$(conf_val SPELLBOOK_NO_PROXY)"
+valid_proxy() {
+  [ -z "$1" ] && return 0
+  printf '%s\n' "$1" \
+    | grep -Eqx '(https?|socks5h?)://([A-Za-z0-9._~%!+-]+(:[A-Za-z0-9._~%!+-]*)?@)?[A-Za-z0-9.-]+(:[0-9]{1,5})?/?'
+}
+valid_proxy "$HTTPS_PROXY_V" || die "install.env SPELLBOOK_HTTPS_PROXY is not a proxy URL (scheme://host[:port])"
+valid_proxy "$HTTP_PROXY_V" || die "install.env SPELLBOOK_HTTP_PROXY is not a proxy URL (scheme://host[:port])"
+[ -z "$NO_PROXY_V" ] || printf '%s\n' "$NO_PROXY_V" | grep -Eqx '[A-Za-z0-9.*:/_-]+(,[A-Za-z0-9.*:/_-]+)*' \
+  || die "install.env SPELLBOOK_NO_PROXY is not a comma-separated host list"
+# Validated values hold no whitespace or quotes, and globbing is off, so
+# this word-splits into exactly these assignments.
+PROXY_ENV=""
+[ -n "$HTTPS_PROXY_V" ] && PROXY_ENV="${PROXY_ENV} https_proxy=${HTTPS_PROXY_V} HTTPS_PROXY=${HTTPS_PROXY_V}"
+[ -n "$HTTP_PROXY_V" ] && PROXY_ENV="${PROXY_ENV} http_proxy=${HTTP_PROXY_V} HTTP_PROXY=${HTTP_PROXY_V}"
+[ -n "$NO_PROXY_V" ] && PROXY_ENV="${PROXY_ENV} no_proxy=${NO_PROXY_V} NO_PROXY=${NO_PROXY_V}"
+
 # ---- 7. forward-only (read from the root-owned copy, not /opt/spellbook) --
 INSTALLED="$(tr -d '[:space:]' < "$VERSION_FILE")"
 if [ "$INSTALLED" != "$TAG" ]; then
@@ -158,7 +183,8 @@ trap 'exit 1' HUP INT TERM
 mkdir -m 0700 "${WORK}/gnupg" "${WORK}/home"
 # Every git/gpg call runs with an empty environment plus exactly these.
 G() {
-  env -i PATH="$SAFE_PATH" HOME="${WORK}/home" LC_ALL=C GNUPGHOME="${WORK}/gnupg" \
+  # shellcheck disable=SC2086
+  env -i PATH="$SAFE_PATH" HOME="${WORK}/home" LC_ALL=C GNUPGHOME="${WORK}/gnupg" $PROXY_ENV \
     GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
     git -C "${WORK}/repo" "$@"
 }
@@ -257,7 +283,8 @@ set -- --upgrade "$TAG" --expect-sha256 "$SHA" \
 
 echo "[spellbook-upgrade] ${INSTALLED} -> ${TAG}: signed tag on ${CANONICAL_BRANCH}, not yanked, past the delay window (keys/config/ledger untouched)"
 rc=0
-env -i PATH="$SAFE_PATH" HOME=/root LC_ALL=C GNUPGHOME="${WORK}/gnupg" \
+# shellcheck disable=SC2086
+env -i PATH="$SAFE_PATH" HOME=/root LC_ALL=C GNUPGHOME="${WORK}/gnupg" $PROXY_ENV \
   SPELLBOOK_RELEASE_KEY_FPR="$FPR" \
   bash "$INSTALLER" "$@" || rc=$?
 exit "$rc"

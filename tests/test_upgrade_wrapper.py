@@ -169,7 +169,8 @@ class Canon:
 class Host:
     """A fake root-owned layout: conf dir, state dir, stub installer."""
 
-    def __init__(self, tmp, canon, fpr, delay="24", installed=INSTALLED):
+    def __init__(self, tmp, canon, fpr, delay="24", installed=INSTALLED,
+                 extra_env="", git_shim=False):
         self.conf = os.path.join(tmp, "conf")
         self.state = os.path.join(tmp, "state")
         os.makedirs(self.conf)
@@ -188,7 +189,7 @@ class Host:
             'SPELLBOOK_NO_SAGE="0"\n'
             f'SPELLBOOK_RELEASE_KEY_FPR="{fpr}"\n'
             f'SPELLBOOK_CANONICAL_REPO="{canon.bare}"\n'
-            f'SPELLBOOK_UPGRADE_DELAY_HOURS="{delay}"\n')
+            f'SPELLBOOK_UPGRADE_DELAY_HOURS="{delay}"\n' + extra_env)
         os.chmod(env_file, 0o600)
         vf = os.path.join(self.conf, "VERSION")
         open(vf, "w").write(installed + "\n")
@@ -200,6 +201,21 @@ class Host:
                 ('STATE_DIR="/var/lib/spellbook-upgrade"\n', f'STATE_DIR="{self.state}"\n')):
             assert src.count(old) == 1, f"wrapper has no fixed line {old!r}"
             src = src.replace(old, new)
+        if git_shim:
+            # A `git` first on the wrapper's fixed PATH that records the
+            # environment each fetch runs with, then runs the real git.
+            shim = os.path.join(tmp, "shim")
+            os.makedirs(shim)
+            self.fetch_env = os.path.join(tmp, "fetch.env")
+            real = shutil.which("git")
+            open(os.path.join(shim, "git"), "w").write(
+                "#!/bin/sh\n"
+                f'case " $* " in *" fetch "*) env > \'{self.fetch_env}\' ;; esac\n'
+                f'exec {real} "$@"\n')
+            os.chmod(os.path.join(shim, "git"), 0o755)
+            old = 'SAFE_PATH="/usr/local/sbin:'
+            assert src.count(old) == 1
+            src = src.replace(old, f'SAFE_PATH="{shim}:/usr/local/sbin:')
         self.wrapper = os.path.join(tmp, "spellbook-upgrade")
         open(self.wrapper, "w").write(src)
         os.chmod(self.wrapper, 0o755)
@@ -564,3 +580,80 @@ def test_installer_pins_root_trusted_copies_from_the_verified_tree():
     # the release key vouches for (GitHub Release assets).
     fn = src[src.index("fetch_prebuilt_file() {"):src.index("fetch_prebuilt_file \"${tgz}\"")]
     assert '[ -z "$EXPECT_SHA256" ]' in fn
+
+
+# ---------------------------------------------------------------- proxy (from install.env only)
+
+PROXY_LINES = ('SPELLBOOK_HTTPS_PROXY="http://proxy.internal:3128"\n'
+               'SPELLBOOK_HTTP_PROXY="http://proxy.internal:3128"\n'
+               'SPELLBOOK_NO_PROXY="localhost,127.0.0.1,*.internal"\n')
+
+
+def test_proxy_from_install_env_reaches_fetch_and_installer(keys, tmp):
+    c = Canon(keys, tmp)
+    c.good_release()
+    h = Host(tmp, c, keys.release, extra_env=PROXY_LINES, git_shim=True)
+    h.seen(c.commit_of())
+    r = h.run(TAG)
+    assert r.returncode == 0, r.stderr
+    fetch = open(h.fetch_env).read().splitlines()
+    for line in ("https_proxy=http://proxy.internal:3128",
+                 "HTTPS_PROXY=http://proxy.internal:3128",
+                 "http_proxy=http://proxy.internal:3128",
+                 "no_proxy=localhost,127.0.0.1,*.internal"):
+        assert line in fetch, fetch
+    inst = open(h.ran + ".env").read().splitlines()
+    assert "https_proxy=http://proxy.internal:3128" in inst
+    assert "no_proxy=localhost,127.0.0.1,*.internal" in inst
+
+
+def test_no_proxy_configured_means_none_passed(keys, tmp):
+    c = Canon(keys, tmp)
+    c.good_release()
+    h = Host(tmp, c, keys.release, git_shim=True)
+    h.seen(c.commit_of())
+    r = h.run(TAG)
+    assert r.returncode == 0, r.stderr
+    names = [l.split("=", 1)[0].lower() for l in open(h.fetch_env).read().splitlines()]
+    assert not [n for n in names if n.endswith("_proxy")], names
+
+
+@pytest.mark.parametrize("var", ["https_proxy", "HTTPS_PROXY", "http_proxy",
+                                 "no_proxy", "ALL_PROXY"])
+def test_proxy_in_caller_environment_is_refused(keys, tmp, var):
+    c = Canon(keys, tmp)
+    c.good_release()
+    h = Host(tmp, c, keys.release, extra_env=PROXY_LINES)
+    h.seen(c.commit_of())
+    _refused(h.run(TAG, env=dict(CLEAN_ENV, **{var: "http://evil:8080"})), h,
+             f"environment carries {var}")
+
+
+@pytest.mark.parametrize("line", [
+    'SPELLBOOK_HTTPS_PROXY="http://proxy:3128 --upload-pack=touch"\n',
+    'SPELLBOOK_HTTPS_PROXY="file:///etc/passwd"\n',
+    'SPELLBOOK_HTTPS_PROXY="http://$(id)@proxy:3128"\n',
+    'SPELLBOOK_HTTP_PROXY="proxy:3128"\n',
+    'SPELLBOOK_NO_PROXY="localhost; touch /tmp/x"\n',
+])
+def test_malformed_proxy_in_install_env_is_refused(keys, tmp, line):
+    c = Canon(keys, tmp)
+    c.good_release()
+    h = Host(tmp, c, keys.release, extra_env=line)
+    h.seen(c.commit_of())
+    _refused(h.run(TAG), h, "install.env SPELLBOOK_")
+
+
+def test_installer_records_and_validates_the_proxy():
+    src = _install_sh()
+    for key in ("SPELLBOOK_HTTPS_PROXY", "SPELLBOOK_HTTP_PROXY", "SPELLBOOK_NO_PROXY"):
+        assert f'{key}="${{PROXY_' in src, key
+    assert "${PROXY_UNIT_ENV}ExecStart=" in src
+    fn = _shell_function(src, "valid_proxy_url")
+    for val, ok in (("", True), ("http://proxy.internal:3128", True),
+                    ("socks5h://u:p@10.0.0.1:1080/", True),
+                    ("file:///etc/passwd", False), ("http://a b", False),
+                    ("http://$(id)", False)):
+        r = subprocess.run(["bash", "-c", fn + 'valid_proxy_url "$1"', "_", val],
+                           capture_output=True, text=True)
+        assert (r.returncode == 0) is ok, val
