@@ -462,6 +462,33 @@ def _merge_legs(legs: list) -> list:
     return list(totals.items())
 
 
+def _plain_transfer_asset(chain: str, asset) -> str:
+    """The one policy/velocity key for a plain EVM or Solana transfer.
+
+    The EVM and Solana transfer executors send only the chain's native
+    coin; they never read `asset`. So `asset` must name that native coin,
+    or a token-shaped label (e.g. a token address that also keys DEX
+    policy) would be judged under the token's limits while native coin
+    leaves the wallet. EVM: "native". Solana: "SOL" (the documented
+    label) or "native" (the request default), kept as given so existing
+    policy keys still match. Raises ValueError otherwise.
+    """
+    if chain in solana_mod.NETWORKS:
+        if asset in ("SOL", "native"):
+            return asset
+        raise ValueError(
+            f"asset {asset!r} is not supported on {chain}: plain transfers "
+            "send native SOL only (asset \"SOL\")")
+    if chain in evm.CHAINS:
+        if asset == "native":
+            return "native"
+        raise ValueError(
+            f"asset {asset!r} is not supported on {chain}: plain transfers "
+            "send the native coin only (asset \"native\"); token transfers "
+            "have no execution path")
+    return asset
+
+
 def _redacted(req: dict) -> str:
     """Ledger-safe request summary: the bearer token is never written to disk."""
     return json.dumps({"route": req.get("route"), "muse_id": req.get("muse_id"),
@@ -953,6 +980,11 @@ class Daemon:
         if chain in chia.NETWORKS:
             return self._execute_chia_spend(params)
         if chain in solana_mod.NETWORKS:
+            # Second layer for S-09 (queued items approved later included).
+            try:
+                _plain_transfer_asset(chain, params.get("asset", "native"))
+            except ValueError as e:
+                raise solana_mod.SolanaError(str(e)) from e
             return self._execute_solana_spend(params)
         if chain not in evm.CHAINS:
             return {"submitted": False,
@@ -973,6 +1005,15 @@ class Daemon:
             return self._execute_contract_deploy(params)
         if intent == "contract_call":
             return self._execute_contract_call(params)
+        if intent is not None:
+            raise evm.EvmError(f"intent {intent!r} has no EVM execution path")
+        # A plain transfer sends native wei and never reads `asset`, so
+        # the approved label must be the native coin (S-09; also covers
+        # items queued before the request-time check existed).
+        try:
+            _plain_transfer_asset(chain, params.get("asset", "native"))
+        except ValueError as e:
+            raise evm.EvmError(str(e)) from e
         entry = (self.evm_cfg.get("chains") or {}).get(chain) or {}
         if not entry.get("enabled") or not entry.get("rpc_url"):
             return {"submitted": False,
@@ -3848,6 +3889,13 @@ class Daemon:
             if kind == "nft" and p.get("amount_mojos") != 1:
                 return {"ok": False, "error":
                         "NFT transfer amount must be 1 (singleton asset)"}
+        else:
+            # EVM/Solana executors send the native coin only: the label
+            # policy judges must be that coin, keyed one way (S-09).
+            try:
+                asset = _plain_transfer_asset(p["chain"], asset)
+            except ValueError as e:
+                return {"ok": False, "error": str(e)}
         d = evaluate(self.policy, p["chain"], asset,
                      amount, p.get("destination", ""),
                      self.spent_last_24h(p["chain"], asset))
