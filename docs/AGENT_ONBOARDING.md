@@ -36,9 +36,9 @@ sudo SPELLBOOK_RELEASE_KEY_FPR=<fingerprint-from-town-thread> \
 
 The installer verifies the release (SHA-256 + GPG signature from the pinned
 fingerprint — fail closed), provisions everything below, and prints an
-`AGENT HANDOFF` block: your request token goes in your environment; the
-approve token file and the paper backup go to your human out-of-band, and
-you never retain them. Then `spellbook doctor` and `spellbook version` to
+`AGENT HANDOFF` block: your request token is a 0600 file you own (only
+its path is printed); the approve token file and the paper backup go to
+your human out-of-band, and you never see them. Then `spellbook doctor` and `spellbook version` to
 confirm.
 
 (If your human prefers to drive, they run the same command without
@@ -49,11 +49,13 @@ It provisions:
 - `spellbookd` + `spellbook` CLI (pip-installable package in `src/`)
 - the Chia **relay** (`relay/`, deployed separately — see §3)
 - two bearer tokens: a **request token** (yours, the agent) and an
-  **approval token** (the human's). Both print once; the request token
-  lives in your environment, never in chat, logs, or code.
-- the paper backup (§6): displayed **once** on first install and also saved
-  to `$PREFIX/paper-backup.txt` — your human stores it somewhere safe
-  (ideally off the machine) and deletes it there.
+  **approval token** (the human's). Neither is ever printed: yours is
+  written to `/etc/spellbook/request.token` (0600, owned by your OS user;
+  override with `SPELLBOOK_AGENT_TOKEN_FILE`) and you point
+  `SPELLBOOK_REQUEST_TOKEN_FILE` at it — never paste its content into
+  chat, logs, code or a tool argument.
+- the paper backup (§6): never printed by the installer and never saved
+  to a text file; `spellbook export` shows it to the human (§6).
 - **Sage is on-demand, not always-on.** The daemon spawns `sage rpc start`
   itself when a Chia request needs it — never start Sage yourself, and do
   not treat a down Sage (e.g. the `status` balance warning) as a problem.
@@ -110,8 +112,8 @@ The rules that keep this safe:
   never regenerates keys, never mints tokens, never hand-edits config, never
   reconstructs the ledger — state problems fail closed with guidance for
   the human.
-- Upgrades print no key material, ever. The paper backup prints once, on
-  fresh install only.
+- Upgrades print no key material, ever. Nothing prints key material:
+  the paper backup leaves the machine only through `spellbook export` (§6).
 
 ## 1c. Where everything lives (file locations)
 
@@ -274,21 +276,30 @@ other chain.
 
 ## 6. Paper-backup model (two mnemonic sets)
 
-`install.sh` shows the backup **once**, on first install — displayed on the
-terminal and also saved to `$PREFIX/paper-backup.txt`. Your human stores it
-somewhere safe (ideally off the machine) and deletes it there. Upgrades
-never print key material.
+`install.sh` prints no mnemonic, no raw key and no token — nothing secret on any stdout. It leaves the machine only through
+`spellbook export`: on the human's own terminal (`sudo spellbook export`
+— words on `/dev/tty`, a pause, a screen clear, then 3 SET 1 words asked
+back; it refuses pipes and the agent's OS user), or, when the human can
+only reach you, encrypted to the seal ceremony's reveal key
+(`sudo spellbook export --reveal-key <public key>` prints only an
+envelope the human's page decrypts). You relay ciphertext and never see a
+word. No raw private keys are shown either way.
+On a fresh install run from a real terminal the installer runs the
+terminal export itself at the end. Installs made before this change saved
+the whole backup to `$PREFIX/paper-backup.txt`; an upgrade warns while it
+exists — your human moves it off the machine and shreds it, you never
+read it.
 
 - **SET 1 — STANDARD RECOVERY (primary: the daemon's live keys).**
   A second, independent 24-word BIP-39 mnemonic whose keys derive the
   way stock wallets do (Sage for Chia, MetaMask for EVM). The 24 words
-  *and* the printed raw private keys import directly into stock wallets
-  and yield the same addresses the daemon uses.
+  import directly into stock wallets and yield the same addresses the
+  daemon uses. `std_entropy.key` (0600, daemon user) keeps them showable
+  by `spellbook export`; a restored install has no such file and its
+  SET 1 lives on the paper copy only.
 - **SET 2 — SPELLBOOK DAEMON SEED (secondary).** The daemon's custom-KDF
   seed. Its 24 words recover through the Spellbook daemon **only** —
-  they do **not** work in Sage or MetaMask. Its raw keys (EVM scalar →
-  MetaMask, BLS scalar → Sage) do import directly and yield the same
-  addresses the daemon would use.
+  they do **not** work in Sage or MetaMask.
 
 Rule: write both sets down on paper, offline, at install. Verify after
 any import by comparing the shown addresses.

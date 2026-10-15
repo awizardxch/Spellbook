@@ -9,8 +9,11 @@ except encrypted.
 
 - **`seal-password-encryptor.html`** — Full ceremony, 3 steps:
   1. Human generates a reveal key, pastes the public key to the agent.
-     Agent encrypts the full recovery document (both 24-word sets, all
-     private keys/addresses) and sends the envelope back as a copy-paste block.
+     Agent runs `sudo spellbook export --reveal-key <public key>`, which
+     encrypts the recovery document (both 24-word sets and their
+     addresses; no raw private keys) to it and prints only the envelope;
+     the agent sends that back as a copy-paste block and never sees a
+     word (review S-05).
   2. Human pastes the envelope, decrypts, verifies, writes everything on
      paper. Agent waits for "backup recorded".
   3. Human enters a new seal password (writes it on paper first), encrypts,

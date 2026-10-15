@@ -30,18 +30,27 @@
 #      (Override: an operator-supplied $SAGE_BIN is accepted only with
 #      SAGE_PIN_VERIFIED=1, i.e. verified out-of-band by the operator.)
 #   3. Creates the dedicated `spellbook` OS user (S2), the client group, and the
-#      0600/0700 layout. Generates the wallet seed ONCE and prints the paper
-#      backup mnemonic ONCE — write it down, it is never shown again.
+#      0600/0700 layout. Generates the wallet seeds ONCE (0600 files owned by
+#      the spellbook user; nothing secret is printed).
 #   4. Installs the daemon (pip, isolated venv as the spellbook user), writes
-#      the default-off policy (D9), the systemd unit, and the two tokens (S7).
+#      the default-off policy (D9), the systemd unit, and the two tokens (S7)
+#      — the agent's request token goes to a 0600 file owned by the agent
+#      user; only its PATH is printed.
 #   5. Runs the §10 off-chain drill with a THROWAWAY key — never the real key.
 #      Install completes when the drill passes (S14); the on-chain phases
 #      print as a checklist and need their own explicit authorization.
-#   6. Prints next steps (policy opt-in, token delivery, directory entry §8).
+#   6. Paper backup (§6), never on stdout: on a real terminal (stdin and
+#      stdout both TTYs) `spellbook export` shows the words on /dev/tty,
+#      pauses, clears the screen and asks for 3 SET 1 words back. Without a
+#      terminal the install completes and prints how the backup leaves the
+#      machine later: `sudo spellbook export` for a human at a terminal, or
+#      `spellbook export --reveal-key` for the seal ceremony (ciphertext
+#      only). Then next steps (policy opt-in, directory entry §8).
 #
-# What it NEVER does: asks for keys, transmits anything outward, touches the
-# real muse key, auto-updates an existing install, or proceeds on an
-# unverified release.
+# What it NEVER does: asks for keys, prints a mnemonic, a private key or a
+# token (review S-05), transmits anything outward, touches the real muse
+# key, auto-updates an existing install, or proceeds on an unverified
+# release.
 
 set -euo pipefail
 
@@ -59,6 +68,9 @@ CLIENT_GROUP="spellbook-clients"
 PREFIX="/opt/spellbook"
 SOCK_DIR="/run/spellbook"
 SOCK_PATH="${SOCK_DIR}/spellbook.sock"
+# The agent's copy of the request token: a 0600 file owned by the agent
+# user, never echoed (review S-05). Override with SPELLBOOK_AGENT_TOKEN_FILE.
+AGENT_TOKEN_FILE="${SPELLBOOK_AGENT_TOKEN_FILE:-/etc/spellbook/request.token}"
 
 # Release-key fingerprint is published in the pinned town thread once
 # Speechless generates it (open decision #7). Until then installs from a
@@ -249,14 +261,17 @@ usage() {
   echo "                   in --upgrade mode defaults to the value in install.env)"
   echo "  --as-agent       the agent is running this install itself (self-install"
   echo "                   on the agent's own machine). Prints a structured HANDOFF"
-  echo "                   block at the end: what the agent keeps (request token)"
-  echo "                   vs what must go to the human out-of-band (approve token"
-  echo "                   file location, paper backup). The agent must deliver the"
-  echo "                   human's material and never retain it."
+  echo "                   block at the end: what the agent keeps (the PATH of its"
+  echo "                   request token file) vs what goes to the human (approve"
+  echo "                   token file location; the paper backup, which leaves the"
+  echo "                   machine only by 'spellbook export' — on the human's"
+  echo "                   terminal, or encrypted to the seal ceremony's reveal key)."
+  echo "                   Nothing secret is printed either way."
   exit 2
 }
 
 TAG=""
+RESTORE_FILE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-sage) NO_SAGE=1; NO_SAGE_SET=1; shift ;;
@@ -605,8 +620,8 @@ runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/pip" install --quiet $PIP_REINSTA
 AGENT_UID="$(id -u "$AGENT_USER")"
 HUMAN_UID="$(id -u "$HUMAN_USER")"
 
-# The wallet seed: generated ONCE, as the spellbook user, 0600. The paper
-# backup mnemonic prints ONCE below — write it down now (§6).
+# The wallet seed: generated ONCE, as the spellbook user, 0600. Its words
+# are never printed here; `spellbook export` shows them in §6 (review S-05).
 # Upgrade mode never touches key material: it must already be there, 0600.
 # A missing key is a broken identity, not a repairable install — refuse and
 # send the human to recovery instead of generating a new key (that would
@@ -633,21 +648,25 @@ elif [ -n "$RESTORE_FILE" ]; then
   esac
   [ "${#RESTORE_SEED_HEX}" = "64" ] || fail "restore file line 1: expected 64 hex chars (32-byte seed), got ${#RESTORE_SEED_HEX}"
   [ "${#RESTORE_STD_HEX}" = "128" ] || fail "restore file line 2: expected 128 hex chars (64-byte std seed), got ${#RESTORE_STD_HEX}"
-  printf '%s' "$RESTORE_SEED_HEX" > "${PREFIX}/seed.key"
-  printf '%s' "$RESTORE_STD_HEX" > "${PREFIX}/std_seed.key"
+  ( umask 077
+    printf '%s' "$RESTORE_SEED_HEX" > "${PREFIX}/seed.key"
+    printf '%s' "$RESTORE_STD_HEX" > "${PREFIX}/std_seed.key" )
+  unset RESTORE_SEED_HEX RESTORE_STD_HEX
   chown "${SPELLBOOK_USER}:${SPELLBOOK_USER}" "${PREFIX}/seed.key" "${PREFIX}/std_seed.key"
   chmod 0600 "${PREFIX}/seed.key" "${PREFIX}/std_seed.key"
   # Shred the restore file — the keys now live only in ${PREFIX} (0600).
   shred -u "$RESTORE_FILE" 2>/dev/null || rm -f "$RESTORE_FILE"
   log "keys restored from backup (restore file shredded)"
-  # No fresh backup to display — the human already has these words on paper.
-  STD_BACKUP="(restored from backup — no new mnemonic generated)"
+  # No fresh backup to show — the human already has these words on paper.
+  # A restore writes no std_entropy.key, so `spellbook export` shows SET 2
+  # only and says SET 1 lives on the paper copy.
 else
 [ ! -e "${PREFIX}/seed.key" ] || fail "${PREFIX}/seed.key already exists — this machine looks installed. Refusing to overwrite; uninstall first."
 log "generating the wallet seed (once) ..."
 SEED_HEX="$(runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" -c \
   "from spellbook.seed import generate_entropy; print(generate_entropy().hex())")"
-printf '%s' "$SEED_HEX" > "${PREFIX}/seed.key"
+( umask 077; printf '%s' "$SEED_HEX" > "${PREFIX}/seed.key" )
+unset SEED_HEX
 chown "${SPELLBOOK_USER}:${SPELLBOOK_USER}" "${PREFIX}/seed.key"
 chmod 0600 "${PREFIX}/seed.key"
 
@@ -655,12 +674,16 @@ chmod 0600 "${PREFIX}/seed.key"
 # mnemonic whose keys derive the way stock wallets do (Sage / MetaMask).
 # The daemon uses these keys (key_derivation=standard in the config below),
 # so the standard backup is the primary recovery path; the KDF seed above
-# stays as the daemon-native secondary. Its backup block prints ONCE in
-# §6 — the output below is never logged anywhere else.
+# stays as the daemon-native secondary. The script prints PUBLIC material
+# only (addresses, file paths); it writes std_seed.key and std_entropy.key
+# (0600), and the words are shown in §6 by `spellbook export`, never on
+# this script's stdout (review S-05).
 [ ! -e "${PREFIX}/std_seed.key" ] || fail "${PREFIX}/std_seed.key already exists — this machine looks installed. Refusing to overwrite; uninstall first."
+[ ! -e "${PREFIX}/std_entropy.key" ] || fail "${PREFIX}/std_entropy.key already exists — this machine looks installed. Refusing to overwrite; uninstall first."
 log "generating the standard-recovery wallet (once) ..."
-STD_BACKUP="$(runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" \
-  "${SRC}/scripts/make_standard_wallet.py" "${PREFIX}")"
+runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" \
+  "${SRC}/scripts/make_standard_wallet.py" "${PREFIX}" \
+  || fail "standard-recovery wallet creation failed"
 fi
 
 # Upgrade mode never rewrites config: the human's policy knobs stay exactly
@@ -735,9 +758,10 @@ chown "${SPELLBOOK_USER}:${SPELLBOOK_USER}" "${PREFIX}/spellbook.json" "${PREFIX
 chmod 0600 "${PREFIX}/spellbook.json" "${PREFIX}/policy.json" "${PREFIX}/ledger.jsonl"
 fi
 
-# S7: two tokens from day one. The request token is shown ONCE for the
-# agent's environment; the approve token is NEVER shown — move it to the
-# human's separate device out-of-band (O5).
+# S7: two tokens from day one. Neither is ever printed (review S-05). The
+# agent's copy of the request token is a 0600 file owned by the agent user
+# (only its PATH is printed); the approve token exists only in the daemon's
+# copy — move it to the human's separate device out-of-band (O5).
 # Upgrade mode never mints tokens: a missing token is a broken install the
 # human re-provisions, never something the installer silently replaces.
 if [ "$UPGRADE" = "1" ]; then
@@ -747,12 +771,15 @@ if [ "$UPGRADE" = "1" ]; then
   log "tokens present (untouched by upgrade)"
 else
 log "generating tokens ..."
-REQ_TOKEN="$(runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" -c "import secrets; print(secrets.token_hex(32))")"
-APP_TOKEN="$(runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" -c "import secrets; print(secrets.token_hex(32))")"
-printf '%s' "$REQ_TOKEN" > "${PREFIX}/request.token"
-printf '%s' "$APP_TOKEN" > "${PREFIX}/approve.token"
+[ ! -e "${AGENT_TOKEN_FILE}" ] || fail "${AGENT_TOKEN_FILE} already exists — this machine looks installed. Refusing to overwrite; uninstall first."
+mkdir -p "$(dirname "${AGENT_TOKEN_FILE}")"
+chmod 0755 "$(dirname "${AGENT_TOKEN_FILE}")"
+"${VENV}/bin/python" "${SRC}/scripts/make_tokens.py" "${PREFIX}" "${AGENT_TOKEN_FILE}" \
+  || fail "token creation failed"
 chown "${SPELLBOOK_USER}:${SPELLBOOK_USER}" "${PREFIX}/request.token" "${PREFIX}/approve.token"
 chmod 0600 "${PREFIX}/request.token" "${PREFIX}/approve.token"
+chown "${AGENT_USER}" "${AGENT_TOKEN_FILE}"
+chmod 0600 "${AGENT_TOKEN_FILE}"
 fi
 
 # --- install record + agent self-serve upgrade path (fresh and upgrade) ---
@@ -841,8 +868,17 @@ chown "${SPELLBOOK_USER}:${SPELLBOOK_USER}" "${PREFIX}/drill-status.json"
 chmod 0600 "${PREFIX}/drill-status.json"
 
 # ---------------------------------------------------------------- 6. paper backup + next steps
-# Upgrade mode prints NO key material, ever — the backup block below is for
-# fresh installs only. An upgrade summary takes its place.
+# Nothing secret below, in any mode (review S-05): no mnemonic, no raw key,
+# no token reaches stdout, a log or a file the agent can read. The paper
+# backup leaves the machine only through `spellbook export`:
+#   - on a real terminal (stdin AND stdout TTYs) it writes the words to
+#     /dev/tty, waits for Enter, clears the screen, then asks for 3 SET 1
+#     words back; it refuses pipes and the agent's OS user;
+#   - for the seal ceremony (the human reaches only the agent) it encrypts
+#     the backup to the reveal key the human's page made (--reveal-key) and
+#     prints only that envelope.
+# Non-interactive runs (agent bootstrap, CI, cloud-init, `script`) complete
+# the install and print how the backup leaves the machine later.
 if [ "$UPGRADE" = "1" ]; then
 cat <<EOF
 
@@ -860,73 +896,27 @@ UPGRADE COMPLETE.
 If doctor reports a problem the upgrade did not fix, the human re-runs
 install.sh --upgrade (or, for downgrades, runs install.sh directly as root).
 EOF
+# Installs made before review S-05 saved the whole backup — both word sets,
+# raw private keys and the request token — to paper-backup.txt. Never read
+# or delete it here; tell the human it exists.
+if [ -e "${PREFIX}/paper-backup.txt" ]; then
+  warn "${PREFIX}/paper-backup.txt exists: it holds both word sets, raw private"
+  warn "keys and the request token in plain text. The HUMAN moves it off this"
+  warn "machine (or confirms the paper copy) and shreds it; the agent never reads it."
+fi
 else
-MNEMONIC="$(runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" -c \
-  "from spellbook.seed import load_seed, mnemonic_from_entropy; print(mnemonic_from_entropy(load_seed('${PREFIX}/seed.key')))")"
-# Raw KDF keys: each imports directly into the matching stock wallet and
-# yields the same address the daemon uses (EVM -> MetaMask, BLS -> Sage).
-KDF_KEYS="$(runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" -c "
-from spellbook.seed import load_seed
-from spellbook import kdf, chia_sign
-seed = load_seed('${PREFIX}/seed.key')
-for chain in ('evm-4663', 'evm-46630'):
-    d = kdf.derive_labeled(seed, chain, 'default')
-    print('  ' + chain + ' raw EVM privkey -> MetaMask: ' + d['scalar_hex'])
-    print('    address ' + d['address'])
-for chain, net in (('chia-testnet', 'testnet11'), ('chia-mainnet', 'mainnet')):
-    d = kdf.derive_labeled(seed, chain, 'default')
-    sk = bytes.fromhex(d['scalar_hex'])
-    print('  ' + chain + ' raw BLS key -> Sage: ' + d['scalar_hex'])
-    print('    address ' + chia_sign.receive_address(sk, 0, net))
-from spellbook import solana as solana_mod
-for chain in ('solana-devnet', 'solana-mainnet'):
-    kp = solana_mod.custom_keypair(seed, chain, 'default')
-    print('  ' + chain + ' raw ed25519 secret -> Phantom import (base58 of 64-byte secret):')
-    print('    ' + solana_mod.phantom_backup_secret(kp))
-    print('    address ' + solana_mod.address_of_keypair(kp))
-print('  Solana KDF keys differ per network by design (P9) and recover through')
-print('  the daemon only - stock wallets derive unrelated keys from these words.')
-")"
-
-# First creation: save the displayed backup to a txt file as well, then show
-# it — the human moves it somewhere safe (ideally off this machine) and
-# removes it here. Fresh installs only; upgrades print no key material.
-PAPER_TXT="${PREFIX}/paper-backup.txt"
-cat > "${PAPER_TXT}" <<EOF
+cat <<EOF
 
 ================================================================
 INSTALL COMPLETE — off-chain drill green.
 ================================================================
 
-PAPER BACKUP (§6) — write these down NOW, on paper, offline.
-Shown ONCE and never again. Two copies, two places.
-Anyone holding EITHER set below holds the wallet.
-
-----------------------------------------------------------------
-SET 1 — STANDARD RECOVERY (primary: these are the daemon's live keys).
-The 24 words AND the raw keys work in STOCK wallets.
-----------------------------------------------------------------
-
-${STD_BACKUP}
-
-----------------------------------------------------------------
-SET 2 — SPELLBOOK DAEMON SEED (custom KDF — secondary recovery).
-The 24 words recover through the Spellbook daemon ONLY (they do NOT
-work in Sage/MetaMask); the raw keys below import directly and yield
-the same addresses the daemon would use.
-----------------------------------------------------------------
-
-  24 WORDS (daemon recovery only):
-    ${MNEMONIC}
-
-${KDF_KEYS}
-
-Verify after import: every address above must match what the wallet shows.
-
-AGENT WIRING (request token — shown ONCE):
+AGENT WIRING (nothing to copy — the token is in a file the agent owns):
     export SPELLBOOK_SOCKET=${SOCK_PATH}
-    export SPELLBOOK_REQUEST_TOKEN=${REQ_TOKEN}
-  then:  python3 -c "from spellbook.client import AgentClient"
+    export SPELLBOOK_REQUEST_TOKEN_FILE=${AGENT_TOKEN_FILE}
+  then:  spellbook --token-file "\$SPELLBOOK_REQUEST_TOKEN_FILE" status
+  The file is 0600, owned by ${AGENT_USER}. Never paste its content into
+  chat, a log, a config or a tool argument.
 
 HUMAN APPROVAL (approve token — NEVER shown, NEVER in the agent's env):
   move ${PREFIX}/approve.token to the human's separate device out-of-band (O5),
@@ -934,19 +924,38 @@ HUMAN APPROVAL (approve token — NEVER shown, NEVER in the agent's env):
 
 DERIVED ADDRESSES (labels: default):
 EOF
-chmod 600 "${PAPER_TXT}"
-# Display the txt just created for the first time, then tell the human to
-# store it somewhere safe.
-cat "${PAPER_TXT}"
-echo ""
-echo "Paper backup also saved to ${PAPER_TXT} — store it somewhere safe"
-echo "(ideally off this machine), then delete it here."
-# As the agent's user: proves the socket, group, token, and peer-UID wiring
-# all work end to end for the exact principal that will use it.
+# As the agent's user: proves the socket, group, token file, and peer-UID
+# wiring all work end to end for the exact principal that will use it.
 runuser -u "${AGENT_USER}" -- env "SPELLBOOK_SOCKET=${SOCK_PATH}" \
-  "SPELLBOOK_REQUEST_TOKEN=${REQ_TOKEN}" "${VENV}/bin/spellbook" addresses
+  "${VENV}/bin/spellbook" --token-file "${AGENT_TOKEN_FILE}" addresses
 
-cat <<'EOF'
+echo
+if [ -t 0 ] && [ -t 1 ]; then
+  log "PAPER BACKUP (§6): shown on this terminal once, then cleared, then"
+  log "3 SET 1 words are asked back. Have pen and paper ready."
+  if ! "${VENV}/bin/spellbook" export --prefix "${PREFIX}"; then
+    warn "the paper backup was NOT shown or NOT verified (see the reason above)."
+    warn "Show it again, as the human, from a terminal:  sudo ${VENV}/bin/spellbook export --prefix ${PREFIX}"
+  fi
+else
+  log "PAPER BACKUP (§6): NOT shown — this run has no terminal (stdin/stdout"
+  log "is a pipe, a log or an agent's tool output). The install is complete;"
+  log "the words exist only in ${PREFIX} (0600, ${SPELLBOOK_USER}). They leave"
+  log "the machine one of two ways, nothing secret on any stdout:"
+  log "  human at a terminal, own login:"
+  log "    sudo ${VENV}/bin/spellbook export --prefix ${PREFIX}"
+  log "  seal ceremony (human reaches only the agent): the human's page"
+  log "  (${PREFIX}/share/ceremony/seal-password-encryptor.html, Step 1) makes"
+  log "  a reveal key; the agent relays its PUBLIC half and the envelope only:"
+  log "    sudo ${VENV}/bin/spellbook export --prefix ${PREFIX} --reveal-key <public key>"
+fi
+
+cat <<EOF
+
+SEAL THE SEED (required before the install is called done — survives
+machine wipes, docs/SEALED_SEED.md): a password-locked copy of the seed the
+human can unlock after a wipe from a one-time local page:
+    ${VENV}/bin/spellbook-seed --config-dir ${PREFIX} --sealed <persistent path> serve
 
 NEXT STEPS (all opt-in):
   - policy knobs: approval_threshold, allowlists, velocity caps (default: all off)
@@ -954,99 +963,23 @@ NEXT STEPS (all opt-in):
   - town directory entry (§8)
   - the on-chain drill phases print in the drill output above
   - dashboard sign-in for agents is API-only: docs/AGENT_ONBOARDING.md §8
-    (challenge -> local Ed25519 sign -> POST /api/auth/verify; your key
-    never leaves this machine)
+    (challenge -> \`spellbook sign-dashboard-challenge\` -> POST
+    /api/auth/verify; the identity seed stays in the daemon)
 
 note: the default config is a signer, not a policy engine (S4).
 EOF
-
-# ---------------------------------------------------------------- backup verification
-# The human proves they wrote down the SET 1 words (the primary recovery
-# path) by typing 3 of them back. SET 1's words cannot be re-derived from
-# std_seed.key later (BIP-39 seeds are one-way), so this is the one chance.
-# Needs a human at a terminal: with no TTY (an agent-run --as-agent install)
-# it is skipped with a warning, never faked, and the handoff below makes
-# the paper backup the human's first job.
-if [ "$UPGRADE" != "1" ]; then
-  # The words are the line after "24 WORDS" in make_standard_wallet.py's block.
-  STD_MNEMONIC="$(printf '%s\n' "${STD_BACKUP:-}" | awk '/24 WORDS/{getline; $1=$1; print; exit}')"
-  if [ "$(printf '%s' "$STD_MNEMONIC" | wc -w | tr -d ' ')" != "24" ]; then
-    warn "could not read the SET 1 words back for verification — check the paper copy against the block above by hand"
-  elif [ ! -t 0 ]; then
-    warn "no terminal: backup verification SKIPPED. The human must copy SET 1 to paper before anything else."
-  else
-cat <<'EOF'
-
-================================================================
-BACKUP VERIFICATION
-================================================================
-You were shown TWO sets of 24 words above (SET 1: standard recovery,
-SET 2: daemon seed). SET 1 is the primary recovery path, and its words
-are NEVER shown again.
-
-To prove you've written them down, enter 3 words from SET 1 when asked.
-Get them from your PAPER copy — not by scrolling up.
-EOF
-  POS1=$((RANDOM % 24 + 1))
-  POS2=$((RANDOM % 24 + 1))
-  while [ "$POS2" = "$POS1" ]; do POS2=$((RANDOM % 24 + 1)); done
-  POS3=$((RANDOM % 24 + 1))
-  while [ "$POS3" = "$POS1" ] || [ "$POS3" = "$POS2" ]; do POS3=$((RANDOM % 24 + 1)); done
-  WORD1=$(printf '%s' "$STD_MNEMONIC" | cut -d' ' -f"$POS1")
-  WORD2=$(printf '%s' "$STD_MNEMONIC" | cut -d' ' -f"$POS2")
-  WORD3=$(printf '%s' "$STD_MNEMONIC" | cut -d' ' -f"$POS3")
-
-  VERIFIED=0
-  for attempt in 1 2 3; do
-    INPUT1=""; INPUT2=""; INPUT3=""
-    echo ""
-    echo "Enter word #$POS1 from SET 1 (from your paper backup):"
-    read -r INPUT1 || true
-    echo "Enter word #$POS2 from SET 1:"
-    read -r INPUT2 || true
-    echo "Enter word #$POS3 from SET 1:"
-    read -r INPUT3 || true
-    INPUT1=$(printf '%s' "$INPUT1" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
-    INPUT2=$(printf '%s' "$INPUT2" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
-    INPUT3=$(printf '%s' "$INPUT3" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
-    if [ "$INPUT1" = "$WORD1" ] && [ "$INPUT2" = "$WORD2" ] && [ "$INPUT3" = "$WORD3" ]; then
-      VERIFIED=1
-      echo ""
-      echo "✓ Backup verified. Remember: two copies, two places."
-      break
-    elif [ "$attempt" != "3" ]; then
-      echo ""
-      echo "✗ Words don't match. Check your paper backup and try again. (Attempt $attempt of 3)"
-    fi
-  done
-  if [ "$VERIFIED" != "1" ]; then
-    echo ""
-    echo "✗ Verification failed 3 times. The wallet is installed WITHOUT a"
-    echo "  verified SET 1 backup, and SET 1's words cannot be shown again."
-    echo "  Back up the raw keys and SET 2 now (as the ${SPELLBOOK_USER} user):"
-    echo "    ${VENV}/bin/python -m spellbook.recovery --config-dir ${PREFIX} backup"
-  fi
-  fi
-  unset STD_MNEMONIC WORD1 WORD2 WORD3 INPUT1 INPUT2 INPUT3
-cat <<EOF
-
-SEAL THE SEED (recommended — survives machine wipes, docs/SEALED_SEED.md):
-  a password-locked copy of the seed that the human can unlock after a
-  wipe from a one-time local page, without re-typing any words:
-    ${VENV}/bin/spellbook-seed --config-dir ${PREFIX} --sealed <persistent path> serve
-EOF
 fi
-if [ "${AS_AGENT:-0}" = "1" ]; then
+if [ "${AS_AGENT:-0}" = "1" ] && [ "$UPGRADE" != "1" ]; then
 cat <<EOF
 
 ================================================================
 AGENT HANDOFF — you ran this install yourself. Follow the protocol.
 ================================================================
 
-YOURS (store in your environment file, never in chat/logs/code):
+YOURS (a path, not a secret — never read the token into chat/logs/code):
   export SPELLBOOK_SOCKET=${SOCK_PATH}
-  export SPELLBOOK_REQUEST_TOKEN=<redacted>
-  (also at ${PREFIX}/request.token, 0600 — the daemon already has it)
+  export SPELLBOOK_REQUEST_TOKEN_FILE=${AGENT_TOKEN_FILE}
+  (0600, owned by ${AGENT_USER}; the daemon has its own copy)
 
 HUMAN'S (deliver out-of-band NOW, then never touch again):
   1. Approve token — file: ${PREFIX}/approve.token (0600).
@@ -1054,10 +987,16 @@ HUMAN'S (deliver out-of-band NOW, then never touch again):
      machine access (O5). NEVER read it into your environment, logs, or
      chat. The daemon verifies approvals against it; you must not be able
      to approve your own spends.
-  2. Paper backup — the two word sets printed above. Read them to your
-     human; they write them down on paper, offline, two copies in two
-     places. Confirm receipt, then drop the words from your context. The
-     daemon keeps seed.key; you keep no copy.
+  2. Paper backup — you never see the words. Either your human runs
+       sudo ${VENV}/bin/spellbook export --prefix ${PREFIX}
+     on their own terminal, or (they can only reach you) you hand them
+     ${PREFIX}/share/ceremony/seal-password-encryptor.html: they make a
+     reveal key (Step 1) and paste you its PUBLIC half; you run
+       sudo ${VENV}/bin/spellbook export --prefix ${PREFIX} --reveal-key <public key>
+     and paste back the envelope it prints; they decrypt it on the page
+     (Step 2) and write both sets down, offline, two copies in two places.
+  3. Then seal the seed (required): spellbook-seed serve, one-time link to
+     your human; they set the password on that page; you never see it.
 
 VERIFY BEFORE YOU FINISH:
   spellbook doctor    # every check green
@@ -1067,5 +1006,4 @@ From here you self-serve: spellbook upgrade --check / spellbook upgrade
 <tag> (signed releases, forward-only) and spellbook doctor --repair.
 ================================================================
 EOF
-fi
 fi
