@@ -307,10 +307,12 @@ def test_uniswap_swap_without_key_is_refused_at_request_time(tmp_path, monkeypat
     for venue in ("matcha", "cast"):  # keyless venues pass
         assert d._validate_dex_swap({**base, "venue": venue})["venue"] == venue
     monkeypatch.setenv("UNISWAP_API_KEY", "k")
-    # S-20: no Universal Router is pinned for 4663, so a keyed Uniswap
-    # swap is still refused — until the operator pins one explicitly.
+    # The Universal Router is pinned for 4663 (uniswap deployments.json),
+    # so a keyed Uniswap swap is accepted at request time.
+    assert d._validate_dex_swap({**base, "venue": "uniswap"})["venue"] == "uniswap"
+    # On a chain with no pinned router it is refused.
     with pytest.raises(evm.EvmError, match="no pinned universal_router"):
-        d._validate_dex_swap({**base, "venue": "uniswap"})
+        d._validate_dex_swap({**base, "venue": "uniswap", "chain": "evm-1"})
     d = _daemon(tmp_path, {"recommended_venues": ["uniswap"], "pinned_contracts":
                            {"4663": {"universal_router": "0x" + "6" * 40}}})
     assert d._validate_dex_swap({**base, "venue": "uniswap"})["venue"] == "uniswap"

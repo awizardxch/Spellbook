@@ -727,14 +727,27 @@ with "does not serve" (a capability fact, not a policy choice).
 The venue's transaction is decoded and compared with your intent; the
 quote's own numbers are not trusted. Contracts come from a pinned,
 in-code table per chain (`spellbook dex-venues` lists it under
-`pinned_contracts`). Today only Robinhood Chain (4663) is pinned, with
-the 0x AllowanceHolder (matcha and cast), the v4 PositionManager and
-Permit2. **Refused:**
+`pinned_contracts`, with each address's source). Two chains are
+pinned, from official lists:
 
-- any chain/venue whose swap contract is not pinned — Base and every
-  other chain for matcha/cast, and **uniswap everywhere** (no Universal
-  Router is pinned yet), refused at request time;
-- a `to` or spender other than the pinned contract;
+| Chain | Swap venues | LP |
+|---|---|---|
+| Robinhood Chain (4663) | matcha, cast (0x AllowanceHolder); uniswap (Universal Router, two versions) | v2, v3, v4 |
+| Base (8453) | matcha, cast (0x AllowanceHolder); uniswap (Universal Router v2.0, v2.1, v2.1.1, v2.1.2) | v2, v3, v4 |
+
+Sources: the 0x AllowanceHolder `0x0000000000001fF3684f28c67538d4D072C22734`
+from the 0x-settler README ("AllowanceHolder addresses", Cancun
+chains); every Uniswap contract (Universal Router, Permit2, v4
+PositionManager/PoolManager/StateView, v3 NonfungiblePositionManager,
+v2 Router02) from Uniswap's deployment feed,
+https://developers.uniswap.org/deployments.json (generated 2026-09-22,
+github.com/Uniswap/contracts a677c0d). SPEC_V1.md §10 has the full
+address table. **Refused:**
+
+- any chain/venue whose swap contract is not pinned (every chain but
+  4663 and 8453), refused at request time;
+- a `to` or spender other than the pinned contract (for uniswap: a
+  router version not in the feed, e.g. Base's v1.2 router);
 - a selector that is not a known swap entry point, or calldata that
   does not decode (the error names the venue and selector);
 - a decoded sell token or amount different from the intent (an `exec`
@@ -742,9 +755,20 @@ Permit2. **Refused:**
 - a recipient other than this wallet, or a decoded minimum out below
   `min_buy_amount_wei`;
 - nonzero `value` on an ERC-20 sell, or a native sell whose `value` is
-  not exactly the sell amount.
+  not exactly the sell amount;
+- Universal Router commands other than V2/V3_SWAP_EXACT_IN, V4_SWAP,
+  WRAP_ETH, UNWRAP_WETH and SWEEP (fees, transfers, exact-output swaps,
+  and permits are refused). A V4_SWAP must be exact-input swaps of your
+  sell token into your buy token, one settle of the sell token and one
+  take of the buy token to this wallet.
 
-The daemon's own approve is the exact sell amount to the pinned spender.
+The daemon's own approve is the exact sell amount to the pinned spender:
+the AllowanceHolder for matcha/cast; for a uniswap token sell, Permit2,
+followed by an exact-amount `Permit2.approve` to the router the decoded
+transaction targets, expiring with the intent. The daemon asks the
+Trading API for the permit as a transaction and never signs an EIP-712
+permit for a swap. The 0x Settler behind the AllowanceHolder rotates and
+is not pinned (it must be none of the tokens, the wallet or the holder).
 A queued swap shows `swap_checks` (pinned target, spender, recipient);
 the execution result carries `decoded` (target, selector, tokens,
 amounts, recipient). The operator can pin more contracts in
@@ -858,12 +882,26 @@ holds a single asset.
      path) + `TAKE_PAIR`.
    - **LP contracts are pinned.** Omit `router`, `position-manager` and
      `permit2`: the daemon uses its pinned table (`spellbook dex-venues`
-     → `pinned_contracts`). On Robinhood Chain (4663) that is the v4
-     PositionManager `0x58daec3116aae6d93017baaea7749052e8a04fa7` and
-     Permit2 `0x000000000022D473030F116dDEE9F6B43aC78BA3`. Passing any
-     other address is refused, and so is any LP intent on a chain or
-     protocol with no pin — today that is every v2/v3 LP intent and every
-     chain but 4663, until the operator pins more.
+     → `pinned_contracts`), copied from Uniswap's deployment feed. On
+     Robinhood Chain (4663): v2 Router02
+     `0x89e5DB8B5aA49aA85AC63f691524311AEB649eba`, v3
+     NonfungiblePositionManager
+     `0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3`, v4 PositionManager
+     `0x58daec3116aae6D93017bAAea7749052E8a04fA7`. On Base (8453): v2
+     Router02 `0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24`, v3
+     NonfungiblePositionManager
+     `0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1`, v4 PositionManager
+     `0x7C5f5A4bBd8fD63184577525326123B519429bDc`. Permit2 is
+     `0x000000000022D473030F116dDEE9F6B43aC78BA3` on both. Passing any
+     other address is refused, and so is any LP intent on another
+     chain. v2/v3 legs are ERC-20s only (wrap native first, or use v4).
+   - **Every LP call is decoded before signing:** v2 `addLiquidity` /
+     `removeLiquidity`, v3 `mint` / `multicall(decreaseLiquidity,
+     collect)` / `collect`, and v4 `modifyLiquidities` must name the
+     intent's tokens and position, stay within each leg's cap and
+     minimums, and pay the LP tokens, NFT or proceeds to this wallet. A
+     v4 add also requires the PositionManager's PoolManager to be the
+     pinned one.
    - **Native legs count as native.** In a v4 add the native leg
      (`0x000…0`) is checked and recorded under `native`, the same key as
      a plain native transfer, so it uses the native auto-approve and
