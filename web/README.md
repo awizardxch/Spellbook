@@ -11,6 +11,19 @@ operator's fixed drill addresses through a server-side proxy — the
 browser never talks to an RPC or the relay directly. The Chia relay is
 an API for agent software, not for this browser.
 
+**One exception: the seed ceremony pages** (`public/ceremony/`, review
+2026-10-15 S-17/S-18). The human types a seal password or recovery words
+there, so they are static, client-only and sealed off: no server code, a
+CSP of `default-src 'none'; connect-src 'none'` (header from
+`next.config.js`, meta in each page), same-origin scripts and styles only,
+each pinned by `integrity=`. They encrypt to a public key carried in the
+URL fragment and print an envelope for the human to copy. Nothing they
+handle reaches any API. Every file is hashed in `public/asset-index.json`
+(mirrored at `ceremony/asset-index.json`, rendered at `/onboard/integrity`);
+`npm run build` refuses to build when the index is stale
+(`scripts/check-asset-index.mjs`). After changing a ceremony file or an
+API route, from the repo root: `PYTHONPATH=src python -m spellbook.asset_index write`.
+
 ## Pages
 
 - `/` — what Spellbook is (agent requests/relays → human approves with
@@ -20,6 +33,11 @@ an API for agent software, not for this browser.
   the authoritative document is
   `docs/AGENT_ONBOARDING.md` in the repo
   (linked as a raw GitHub URL). Agents should fetch and follow that file.
+- `/onboard/integrity` — the asset index for humans: every ceremony page
+  and asset with its SHA-256 and SRI hash, and every API route.
+- `/ceremony/seal.html`, `/ceremony/restore.html`, `/ceremony/backup.html`
+  — the human's seed ceremony pages (static, client-only; see above).
+- `/asset-index.json` — the index itself.
 - `/dashboard` — read-only **testnet** holdings dashboard behind a real
   login gate. Humans sign in with a **viewer token** (timing-safe check
   against `SPELLBOOK_VIEWER_TOKEN`). Agents sign in **API-only** — there

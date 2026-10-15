@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'none'; form-action 'none'; base-uri 'none'">
+<title>Spellbook seal password</title>
+<link rel="stylesheet" href="/ceremony/ceremony.css" integrity="sha384-WNsHLN+O2nzkXkIM+JeDphAgFyPztWrawwG4fo4LCk/Kbsr/RoXCyoiMfi07VhsM" crossorigin="anonymous">
+<script src="/ceremony/bip39.js" integrity="sha384-0qxqvj/gC7RUgEuIChe4epjlWjKcZDvN1e0VOxRZuCGf5WyjqO5sBcBSqVoItwih" crossorigin="anonymous" defer></script>
+<script src="/ceremony/common.js" integrity="sha384-IrrVPr8wTyyGxSBBT6VOjYqGvb3a2VURC0VSpjjCwJM7m9XpRj/upkyYNBmA+G00" crossorigin="anonymous" defer></script>
+<script src="/ceremony/seal.js" integrity="sha384-cUeKJBJ1TP1SnHx/rWWD+DLpKYiLNUcAebY0VyhNxrcEN6lbv5GAFX1qjahTKMqT" crossorigin="anonymous" defer></script>
+</head>
+<body>
+<main>
+<h1>Spellbook seal password</h1>
+<p class="sub">Seal your wallet's seed with a password, or unlock it after the agent's machine was wiped. The password is encrypted here, in your browser, to your <b>daemon's</b> public key. Your agent only carries the encrypted envelope; it cannot read it.</p>
+
+<div class="warnbox"><strong>Never type this password into chat.</strong> This page makes no network requests (its Content-Security-Policy forbids them). Check the page against the published hashes at <code>/onboard/integrity</code> if you want to be sure it is the reviewed code.</div>
+
+<div class="step">
+<span class="stepnum">1</span>
+<h2>Check the key</h2>
+<p class="note">The link your agent gave you carries your daemon's public key. Its fingerprint:</p>
+<div class="fp" id="keyfp">reading the link...</div>
+<label for="fpIn">Fingerprint your daemon printed for you (at install, on your backup paper, or from <code>spellbook-ceremony fingerprint</code> run as the daemon user). The first 16 characters are enough:</label>
+<input type="text" id="fpIn" autocomplete="off" spellcheck="false" placeholder="e.g. 3f2a 91c0 ...">
+<div class="note" id="fpStatus"></div>
+<label class="inline"><input type="checkbox" id="noFp"> I have no fingerprint to compare. I accept that my agent could have put its own key in this link.</label>
+</div>
+
+<div class="step">
+<span class="stepnum">2</span>
+<h2>Your password</h2>
+<label class="inline"><input type="radio" name="op" id="opSeal" value="seal"> Seal: choose a new password</label>
+<label class="inline"><input type="radio" name="op" id="opUnlock" value="unlock"> Unlock: enter the password you chose</label>
+
+<div id="sealBox" hidden>
+<p class="note">Write the password on paper <b>first</b>. Losing it means restoring from your paper words.</p>
+<input type="password" id="pw1" placeholder="New seal password" autocomplete="new-password">
+<input type="password" id="pw2" placeholder="Repeat it" autocomplete="new-password">
+<button type="button" class="ghost" id="genPw">Generate 8 random words</button>
+<button type="button" class="ghost" id="togglePw">Show</button>
+</div>
+<div id="unlockBox" hidden>
+<input type="password" id="pwU" placeholder="Your seal password" autocomplete="current-password">
+</div>
+<div class="err" id="pwErr"></div>
+<button type="button" id="encBtn">Encrypt for my daemon</button>
+</div>
+
+<div class="step" id="outStep" hidden>
+<span class="stepnum">3</span>
+<h2>Give the envelope to your agent</h2>
+<div class="doc" id="envOut"></div>
+<button type="button" class="ghost" id="copyEnv">Copy envelope</button>
+<div class="ok" id="envOk"></div>
+<div class="who"><strong>What happens next.</strong> Your agent passes the envelope to the daemon user, which alone holds the private key: <code>spellbook-ceremony apply</code> decrypts it in memory and seals or unlocks the seed. The agent never holds that key, so the envelope is noise to it.</div>
+</div>
+
+<footer>Runs in your browser only · RSA-OAEP-SHA256 + AES-256-GCM · <a href="/onboard/integrity">asset hashes</a></footer>
+</main>
+</body>
+</html>

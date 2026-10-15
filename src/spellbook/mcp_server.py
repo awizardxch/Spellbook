@@ -28,7 +28,10 @@ INSTRUCTIONS = """\
 Spellbook is this agent's self-custodied wallet. Rules:
 1. At the start of every session (and after context compaction) call
    spellbook_seed_status. If it is not 'unlocked', call spellbook_seed_viewer
-   and give your human the link; wait until status reports 'unlocked'.
+   and give your human the hosted link (it carries only the daemon's public
+   key). They return an encrypted envelope: relay it to the daemon user as
+   the tool says; you cannot and must not open it. Wait until status
+   reports 'unlocked'. You never start or serve a page for your human.
 2. You REQUEST; your human APPROVES from their own tools. You cannot approve,
    and you must never ask your human for their approve token, seal password,
    or recovery words — not in chat, not anywhere.
