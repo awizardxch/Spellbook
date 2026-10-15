@@ -672,6 +672,23 @@ class Daemon:
         except dex_mod.DexError as e:
             raise ValueError(f"bad dex.recommended_venues: {e}")
         self._dex_recommended_set = frozenset(self.dex_recommended_venues)
+        # Pinned DEX contracts (S-20/S-21): the in-code table in dex.py is
+        # the only source of swap targets, spenders and LP contracts. The
+        # operator may add or replace entries explicitly with
+        # {"dex": {"pinned_contracts": {"<chain id>": {"<role>": "0x.."}}}};
+        # every override is logged here and labeled in the queue.
+        try:
+            self.dex_pin_overrides = dex_mod.parse_pin_overrides(
+                dex_cfg.get("pinned_contracts"))
+        except dex_mod.DexError as e:
+            raise ValueError(f"bad dex.pinned_contracts: {e}")
+        for cid, roles in sorted(self.dex_pin_overrides.items()):
+            for role, addr in sorted(roles.items()):
+                builtin = dex_mod.PINNED_CONTRACTS.get(cid, {}).get(role)
+                note = (f" (replaces built-in {builtin})"
+                        if builtin and builtin != addr else "")
+                print(f"spellbookd: OPERATOR OVERRIDE: dex pinned {role} on "
+                      f"chain {cid} = {addr}{note}", file=sys.stderr)
         # The Sage RPC child process, if we started one. The daemon owns the
         # whole Chia execution path (O10): it spawns `sage rpc start` against
         # the configured data home and talks to it over local mTLS. If Sage
@@ -1214,6 +1231,14 @@ class Daemon:
             raise evm.EvmError(
                 f"{env_key} not in the daemon environment — cannot fetch "
                 "a firm quote, refusing")
+        # S-20: the venue's transaction may only go to the contract pinned
+        # for this venue and chain. Refuse before asking for a quote.
+        pins = getattr(self, "dex_pin_overrides", None) or {}
+        try:
+            dex_mod.pinned_contract(info["chain_id"],
+                                    dex_mod.VENUE_SWAP_TARGET[venue], pins)
+        except dex_mod.DexError as e:
+            raise evm.EvmError(f"venue {venue!r}: {e}")
         sell, buy = params["sell_token"], params["buy_token"]
         amount = params["sell_amount_wei"]
         # Firm quote, fetched at execution time (quotes live ~30s).
@@ -1244,24 +1269,37 @@ class Daemon:
         if dl is not None and time.time() > dl:
             raise evm.EvmError(
                 "swap intent expired while fetching the quote — refusing")
+        # S-20: the venue's transaction is decoded and bound to the intent
+        # (pinned target and spender, selector, sell token/amount,
+        # recipient = this wallet, minimum out) — not the quote's claims.
         plan = dex_mod.validate_swap_intent_against_quote(
-            {"chain_id": info["chain_id"], "sell_token": sell,
-             "buy_token": buy, "sell_amount_wei": amount,
+            {"chain_id": info["chain_id"], "venue": venue, "wallet": sender,
+             "sell_token": sell, "buy_token": buy, "sell_amount_wei": amount,
              "min_buy_amount_wei": params["min_buy_amount_wei"],
-             "max_slippage_bps": params["max_slippage_bps"]},
+             "max_slippage_bps": params["max_slippage_bps"],
+             "pin_overrides": pins},
             quote)
         nonce = rpc.nonce(sender)
         gas_price = _evm_gas_price(rpc)
         approve_tx = None
         if plan["needs_approval"]:
+            # Exact amount, pinned spender, sell token — re-checked here
+            # at the point of signing, never unlimited.
+            dex_mod.check_swap_approval(
+                chain_id=info["chain_id"], venue=venue, token=sell,
+                spender=plan["allowance_target"],
+                amount=plan["approve_amount_wei"], sell_token=sell,
+                sell_amount=amount, pin_overrides=pins)
             approve_tx, nonce = self._evm_ensure_allowance(
                 rpc, priv, info["chain_id"], sender, nonce, sell,
-                plan["allowance_target"], amount, gas_price)
+                plan["allowance_target"], plan["approve_amount_wei"],
+                gas_price)
         tx_hash, _, block = self._evm_send_call(
             rpc, priv, info["chain_id"], sender, nonce,
             plan["to"], plan["value_wei"], plan["data"], gas_price, "swap")
         out = {"submitted": True, "tx_hash": tx_hash, "block": block,
-               "from": sender, "buy_amount_wei": plan["buy_amount_wei"]}
+               "from": sender, "buy_amount_wei": plan["buy_amount_wei"],
+               "decoded": plan["decoded"]}
         if approve_tx:
             out["approve_tx_hash"] = approve_tx
         return out
@@ -4031,6 +4069,13 @@ class Daemon:
             raise evm.EvmError(
                 f"venue {venue!r} needs {env_key} in the daemon environment "
                 "(it has no server-side key). matcha and cast need no key.")
+        # S-20: a venue whose swap contract is not pinned for this chain
+        # can never pass the execution-time decode — refuse it now.
+        try:
+            dex_mod.pinned_contract(chain_id, dex_mod.VENUE_SWAP_TARGET[venue],
+                                    self.dex_pin_overrides)
+        except dex_mod.DexError as e:
+            raise evm.EvmError(f"venue {venue!r}: {e}")
         sell = p.get("sell_token", "")
         buy = p.get("buy_token", "")
         for tok, what in ((sell, "sell_token"), (buy, "buy_token")):
@@ -4391,6 +4436,44 @@ class Daemon:
         return self._run_fund_intent(intent, muse_id, [], "dex_lp_claim",
                                      force_queue=True)
 
+    def _dex_wallet_address(self, chain):
+        """This wallet's address on an EVM chain, or None when no seed is
+        loaded (display only — never used to sign)."""
+        try:
+            return self._evm_key(chain)[1].lower()
+        except Exception:
+            return None
+
+    def _dex_swap_checks(self, p: dict) -> dict:
+        """The decode-before-signing bounds for a queued swap, for the
+        human: the pinned contract the venue's tx must target (and, for a
+        token sell, approve), the required recipient, the exact sell and
+        minimum buy."""
+        out = {"target": None, "target_role": None, "target_source": None,
+               "spender": None, "recipient": self._dex_wallet_address(
+                   p.get("chain")),
+               "sell_token": p.get("sell_token"),
+               "sell_amount_wei": p.get("sell_amount_wei"),
+               "buy_token": p.get("buy_token"),
+               "min_buy_amount_wei": p.get("min_buy_amount_wei"),
+               "refused": None}
+        try:
+            venue = dex_mod.normalize_venue(p.get("venue"))
+            cid = evm.CHAINS[p["chain"]]["chain_id"]
+            role = dex_mod.VENUE_SWAP_TARGET[venue]
+            addr = dex_mod.pinned_contract(cid, role, self.dex_pin_overrides)
+        except (dex_mod.DexError, KeyError) as e:
+            out["refused"] = str(e)
+            return out
+        out.update({"target": addr, "target_role": role,
+                    "target_source": dex_mod.pin_source(
+                        cid, role, self.dex_pin_overrides),
+                    "selectors": [dex_mod.SELECTOR_NAMES[s] for s in
+                                  dex_mod.SWAP_SELECTORS[role]]})
+        if not dex_mod._is_native_token(p.get("sell_token") or ""):
+            out["spender"] = addr
+        return out
+
     def rt_dex_venues(self, p: dict, muse_id: str) -> dict:
         """Read-only: the user's recommended swap venues (SPEC §10 v2).
 
@@ -4401,8 +4484,21 @@ class Daemon:
         in spellbook.json (default: matcha + uniswap) and takes effect
         on daemon restart.
         """
+        pinned = {}
+        for cid in sorted(set(dex_mod.PINNED_CONTRACTS)
+                          | set(self.dex_pin_overrides)):
+            pinned[str(cid)] = {
+                role: {"address": addr,
+                       "source": dex_mod.pin_source(cid, role,
+                                                    self.dex_pin_overrides)}
+                for role, addr in sorted(dex_mod.pinned_contracts(
+                    cid, self.dex_pin_overrides).items())}
         return {
             "recommended_venues": list(self.dex_recommended_venues),
+            # S-20/S-21: the only contracts swaps and LP calls may target.
+            # A venue or LP protocol whose contract is not pinned for a
+            # chain is refused there.
+            "pinned_contracts": pinned,
             "known_venues": {
                 v: {"env_key": dex_mod.VENUE_ENV_KEYS[v],
                     "key_required": v not in dex_mod.VENUES_KEY_OPTIONAL,
@@ -4886,6 +4982,10 @@ class Daemon:
                 out["approve_tx_hashes"] = ex["approve_tx_hashes"]
             if ex.get("buy_amount_wei") is not None:
                 out["buy_amount_wei"] = ex["buy_amount_wei"]
+            # What was decoded from the signed DEX call (target, selector,
+            # tokens, amounts, recipient) — for the human and the audit.
+            if ex.get("decoded"):
+                out["decoded"] = ex["decoded"]
             return out
         self.ledger.append(muse_id, canon, ex.get("offer_id"), "approved")
         out = {"ok": True, "decision": "approved", "note": ex.get("note", "")}
@@ -6045,6 +6145,11 @@ class Daemon:
                     "max_slippage_bps": p.get("max_slippage_bps"),
                     "deadline_sec": p.get("deadline_sec"),
                     "destination": None, "asset": "dex_swap", "amount": None,
+                    # S-20: what the venue's transaction is decoded against
+                    # before anything is signed. The calldata itself only
+                    # exists at execution; the decoded call is returned
+                    # with the result.
+                    "swap_checks": self._dex_swap_checks(p),
                 })
             elif intent == "dex_lp_add":
                 entry.update({

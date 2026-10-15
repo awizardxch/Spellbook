@@ -686,38 +686,37 @@ from spellbook.dex import (
     validate_swap_intent_against_quote,
 )
 
-SELL = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-BUY = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-SPENDER = "0xcccccccccccccccccccccccccccccccccccccccc"
+import _dex_calldata as cd
+
+SELL = cd.SELL
+BUY = cd.BUY
+SPENDER = cd.HOLDER
 
 
 def _intent(**kw):
-    base = {"chain_id": 8453, "sell_token": SELL, "buy_token": BUY,
-            "sell_amount_wei": 10**18, "min_buy_amount_wei": 3000 * 10**6,
-            "max_slippage_bps": 50}
-    base.update(kw)
-    return base
+    return cd.swap_intent(**kw)
 
 
 def _quote(**kw):
-    base = {"venue": "0x", "chain_id": 8453, "sell_token": SELL,
-            "buy_token": BUY, "sell_amount": str(10**18),
-            "buy_amount": str(3100 * 10**6),
-            "allowance_target": SPENDER,
-            "tx": {"to": "0xdef1c0ded9bec7f1a1670819833240f027b25eff",
-                   "data": "0x1234567890abcdef",
-                   "value": "0"}}
+    base = cd.zerox_quote()
     base.update(kw)
     return base
+
+
+def _native_quote(value=str(10**18), sell=NATIVE_SENTINEL):
+    return _quote(sell_token=sell, allowance_target=None,
+                  tx={"to": cd.HOLDER, "value": value,
+                      "data": cd.ah_exec(token=NATIVE_SENTINEL)})
 
 
 def test_validate_swap_happy_path():
     plan = validate_swap_intent_against_quote(_intent(), _quote())
-    assert plan["to"] == "0xdef1c0ded9bec7f1a1670819833240f027b25eff"
-    assert plan["data"] == "0x1234567890abcdef"
+    assert plan["to"] == cd.HOLDER
+    assert plan["data"] == cd.ah_exec()
     assert plan["value_wei"] == 0
     assert plan["needs_approval"] is True
     assert plan["allowance_target"] == SPENDER
+    assert plan["approve_amount_wei"] == 10**18
     assert plan["buy_amount_wei"] == 3100 * 10**6
 
 
@@ -758,38 +757,30 @@ def test_validate_swap_no_allowance_target_for_token_sell():
 def test_validate_swap_token_sell_must_have_zero_value():
     with pytest.raises(DexError, match="must be 0"):
         validate_swap_intent_against_quote(_intent(), _quote(
-            tx={"to": "0xdef1c0ded9bec7f1a1670819833240f027b25eff",
-                "data": "0x1234567890abcdef", "value": "100"}))
+            tx={"to": cd.HOLDER, "data": cd.ah_exec(), "value": "100"}))
 
 
 def test_validate_swap_native_sell():
     intent = _intent(sell_token=NATIVE_SENTINEL)
-    q = _quote(sell_token=NATIVE_SENTINEL, allowance_target=None,
-               tx={"to": "0xdef1c0ded9bec7f1a1670819833240f027b25eff",
-                   "data": "0x1234567890abcdef", "value": str(10**18)})
-    plan = validate_swap_intent_against_quote(intent, q)
+    plan = validate_swap_intent_against_quote(intent, _native_quote())
     assert plan["value_wei"] == 10**18
     assert plan["needs_approval"] is False
 
 
 def test_validate_swap_native_value_mismatch():
     intent = _intent(sell_token=NATIVE_SENTINEL)
-    q = _quote(sell_token=NATIVE_SENTINEL, allowance_target=None,
-               tx={"to": "0xdef1c0ded9bec7f1a1670819833240f027b25eff",
-                   "data": "0x1234567890abcdef", "value": str(10**18 - 1)})
     with pytest.raises(DexError, match="tx value"):
-        validate_swap_intent_against_quote(intent, q)
+        validate_swap_intent_against_quote(
+            intent, _native_quote(value=str(10**18 - 1)))
 
 
 def test_validate_swap_native_sell_zero_address():
     # Uniswap's native representation is the zero address (their docs),
-    # not the 0x sentinel — the validator must accept both.
+    # not the 0x sentinel â€” the validator must accept both.
     from spellbook.dex import NATIVE_ZERO
     intent = _intent(sell_token=NATIVE_ZERO)
-    q = _quote(sell_token=NATIVE_ZERO, allowance_target=None,
-               tx={"to": "0xdef1c0ded9bec7f1a1670819833240f027b25eff",
-                   "data": "0x1234567890abcdef", "value": str(10**18)})
-    plan = validate_swap_intent_against_quote(intent, q)
+    plan = validate_swap_intent_against_quote(
+        intent, _native_quote(sell=NATIVE_ZERO))
     assert plan["value_wei"] == 10**18
     assert plan["needs_approval"] is False
 
@@ -881,7 +872,7 @@ def _base_chain(monkeypatch):
 
 
 def _swap_params(**over):
-    p = {"intent": "dex_swap", "chain": "evm-8453", "venue": "matcha",
+    p = {"intent": "dex_swap", "chain": "evm-4663", "venue": "matcha",
          "sell_token": A, "buy_token": B,
          "sell_amount_wei": 10**18, "min_buy_amount_wei": 9 * 10**17,
          "max_slippage_bps": 50, "purpose": "test"}
@@ -919,7 +910,7 @@ def test_validate_swap_recommended_venue_has_no_warning(tmp_path, monkeypatch):
     d = _daemon(tmp_path)
     intent = d._validate_dex_swap(_swap_params())
     assert intent["venue"] == "matcha"
-    assert intent["chain_id"] == 8453
+    assert intent["chain_id"] == 4663
     assert intent["venue_warning"] is None
 
 

@@ -722,6 +722,35 @@ the chain: the 46630 testnet is not served by either venue, so asking
 for a matcha swap on Robinhood Chain testnet is refused immediately
 with "does not serve" (a capability fact, not a policy choice).
 
+### What the daemon checks before signing a swap
+
+The venue's transaction is decoded and compared with your intent; the
+quote's own numbers are not trusted. Contracts come from a pinned,
+in-code table per chain (`spellbook dex-venues` lists it under
+`pinned_contracts`). Today only Robinhood Chain (4663) is pinned, with
+the 0x AllowanceHolder (matcha and cast), the v4 PositionManager and
+Permit2. **Refused:**
+
+- any chain/venue whose swap contract is not pinned — Base and every
+  other chain for matcha/cast, and **uniswap everywhere** (no Universal
+  Router is pinned yet), refused at request time;
+- a `to` or spender other than the pinned contract;
+- a selector that is not a known swap entry point, or calldata that
+  does not decode (the error names the venue and selector);
+- a decoded sell token or amount different from the intent (an `exec`
+  allowance larger than the sell, including unlimited);
+- a recipient other than this wallet, or a decoded minimum out below
+  `min_buy_amount_wei`;
+- nonzero `value` on an ERC-20 sell, or a native sell whose `value` is
+  not exactly the sell amount.
+
+The daemon's own approve is the exact sell amount to the pinned spender.
+A queued swap shows `swap_checks` (pinned target, spender, recipient);
+the execution result carries `decoded` (target, selector, tokens,
+amounts, recipient). The operator can pin more contracts in
+spellbook.json (`dex.pinned_contracts`); each override is logged at
+daemon start and labeled in the queue.
+
 ### Direct pool calldata (no API key)
 
 ```python
