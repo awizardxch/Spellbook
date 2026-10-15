@@ -24,6 +24,15 @@ one of two ways:
             the spellbook user); it prints nothing secret, so it needs no
             terminal.
 
+Forced backup (review S-16): an install is backup-pending, and the
+daemon refuses fund-moving routes, until the human proves the backup. The
+terminal mode records that proof itself once the typed-back words match
+the LIVE seed (3 words when the words are on this machine; all 24 when
+only the seed is, after a restore or the passwordless ceremony). The
+envelope mode puts a one-time confirmation code inside the encrypted
+backup; `spellbook backup-confirm` takes it back (stdin, never argv). Both
+write <prefix>/backup.json as root or the daemon user; no daemon route can.
+
 Raw private keys are never shown in either mode: the words recover
 everything the daemon derives (SET 1 in stock wallets; SET 2 through the
 daemon). The decision logic is pure (`export_guard`, `paper_backup_text`,
@@ -39,7 +48,7 @@ import subprocess
 import sys
 
 from spellbook import kdf
-from spellbook.seed import load_seed, mnemonic_from_entropy
+from spellbook.seed import entropy_from_mnemonic, load_seed, mnemonic_from_entropy
 
 CLEAR_SEQUENCE = "\x1b[2J\x1b[3J\x1b[H"
 EXIT_REFUSED = 3
@@ -80,10 +89,13 @@ def login_uid() -> int | None:
 
 
 def _std_addresses(std_entropy: bytes) -> dict:
+    from spellbook.stdkeys import mnemonic_to_seed
+    return _std_addresses_of_seed(mnemonic_to_seed(mnemonic_from_entropy(std_entropy)))
+
+
+def _std_addresses_of_seed(seed64: bytes) -> dict:
     from spellbook import chia_sign, stdkeys
     from spellbook import solana as solana_mod
-    from spellbook.stdkeys import mnemonic_to_seed
-    seed64 = mnemonic_to_seed(mnemonic_from_entropy(std_entropy))
     master = stdkeys.chia_master_sk(seed64)
     sol = solana_mod.standard_keypair(seed64)
     return {
@@ -112,9 +124,11 @@ def _kdf_addresses(seed: bytes) -> dict:
 def paper_backup_text(kdf_seed: bytes | None, std_entropy: bytes | None,
                       with_addresses: bool = True, *,
                       std_words_lost: bool = False,
-                      terminal: bool = True) -> str:
+                      terminal: bool = True,
+                      live_std_seed: bytes | None = None,
+                      confirm_code: str | None = None) -> str:
     """The paper backup: words and addresses, never raw keys."""
-    if kdf_seed is None and std_entropy is None:
+    if kdf_seed is None and std_entropy is None and live_std_seed is None:
         raise ValueError("nothing to export: no seed on this install")
     lines = [
         "================================================================",
@@ -148,6 +162,21 @@ def paper_backup_text(kdf_seed: bytes | None, std_entropy: bytes | None,
             "copy made at install holds them. Seal the seed (spellbook-seed",
             "serve) so a wipe never depends on them.",
         ]
+    elif live_std_seed is not None:
+        # Passwordless ceremony: the human typed these words into the page;
+        # only the sealed seed is here, and words cannot be re-derived.
+        lines += [
+            "",
+            "SET 1 — STANDARD RECOVERY: the 24 words you entered on the",
+            "ceremony page. This install holds only the sealed seed, so the",
+            "words are not shown. Your paper copy must derive these:",
+        ]
+        if with_addresses:
+            a = _std_addresses_of_seed(live_std_seed)
+            lines += ["", f"  EVM (every chain)   {a['evm']}",
+                      f"  Chia testnet11      {a['chia-testnet']}",
+                      f"  Chia mainnet        {a['chia-mainnet']}",
+                      f"  Solana (any net)    {a['solana']}"]
     if kdf_seed is not None:
         lines += [
             "",
@@ -162,6 +191,15 @@ def paper_backup_text(kdf_seed: bytes | None, std_entropy: bytes | None,
             lines += [""] + [f"  {chain:<18}  {addr}" for chain, addr in a.items()]
     lines += ["", "Verify after any import: the addresses must match what the",
               "wallet shows."]
+    if confirm_code is not None:
+        lines += [
+            "",
+            "BACKUP CONFIRMATION CODE:  " + confirm_code,
+            "When everything above is on paper, two copies, give this code",
+            "to your agent (or run `sudo spellbook backup-confirm`). Until",
+            "then the wallet refuses to move funds. The code only confirms",
+            "your backup; it cannot open the wallet. One use, 7 days.",
+        ]
     if terminal:
         lines += ["Press Enter after you have written these down; the screen",
                   "is cleared then."]
@@ -252,9 +290,19 @@ def _load_material(prefix: str):
     return kdf_seed, std_entropy, std_words_lost
 
 
+def _live(prefix: str):
+    """(seed, kind) the daemon signs with, or (None, None) when unreadable."""
+    from spellbook import custody
+    try:
+        return custody.live_seed(prefix)
+    except (OSError, ValueError, custody.CustodyError):
+        return None, None
+
+
 def run_export(prefix: str, *, reveal_key: str | None = None,
                tty_path: str = "/dev/tty", verify: bool = True) -> int:
     """The CLI body. Returns the exit status; reasons go to stderr."""
+    from spellbook import custody
     if reveal_key is None:
         reason = export_guard(sys.stdin.isatty(), sys.stdout.isatty(),
                               login_uid(), _agent_uids(prefix))
@@ -263,9 +311,21 @@ def run_export(prefix: str, *, reveal_key: str | None = None,
             return EXIT_REFUSED
     try:
         kdf_seed, std_entropy, std_words_lost = _load_material(prefix)
+        live, kind = _live(prefix)
+        live_std = (live if kind == "standard" and std_entropy is None
+                    and not std_words_lost else None)
+        code = None
+        if reveal_key is not None:
+            # Validate the key before issuing a code for it.
+            _load_reveal_key(reveal_key)
+            if live is not None:
+                code = custody.issue_backup_code(
+                    prefix, custody.seed_fingerprint(live))
         text = paper_backup_text(kdf_seed, std_entropy,
                                  std_words_lost=std_words_lost,
-                                 terminal=reveal_key is None)
+                                 terminal=reveal_key is None,
+                                 live_std_seed=live_std,
+                                 confirm_code=code)
     except PermissionError:
         print("spellbook export: cannot read the seed files — run it as root "
               "or the spellbook user (e.g. `sudo spellbook export`)",
@@ -285,7 +345,20 @@ def run_export(prefix: str, *, reveal_key: str | None = None,
         print(envelope)
         return 0
 
+    # What the human proves: the words of the LIVE seed. 3 of them when the
+    # words are on this machine; all 24 when only the seed is.
+    label, mnemonic = None, None
+    if kind == "standard" and std_entropy is not None:
+        label, mnemonic = "SET 1", mnemonic_from_entropy(std_entropy)
+    elif kind == "kdf" and kdf_seed is not None:
+        label, mnemonic = "SET 2", mnemonic_from_entropy(kdf_seed)
+    elif kind == "standard" and live is not None:
+        label = "SET 1"
+    elif std_entropy is not None:
+        label, mnemonic = "SET 1", mnemonic_from_entropy(std_entropy)
+
     # The words go to the terminal device itself, never to stdout.
+    verified = None
     with open(tty_path, "w") as tty_out, open(tty_path) as tty_in:
         tty_out.write("\n" + text)
         tty_out.flush()
@@ -294,32 +367,112 @@ def run_export(prefix: str, *, reveal_key: str | None = None,
         tty_out.flush()
         if shutil.which("tput"):
             subprocess.run(["tput", "clear"], check=False, stdout=tty_out)
-        verified = None
-        if verify and std_entropy is not None:
-            verified = _verify_on_tty(mnemonic_from_entropy(std_entropy),
-                                      tty_in, tty_out)
+        if verify and label is not None:
+            if mnemonic is not None:
+                verified = _verify_on_tty(mnemonic, tty_in, tty_out, label)
+            else:
+                verified = _verify_reentry(live, tty_in, tty_out, label)
             # The typed words echoed; clear them too.
             tty_out.write(CLEAR_SEQUENCE)
             tty_out.flush()
     if verified is False:
-        print("spellbook export: SET 1 NOT verified after "
+        print(f"spellbook export: {label} NOT verified after "
               f"{VERIFY_ATTEMPTS} attempts. Run `spellbook export` again "
               "and recopy it.", file=sys.stderr)
         return EXIT_NOT_VERIFIED
+    recorded = ""
+    if verified:
+        recorded = _record_confirmation(prefix, live, mnemonic, kind)
     print("spellbook export: paper backup shown once and cleared"
-          + (" — SET 1 verified." if verified else "."))
+          + (f" — {label} verified." if verified else ".") + recorded)
     return 0
 
 
-def _verify_on_tty(mnemonic: str, tty_in, tty_out) -> bool:
-    """Ask for 3 SET 1 words from the paper copy (never echoing the answer)."""
+def _record_confirmation(prefix: str, live: bytes | None,
+                         mnemonic: str | None, kind: str | None) -> str:
+    """Write the backup confirmation for the live seed (S-16), only when the
+    verified words are the live seed's own."""
+    from spellbook import custody, stdkeys
+    if live is None:
+        print("spellbook export: the live seed could not be read, so the "
+              "backup confirmation was NOT recorded", file=sys.stderr)
+        return ""
+    if mnemonic is not None:
+        derived = (stdkeys.mnemonic_to_seed(mnemonic) if kind == "standard"
+                   else entropy_from_mnemonic(mnemonic))
+        if not secrets.compare_digest(derived, live):
+            print("spellbook export: the verified words are not the live "
+                  "wallet's, so the backup confirmation was NOT recorded",
+                  file=sys.stderr)
+            return ""
+    try:
+        custody.confirm_backup(prefix, custody.seed_fingerprint(live),
+                               "terminal-words")
+    except OSError as e:
+        print(f"spellbook export: could not record the backup confirmation: "
+              f"{type(e).__name__}", file=sys.stderr)
+        return ""
+    return " Backup confirmed: fund-moving routes are open."
+
+
+def run_backup_confirm(prefix: str, code: str) -> int:
+    """`spellbook backup-confirm`: the reveal-key path's one-time code."""
+    from spellbook import custody
+    live, _ = _live(prefix)
+    if live is None:
+        print("spellbook backup-confirm: cannot read the live seed — run it "
+              "as root or the spellbook user", file=sys.stderr)
+        return 2
+    try:
+        ok, msg = custody.confirm_with_code(
+            prefix, code, custody.seed_fingerprint(live))
+    except OSError as e:
+        print(f"spellbook backup-confirm: {type(e).__name__}", file=sys.stderr)
+        return 2
+    if not ok:
+        print(f"spellbook backup-confirm: {msg}", file=sys.stderr)
+        return EXIT_NOT_VERIFIED
+    print("spellbook backup-confirm: backup confirmed; fund-moving routes "
+          "are open.")
+    return 0
+
+
+def _verify_reentry(live: bytes, tty_in, tty_out, label: str) -> bool:
+    """All 24 words, typed from the paper copy, must give the live seed."""
+    from spellbook import stdkeys
+    tty_out.write(f"\nBACKUP VERIFICATION — this install keeps no words, only "
+                  f"the seed. Enter all 24 {label} words from your PAPER copy "
+                  "(the screen above is cleared).\n")
+    for attempt in range(1, VERIFY_ATTEMPTS + 1):
+        words = []
+        for p in range(1, 25):
+            tty_out.write(f"Word #{p} of {label}: ")
+            tty_out.flush()
+            words.append("".join(tty_in.readline().split()).lower())
+        try:
+            ok = secrets.compare_digest(
+                stdkeys.mnemonic_to_seed(" ".join(words)), live)
+        except ValueError:
+            ok = False
+        if ok:
+            tty_out.write("Backup verified. Two copies, two places.\n")
+            tty_out.flush()
+            return True
+        tty_out.write(f"Words do not match (attempt {attempt} of "
+                      f"{VERIFY_ATTEMPTS}).\n")
+        tty_out.flush()
+    return False
+
+
+def _verify_on_tty(mnemonic: str, tty_in, tty_out, label: str = "SET 1") -> bool:
+    """Ask for 3 words of `label` from the paper copy (cleared afterwards)."""
     positions = verification_positions()
-    tty_out.write("\nBACKUP VERIFICATION — enter the requested SET 1 words from "
-                  "your PAPER copy (the screen above is cleared).\n")
+    tty_out.write(f"\nBACKUP VERIFICATION — enter the requested {label} words "
+                  "from your PAPER copy (the screen above is cleared).\n")
     for attempt in range(1, VERIFY_ATTEMPTS + 1):
         answers = []
         for p in positions:
-            tty_out.write(f"Word #{p} of SET 1: ")
+            tty_out.write(f"Word #{p} of {label}: ")
             tty_out.flush()
             answers.append(tty_in.readline().strip())
         if check_words(mnemonic, positions, answers):

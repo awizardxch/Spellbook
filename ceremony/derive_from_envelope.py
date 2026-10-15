@@ -2,16 +2,17 @@
 """
 Decrypt a SPELLBOOK-SEED-ENC2 envelope and derive ALL Spellbook addresses.
 
-The envelope is hybrid-encrypted (RSA-OAEP-SHA256 + AES-GCM-256) to the
-agent's ceremony keypair. There is deliberately NO password step: nothing
-secret ever appears in chat, logs, argv, or files.
+Runs as the spellbook DAEMON user (or root) only (review S-16): the
+envelope is sealed to the daemon's ceremony key,
+<prefix>/ceremony/private.pem (0600, 0700 dir), which the agent cannot
+read. An agent that wants the addresses asks the daemon instead
+(`spellbook addresses`), which is what the daemon decrypted at start.
 
-Usage: python3 derive_from_envelope.py
+Usage: sudo -u spellbook python3 derive_from_envelope.py [--prefix /opt/spellbook]
   Paste the envelope when prompted, then Enter on an empty line.
 
 The script:
-  1. Unwraps the AES key with the ceremony private key
-     (~/workspace/.spellbook/seed-derive/private.pem, never in the repo).
+  1. Unwraps the AES key with the daemon's ceremony key.
   2. Derives EVM, Solana, and Chia addresses from the seed in one run.
   3. Verifies EVM and Solana against the known wallet anchors and FAILS
      CLOSED on any mismatch or missing chain. It never fills an address
@@ -20,22 +21,12 @@ The script:
 On success it prints the three addresses. Mint a fresh viewer token ONLY
 from this output, binding ALL THREE.
 """
+import argparse
 import sys
 import os
-import json
-import base64
 
-PYDEPS = os.path.expanduser("~/workspace/.pydeps/site-packages")
-if PYDEPS not in sys.path:
-    sys.path.insert(0, PYDEPS)
-sys.path.insert(0, os.path.expanduser("~/workspace/spellbook/src"))
-
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-PRIVATE_KEY_PATH = os.path.expanduser(
-    "~/workspace/.spellbook/seed-derive/private.pem")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "..", "src"))
 
 # Known-good anchors for the CURRENT wallet (SET 1, sealed 2026-09-29).
 # Updated only by re-deriving from the authoritative current seed material.
@@ -43,33 +34,17 @@ ANCHOR_EVM = "0xb82a43e774e71524d942afe8fb125183a491cf91"
 ANCHOR_SOLANA = "HGyuCUs3fPAne9fak3AD78gHJYQVAe8piWVZ2YxitN9j"
 
 
-def decrypt_envelope(envelope: str) -> str:
-    envelope = envelope.strip()
-    if not envelope.startswith("SPELLBOOK-SEED-ENC2."):
-        raise ValueError("not a SPELLBOOK-SEED-ENC2 envelope")
-    payload = json.loads(base64.b64decode(envelope.split(".", 1)[1]))
-    if payload.get("v") != 2 or \
-            payload.get("algo") != "RSA-OAEP-SHA256+AES-GCM-256":
-        raise ValueError("unsupported envelope version/algo")
-    ek = bytes.fromhex(payload["ek"])
-    iv = bytes.fromhex(payload["iv"])
-    ct = bytes.fromhex(payload["ct"])
-
-    with open(PRIVATE_KEY_PATH, "rb") as f:
-        private_key = serialization.load_pem_private_key(f.read(),
-                                                         password=None)
-    aes_key = private_key.decrypt(
-        ek,
-        padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                     algorithm=hashes.SHA256(), label=None))
-    seed_hex = AESGCM(aes_key).decrypt(iv, ct, None).decode().strip().lower()
-    if len(seed_hex) not in (64, 128) or \
-            not all(c in "0123456789abcdef" for c in seed_hex):
-        raise ValueError("decrypted payload is not a 64- or 128-char hex seed")
-    return seed_hex
+def decrypt_envelope(envelope: str, prefix: str) -> str:
+    from spellbook import custody
+    key = custody.read_private_key(custody.ceremony_key_path(prefix),
+                                   custody.prefix_owner(prefix))
+    return custody.decrypt_envelope(envelope, key, allow_custom=True).hex()
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--prefix", default="/opt/spellbook")
+    args = ap.parse_args()
     print("Paste the SPELLBOOK-SEED-ENC2 envelope (then Enter on empty line):")
     lines = []
     while True:
@@ -86,7 +61,7 @@ def main():
         sys.exit(1)
 
     try:
-        seed_hex = decrypt_envelope(envelope)
+        seed_hex = decrypt_envelope(envelope, args.prefix)
     except Exception as e:
         print(f"ERROR: decryption failed: {e}", file=sys.stderr)
         sys.exit(1)

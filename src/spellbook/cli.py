@@ -35,7 +35,20 @@ Paper backup, no socket, no token (S3; review S-05):
     user. Run it as root or the spellbook user: `sudo spellbook export`.
   spellbook export --reveal-key <b64 SPKI> [--prefix /opt/spellbook]
     the seal ceremony (ceremony/seal-password-encryptor.html Steps 1-2):
-    prints only an envelope encrypted to the human's reveal key.
+    prints only an envelope encrypted to the human's reveal key. The
+    backup inside carries a one-time confirmation code.
+  spellbook backup-confirm [--prefix /opt/spellbook]
+    reads that code from stdin (never argv) and records the backup as
+    confirmed (review S-16). Until then fund-moving routes refuse.
+
+Ceremony key, daemon side (review S-16; root or the daemon user only):
+  spellbook ceremony-key [--prefix /opt/spellbook] [--rotate] [--public-only]
+    creates <prefix>/ceremony/private.pem (0600, 0700 dir) if missing and
+    prints only the PUBLIC key + fingerprint the agent stamps into
+    ceremony/seed-to-addresses.html. --rotate makes old envelopes unreadable.
+  spellbook ceremony-adopt [--prefix /opt/spellbook] [--from PATH]
+    MOVES a legacy ceremony key out of the agent's workspace into the
+    daemon's dir and overwrites + unlinks the original.
 
 Token resolution per subcommand:
   request side: --token-file, else $SPELLBOOK_REQUEST_TOKEN_FILE, else $SPELLBOOK_REQUEST_TOKEN
@@ -700,7 +713,34 @@ def main(argv=None):
                          "(Step 1); '-' reads it from stdin. Prints only the "
                          "encrypted envelope.")
     ex.add_argument("--no-verify", action="store_true",
-                    help="terminal mode: skip the 3-word SET 1 check")
+                    help="terminal mode: skip the 3-word SET 1 check "
+                         "(the backup then stays unconfirmed)")
+
+    bc = sub.add_parser(
+        "backup-confirm",
+        help="confirm the paper backup with the one-time code from the "
+             "encrypted backup (read from stdin); root or the daemon user")
+    bc.add_argument("--prefix", default="/opt/spellbook")
+
+    ck = sub.add_parser(
+        "ceremony-key",
+        help="the daemon's passwordless-ceremony key: create it as the "
+             "daemon user if missing, print only its PUBLIC key")
+    ck.add_argument("--prefix", default="/opt/spellbook")
+    ck.add_argument("--rotate", action="store_true",
+                    help="replace the key; envelopes sealed to the old one "
+                         "become unreadable, and the backup is required again")
+    ck.add_argument("--public-only", action="store_true",
+                    help="print only the base64 public key")
+
+    ca_ = sub.add_parser(
+        "ceremony-adopt",
+        help="move a legacy ceremony key out of agent reach into the "
+             "daemon's dir (root)")
+    ca_.add_argument("--prefix", default="/opt/spellbook")
+    ca_.add_argument("--from", dest="src", default=None,
+                     help="legacy key path (default: spellbook.json "
+                          "ceremony_key_path)")
 
     # Lifecycle (SPEC §12b item 4): local-first, no approve token ever.
     sub.add_parser("version")
@@ -1116,6 +1156,39 @@ def main(argv=None):
             reveal = sys.stdin.read()
         raise SystemExit(run_export(a.prefix, reveal_key=reveal,
                                     verify=not a.no_verify))
+    if a.cmd == "backup-confirm":
+        from spellbook.export import run_backup_confirm
+        if sys.stdin.isatty():
+            import getpass
+            code = getpass.getpass("Backup confirmation code: ")
+        else:
+            code = sys.stdin.readline()
+        raise SystemExit(run_backup_confirm(a.prefix, code))
+    if a.cmd in ("ceremony-key", "ceremony-adopt"):
+        from spellbook import custody
+        try:
+            if a.cmd == "ceremony-key":
+                info = custody.generate_ceremony_key(a.prefix, rotate=a.rotate)
+                if a.public_only:
+                    print(info["public_key_b64"])
+                else:
+                    print(f"public_key_b64: {info['public_key_b64']}")
+                    print(f"fingerprint:    {info['fingerprint']}")
+                    print("created" if info["created"] else "existing key")
+            else:
+                src = a.src or custody.legacy_key_path(custody.load_cfg(a.prefix))
+                if not os.path.lexists(src):
+                    print(f"nothing to adopt: no key at {src}")
+                    return
+                res = custody.adopt_ceremony_key(a.prefix, src)
+                print(f"moved to {res['moved_to']}; original overwritten: "
+                      f"{res['overwritten']}, unlinked: {res['unlinked']}")
+                if not res["unlinked"]:
+                    raise SystemExit(f"spellbook ceremony-adopt: {src} could "
+                                     "not be unlinked — remove it by hand")
+        except (custody.CustodyError, OSError) as e:
+            raise SystemExit(f"spellbook {a.cmd}: {e}")
+        return
 
     try:
         if a.cmd in ("version", "upgrade", "doctor", "dex-quote", "cast"):

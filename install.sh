@@ -861,6 +861,52 @@ chown "${AGENT_USER}" "${AGENT_TOKEN_FILE}"
 chmod 0600 "${AGENT_TOKEN_FILE}"
 fi
 
+# --- passwordless-ceremony key + forced backup (review S-16) ---
+# The key that decrypts the human's sealed-seed envelope belongs to the
+# daemon user: <prefix>/ceremony/private.pem, 0600 in a 0700 dir, made
+# here AS that user. Only its PUBLIC half ever leaves (`spellbook status`,
+# `spellbook ceremony-key`), for the agent to stamp into the human's page.
+# Upgrade first MOVES any key the old agent-run ceremony left in the
+# agent's workspace into that dir (overwrite + unlink the original), so an
+# envelope sealed to it keeps opening at daemon start.
+if [ "$UPGRADE" = "1" ]; then
+  AGENT_HOME="$(getent passwd "$AGENT_USER" | cut -d: -f6)"
+  LEGACY_CEREMONY_KEY="$("${VENV}/bin/python" - "$PREFIX" "$AGENT_HOME" <<'EOF'
+import json, os, sys
+prefix, home = sys.argv[1], sys.argv[2]
+try:
+    p = json.load(open(os.path.join(prefix, "spellbook.json"))).get("ceremony_key_path") or ""
+except Exception:
+    p = ""
+if p.startswith("~"):
+    p = home + p[1:]
+print(p or os.path.join(home, "workspace/.spellbook/seed-derive/private.pem"))
+EOF
+)"
+  if [ -e "$LEGACY_CEREMONY_KEY" ] || [ -L "$LEGACY_CEREMONY_KEY" ]; then
+    if "${VENV}/bin/spellbook" ceremony-adopt --prefix "${PREFIX}" --from "$LEGACY_CEREMONY_KEY"; then
+      log "moved the agent-held ceremony key into ${PREFIX}/ceremony (S-16); treat it as exposed and re-seed when practical"
+    else
+      warn "could NOT move the ceremony key at ${LEGACY_CEREMONY_KEY} out of the"
+      warn "agent's reach (S-16). The agent can still decrypt the live seed. Fix:"
+      warn "  sudo ${VENV}/bin/spellbook ceremony-adopt --prefix ${PREFIX} --from ${LEGACY_CEREMONY_KEY}"
+    fi
+  fi
+fi
+CEREMONY_FPR="$(runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/spellbook" ceremony-key \
+  --prefix "${PREFIX}" | sed -n 's/^fingerprint: *//p')" \
+  || fail "ceremony key creation failed (as ${SPELLBOOK_USER})"
+[ -n "$CEREMONY_FPR" ] || fail "ceremony key creation printed no fingerprint (as ${SPELLBOOK_USER})"
+log "daemon ceremony key ready (fingerprint ${CEREMONY_FPR}; public key: spellbook status)"
+if [ "$UPGRADE" != "1" ]; then
+  # A fresh or restored install is BACKUP-PENDING: the daemon refuses
+  # fund-moving routes until the human proves the paper backup (§6).
+  # Upgrades never flip this on, so running wallets are not blocked.
+  runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" -c \
+    "import sys; from spellbook import custody; custody.require_backup(sys.argv[1])" "${PREFIX}" \
+    || fail "could not record the backup-pending state"
+fi
+
 # --- install record + agent self-serve upgrade path (fresh and upgrade) ---
 # VERSION is the machine's canonical version. install.env is root-owned and
 # records who installed and with what options, so --upgrade can run without
@@ -1074,14 +1120,21 @@ runuser -u "${AGENT_USER}" -- env "SPELLBOOK_SOCKET=${SOCK_PATH}" \
   "${VENV}/bin/spellbook" --token-file "${AGENT_TOKEN_FILE}" addresses
 
 echo
+BACKUP_CONFIRMED=0
 if [ -t 0 ] && [ -t 1 ]; then
   log "PAPER BACKUP (§6): shown on this terminal once, then cleared, then"
-  log "3 SET 1 words are asked back. Have pen and paper ready."
-  if ! "${VENV}/bin/spellbook" export --prefix "${PREFIX}"; then
+  log "3 SET 1 words are asked back. Have pen and paper ready. The wallet"
+  log "refuses to move funds until this check passes (S-16)."
+  if "${VENV}/bin/spellbook" export --prefix "${PREFIX}"; then
+    BACKUP_CONFIRMED=1
+  else
     warn "the paper backup was NOT shown or NOT verified (see the reason above)."
     warn "Show it again, as the human, from a terminal:  sudo ${VENV}/bin/spellbook export --prefix ${PREFIX}"
   fi
 else
+  log "BACKUP PENDING (S-16): read-only routes work; every fund-moving route"
+  log "refuses until the human proves the paper backup with one of the"
+  log "commands below."
   log "PAPER BACKUP (§6): NOT shown — this run has no terminal (stdin/stdout"
   log "is a pipe, a log or an agent's tool output). The install is complete;"
   log "the words exist only in ${PREFIX} (0600, ${SPELLBOOK_USER}). They leave"
@@ -1092,6 +1145,8 @@ else
   log "  (${PREFIX}/share/ceremony/seal-password-encryptor.html, Step 1) makes"
   log "  a reveal key; the agent relays its PUBLIC half and the envelope only:"
   log "    sudo ${VENV}/bin/spellbook export --prefix ${PREFIX} --reveal-key <public key>"
+  log "  then, with the one-time code inside that backup (stdin, never argv):"
+  log "    sudo ${VENV}/bin/spellbook backup-confirm --prefix ${PREFIX}"
 fi
 
 cat <<EOF
@@ -1139,6 +1194,11 @@ HUMAN'S (deliver out-of-band NOW, then never touch again):
        sudo ${VENV}/bin/spellbook export --prefix ${PREFIX} --reveal-key <public key>
      and paste back the envelope it prints; they decrypt it on the page
      (Step 2) and write both sets down, offline, two copies in two places.
+     The decrypted backup ends with a BACKUP CONFIRMATION CODE; when they
+     give it to you, pipe it (never argv) to
+       sudo ${VENV}/bin/spellbook backup-confirm --prefix ${PREFIX}
+     Until then the daemon is BACKUP PENDING: reads work, and every
+     fund-moving route refuses (S-16). spellbook status shows the state.
   3. Then seal the seed (required): spellbook-seed serve, one-time link to
      your human; they set the password on that page; you never see it.
 
@@ -1150,4 +1210,13 @@ From here you self-serve: spellbook upgrade --check / spellbook upgrade
 <tag> (signed releases, forward-only) and spellbook doctor --repair.
 ================================================================
 EOF
+fi
+# Forced backup (S-16): an interactive install is not finished until the
+# human has proven the paper backup. Everything is installed and the
+# daemon runs BACKUP PENDING (reads only); the exit status says so.
+if [ "$UPGRADE" != "1" ] && [ -t 0 ] && [ -t 1 ] && [ "${BACKUP_CONFIRMED:-0}" != "1" ]; then
+  warn "INSTALL INCOMPLETE: the paper backup is not confirmed. The daemon is"
+  warn "running BACKUP PENDING: read-only routes work, fund-moving routes refuse."
+  warn "Finish it, as the human, from a terminal:  sudo ${VENV}/bin/spellbook export --prefix ${PREFIX}"
+  exit 3
 fi

@@ -1,30 +1,38 @@
 #!/usr/bin/env python3
 """
-Rotate the ceremony keypair used by seed-to-addresses.html envelopes.
+Stamp the DAEMON's ceremony public key into the delivered seed-to-addresses
+page. This script never makes or touches a private key (review S-16).
 
-- Generates a fresh RSA-2048 keypair.
-- Stores the private key at ~/workspace/.spellbook/seed-derive/private.pem
-  (mode 600, outside the repo — never commit it).
-- Stamps the public key into the DELIVERED HTML copies so the page can
-  seal envelopes only this agent can open.
+The key that decrypts the human's envelope belongs to the spellbook daemon
+user. It is created inside the daemon's own config dir by:
+
+    sudo spellbook ceremony-key --prefix /opt/spellbook
+
+(install.sh runs this as the daemon user at install). That command, and
+`spellbook status` (custody.ceremony_public_key), print only the PUBLIC key
+and its fingerprint. Hand the public key to this script and it stamps it
+into the delivered copy the human opens. The human checks the fingerprint
+against the one the daemon printed.
+
+Usage:
+    python3 new_seed_ceremony_key.py --public-key-file PUB.b64 [HTML ...]
+    python3 new_seed_ceremony_key.py --stdin [HTML ...]   # key on stdin
 
 The repo copy (ceremony/seed-to-addresses.html) keeps the
 __SEED_PUB_B64__ placeholder and is never stamped.
 
-Run this at the start of each reseed ceremony, then hand the delivered
-page to the human.
+Earlier versions generated an RSA key here and kept private.pem in the
+agent's workspace. Any such key must be moved to the daemon with
+`sudo spellbook ceremony-adopt --prefix /opt/spellbook`, which overwrites
+and unlinks the agent's copy.
 """
+import argparse
+import base64
+import hashlib
 import os
 import re
-import base64
-import stat
+import sys
 
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives import serialization
-
-KEY_DIR = os.path.expanduser("~/workspace/.spellbook/seed-derive")
-PRIVATE_PEM = os.path.join(KEY_DIR, "private.pem")
-# Delivered copies the human actually opens (same file may appear twice).
 DELIVERED = [
     os.path.expanduser("~/workspace/your_files/ceremony/seed-to-addresses.html"),
 ]
@@ -32,49 +40,50 @@ DELIVERED = [
 STAMP_RE = re.compile(r'const SEED_PUB_B64 = "[^"]*";')
 
 
-def main():
-    os.makedirs(KEY_DIR, mode=0o700, exist_ok=True)
-    os.chmod(KEY_DIR, 0o700)
+def public_b64(text: str) -> tuple[str, str]:
+    """(base64 SPKI, fingerprint) of an RSA-2048+ PUBLIC key; refuses a
+    private key."""
+    pub = "".join(text.split())
+    if pub.startswith("public_key_b64:"):
+        pub = pub.split(":", 1)[1]
+    der = base64.b64decode(pub, validate=True)
+    from Crypto.PublicKey import RSA
+    key = RSA.import_key(der)
+    if key.has_private() or key.size_in_bits() < 2048:
+        raise ValueError("need the daemon's RSA-2048+ PUBLIC key")
+    return pub, hashlib.sha256(der).hexdigest()[:32]
 
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    priv = key.private_bytes(serialization.Encoding.PEM,
-                             serialization.PrivateFormat.PKCS8,
-                             serialization.NoEncryption())
-    # Created 0600 (review S-05): the key never exists with loose modes,
-    # even for the instant between write and chmod.
-    fd = os.open(PRIVATE_PEM, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as f:
-        f.write(priv)
-    os.chmod(PRIVATE_PEM, 0o600)
 
-    pub_der = key.public_key().public_bytes(
-        serialization.Encoding.DER,
-        serialization.PublicFormat.SubjectPublicKeyInfo)
-    pub_b64 = base64.b64encode(pub_der).decode()
-    with open(os.path.join(KEY_DIR, "public_b64.txt"), "w") as f:
-        f.write(pub_b64)
-    os.chmod(os.path.join(KEY_DIR, "public_b64.txt"), 0o600)
-
-    import hashlib
-    fp = hashlib.sha256(pub_der).hexdigest()[:32]
-    print(f"new key fingerprint: {fp}...")
-
-    for path in DELIVERED:
+def main(argv=None):
+    ap = argparse.ArgumentParser()
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--public-key-file")
+    src.add_argument("--stdin", action="store_true")
+    ap.add_argument("html", nargs="*")
+    a = ap.parse_args(argv)
+    if a.public_key_file:
+        with open(a.public_key_file) as f:
+            text = f.read()
+    else:
+        text = sys.stdin.read()
+    try:
+        pub, fp = public_b64(text)
+    except Exception as e:
+        raise SystemExit(f"refused: {type(e).__name__}: {e}")
+    print(f"daemon ceremony key fingerprint: {fp}")
+    for path in (a.html or DELIVERED):
         if not os.path.exists(path):
             print(f"SKIP (missing): {path}")
             continue
         with open(path) as f:
             html = f.read()
-        new_html, n = STAMP_RE.subn(
-            f'const SEED_PUB_B64 = "{pub_b64}";', html)
+        new_html, n = STAMP_RE.subn(f'const SEED_PUB_B64 = "{pub}";', html)
         if n == 0:
             print(f"SKIP (no stamp point): {path}")
             continue
         with open(path, "w") as f:
             f.write(new_html)
         print(f"stamped: {path}")
-
-    print("Done. Private key stays at", PRIVATE_PEM)
 
 
 if __name__ == "__main__":

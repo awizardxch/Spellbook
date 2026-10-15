@@ -80,24 +80,53 @@ RSA-OAEP-SHA256 to the ceremony public key). The envelope is the only thing
 that leaves the browser — the seed and words never do.
 
 The page ships with `__SEED_PUB_B64__` as a placeholder and **refuses to
-seal until stamped**. Before handing it to the human:
+seal until stamped**. The key it seals to belongs to the **daemon**, never
+to the agent (review S-16):
 
-1. Run `python3 ceremony/new_seed_ceremony_key.py` — generates a fresh
-   RSA-2048 keypair. Keep `private.pem` secret (mode 600, outside the repo).
-2. Replace `__SEED_PUB_B64__` with the base64 DER SPKI public key.
-3. After the ceremony, `private.pem` decrypts envelopes; guard it like a key.
+1. The decrypting key is `<prefix>/ceremony/private.pem`, owned by the
+   spellbook daemon user, 0600 in a 0700 directory. `install.sh` creates it
+   as that user; on an existing install root runs
+   `sudo spellbook ceremony-key --prefix /opt/spellbook`. That command and
+   `spellbook status` (`custody.ceremony_public_key`) print only the PUBLIC
+   key and its fingerprint.
+2. The agent stamps that public key into the delivered copy:
+   `python3 ceremony/new_seed_ceremony_key.py --public-key-file PUB.b64`
+   (or `--stdin`). The script never makes or reads a private key.
+3. The human checks the fingerprint the page shows against the one the
+   daemon printed, then seals. The envelope may be stored anywhere,
+   including the agent's workspace: it is ciphertext to a key the agent
+   cannot read. Point `sealed_envelope_path` in spellbook.json at it.
+4. The daemon decrypts it at every start with its own key (no password,
+   no re-entry). A seed loaded this way is **backup-pending**: fund-moving
+   routes refuse until the human proves the words — `sudo spellbook
+   export` at their own terminal (all 24 words typed back, since only the
+   seed is on the machine), or `spellbook export --reveal-key` then
+   `spellbook backup-confirm` with the code inside the encrypted backup.
 
-### Agent tools (for other agents)
+**Migrating an old ceremony.** Earlier versions had the agent mint the key
+and keep `private.pem` in `~/workspace/.spellbook/seed-derive/`. Root runs
+`sudo spellbook ceremony-adopt --prefix /opt/spellbook [--from PATH]`
+(`install.sh --upgrade` does it too): the key is moved into the daemon's
+directory and the agent's copy is overwritten and unlinked. What that
+guarantees: the old path no longer holds the key, and the file was
+overwritten in place where it was writable. What it cannot guarantee:
+that no copy survives (journaling/copy-on-write filesystems, SSD
+remapping, snapshots, backups, or a copy the agent already made). A key
+that was ever in agent reach should be treated as exposed — re-seed when
+practical. On a host with no daemon-user split (the daemon runs as the
+agent's own user) nothing can be separated; the daemon leaves the key in
+place and warns on every start.
 
-These scripts let any agent work with sealed envelopes without ever seeing
-key material:
+### Tools
 
-- **`derive_from_envelope.py`** — paste an envelope, get the EVM/Solana/Chia
-  addresses. Verifies EVM + Solana against known anchors and fails closed
-  on mismatch. The seed is derived in-process and never printed.
+- **`derive_from_envelope.py`** — run as the daemon user or root
+  (`--prefix`): paste an envelope, get the EVM/Solana/Chia addresses,
+  verified against known anchors. The agent cannot run it (it cannot read
+  the key); it asks the daemon for `spellbook addresses` instead.
 - **`derive_addresses.py`** — derive all addresses from a seed hex directly.
-- **`new_seed_ceremony_key.py`** — mint a fresh ceremony RSA keypair.
+- **`new_seed_ceremony_key.py`** — stamp the daemon's PUBLIC key into the
+  delivered page.
 
-The daemon (`src/spellbook/daemon.py`) decrypts the same envelope format on
-startup via `sealed_envelope_path` + `ceremony_key_path` (see PR #105), so
-keys survive restarts without re-entry.
+The daemon (`src/spellbook/daemon.py`, `src/spellbook/custody.py`)
+decrypts the envelope on startup via `sealed_envelope_path` and its own
+ceremony key; `ceremony_key_path` now names only a legacy key to move.

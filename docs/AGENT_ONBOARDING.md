@@ -310,6 +310,28 @@ the whole backup to `$PREFIX/paper-backup.txt`; an upgrade warns while it
 exists — your human moves it off the machine and shreds it, you never
 read it.
 
+**Backup is forced (review S-16).** A fresh or restored install, and any
+seed loaded through the daemon's ceremony key, starts **BACKUP PENDING**:
+`spellbook status` shows `"backup": {"state": "pending"}`, read-only
+routes work, and every fund-moving route answers `backup pending: ...`
+naming the command your human runs. The terminal export confirms it
+itself once the typed-back words match the live seed. Through the
+reveal-key envelope, the decrypted backup ends with a one-time
+**BACKUP CONFIRMATION CODE**; when your human gives it to you, pipe it to
+`sudo spellbook backup-confirm --prefix <dir>` (stdin, never argv). The
+record is `<prefix>/backup.json`, written only by those commands; no
+daemon route and no token can set it. Installs made before this change
+show `"state": "legacy"` and keep working, with a warning at every daemon
+start until the human confirms.
+
+**Passwordless sealed seed.** The key that opens the
+`SPELLBOOK-SEED-ENC2` envelope is the daemon's own
+(`<prefix>/ceremony/private.pem`, daemon user, 0600); you never hold it.
+You get only its PUBLIC key (`spellbook status` →
+`custody.ceremony_public_key`) and stamp it into
+`ceremony/seed-to-addresses.html` with `ceremony/new_seed_ceremony_key.py`.
+See `ceremony/README.md`.
+
 - **SET 1 — STANDARD RECOVERY (primary: the daemon's live keys).**
   A second, independent 24-word BIP-39 mnemonic whose keys derive the
   way stock wallets do (Sage for Chia, MetaMask for EVM). The 24 words
