@@ -109,6 +109,17 @@ class AgentClient(_BaseClient):
         """Decision ledger rows (P6): read through the API, never the file."""
         return self._call("ledger_read")["rows"]
 
+    def sign_dashboard_challenge(self, challenge: str) -> dict:
+        """Daemon-signed dashboard login (docs/AGENT_ONBOARDING.md §8).
+
+        Returns {signature_hex, pubkey_hex, prefix}: POST signature_hex and
+        pubkey_hex with the challenge to /api/auth/verify. The identity
+        seed never leaves the daemon.
+        """
+        r = self._call("sign_dashboard_challenge", {"challenge": challenge})
+        return {"signature_hex": r["signature_hex"],
+                "pubkey_hex": r["pubkey_hex"], "prefix": r["prefix"]}
+
     def chia_read(self, *, chain: str, op: str, **kwargs) -> dict:
         """Read-only Chia query (the daemon allowlists `op`; anything else
         is rejected server-side). Ops: get_offers, get_offer, view_offer,

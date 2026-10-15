@@ -71,6 +71,10 @@ def cmd_ledger(a, client):
     _show(client.ledger())
 
 
+def cmd_sign_dashboard_challenge(a, client: AgentClient):
+    _show(client.sign_dashboard_challenge(a.challenge))
+
+
 def cmd_addresses(a, client):
     _show(client.addresses())
 
@@ -312,6 +316,13 @@ def main(argv=None):
     sub.add_parser("ledger")
     sub.add_parser("addresses")
 
+    sd = sub.add_parser(
+        "sign-dashboard-challenge",
+        help="have the daemon sign a dashboard login challenge "
+             "(docs/AGENT_ONBOARDING.md §8); the seed stays in the daemon")
+    sd.add_argument("--challenge", required=True,
+                    help="the exact string from GET /api/auth/challenge")
+
     rs = sub.add_parser("request-spend")
     rs.add_argument("--chain", required=True)
     rs.add_argument("--to", required=True)
@@ -508,6 +519,7 @@ def main(argv=None):
                                                muse_id=_muse_id(a))
             {"status": cmd_status, "queue": cmd_queue, "ledger": cmd_ledger,
              "addresses": cmd_addresses, "request-spend": cmd_request_spend,
+             "sign-dashboard-challenge": cmd_sign_dashboard_challenge,
              "offer-make": cmd_offer_make, "offer-take": cmd_offer_take,
              "offer-cancel": cmd_offer_cancel, "chia-read": cmd_chia_read,
              "nft-mint": cmd_nft_mint,

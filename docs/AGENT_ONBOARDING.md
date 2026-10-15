@@ -211,11 +211,19 @@ allowlist. Each agent session is bound to the agent's **own** watch
 addresses and sees only its own wallet. (Humans use a viewer token in the
 browser; that path is not for agents.)
 
-Auth model: the server issues a short-lived, single-use challenge; you
-sign the exact challenge string locally and POST the signature with your
-public key and addresses. The server verifies the signature against the
-**presented** public key — the signature proves possession of the key,
-not membership in any list.
+Auth model: the server issues a short-lived, single-use challenge; your
+**daemon** signs it (route `sign_dashboard_challenge`, under the fixed
+domain prefix `musebook-dashboard-v1:`) and you POST the signature with
+the public key the daemon returns and your addresses. The server verifies
+the signature against the **presented** public key — the signature proves
+possession of the key, not membership in any list.
+
+**You never hold the identity seed.** Do not put it in your environment,
+a `.env`, a config file or a tool argument — not even "just for the
+dashboard". Under the current key derivation that seed can be the wallet
+root (review S-04, S1 still open), and a seed in an agent's environment is
+a wallet in every transcript and log the agent writes. The daemon holds
+it; you hold a request token.
 
 ### Endpoints
 
@@ -225,9 +233,16 @@ Base: the operator's dashboard deployment, e.g.
 1. `GET /api/auth/challenge` → `{ challenge, expiresAt }`
    - `challenge` is a `<base64url>.<hmac>` string. Sign it **verbatim**.
    - Valid 5 minutes, single use (replay rejected).
-2. Sign `challenge` as UTF-8 bytes with your Ed25519 identity key.
-   The private key never leaves your machine — only the 64-byte
-   signature (128 hex chars) is sent.
+2. Ask your daemon to sign it: `spellbook sign-dashboard-challenge
+   --challenge "$CH"` (or `AgentClient.sign_dashboard_challenge(ch)`).
+   It returns `{signature_hex, pubkey_hex, prefix}`. The signed bytes
+   are `prefix + challenge` as UTF-8; the private key never leaves the
+   daemon — only the 64-byte signature (128 hex chars) and the public
+   key are sent. The route accepts only the dashboard's own challenge
+   grammar (`<base64url>.<hex>`, at most 512 chars) and is rate-capped
+   (`dashboard_sign_per_minute`, default 30), and it exists only when
+   the daemon's `musebook_signing_mode` is `daemon`; otherwise it
+   returns an error naming S1 and there is no agent-side fallback.
 3. `POST /api/auth/verify`
    `{ challenge, signature, pubkey, addresses }` →
    sets an httpOnly session cookie (12h) and returns
@@ -264,27 +279,34 @@ Base: the operator's dashboard deployment, e.g.
 
 Without a session, `/api/holdings` returns `401`.
 
-### Signing examples
+### Signing: the daemon does it
 
-Node (no dependencies):
-
-```js
-import { createPrivateKey, sign } from "node:crypto";
-// seed: your 32-byte Ed25519 seed (never transmitted anywhere)
-const seed = Buffer.from(process.env.MY_ED25519_SEED_HEX, "hex");
-const pkcs8 = Buffer.concat([
-  Buffer.from("302e020100300506032b657004220420", "hex"), seed,
-]);
-const key = createPrivateKey({ key: pkcs8, format: "der", type: "pkcs8" });
-const signatureHex = sign(null, Buffer.from(challenge, "utf8"), key).toString("hex");
-```
-
-Python (`cryptography` package):
+Python (the client library; request token from its file, never inline):
 
 ```python
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(seed_hex))
-signature_hex = key.sign(challenge.encode("utf-8")).hex()
+import json, os, urllib.request
+from spellbook.client import AgentClient
+
+BASE = "https://spellbook.awizard.dev"
+agent = AgentClient(
+    socket_path=os.environ.get("SPELLBOOK_SOCKET", "/run/spellbook/spellbook.sock"),
+    token_hex=open(os.environ["SPELLBOOK_REQUEST_TOKEN_FILE"]).read(),
+    muse_id="your-muse-id",
+)
+challenge = json.load(urllib.request.urlopen(BASE + "/api/auth/challenge"))["challenge"]
+signed = agent.sign_dashboard_challenge(challenge)   # {signature_hex, pubkey_hex, prefix}
+addresses = agent.addresses()                        # {label: {chain: address}}
+body = {
+    "challenge": challenge,
+    "signature": signed["signature_hex"],
+    "pubkey": signed["pubkey_hex"],
+    "addresses": {
+        "evm": [a["evm-4663"] for a in addresses.values()],
+        "chia": [a["chia-testnet"] for a in addresses.values() if "chia-testnet" in a],
+        "solana": [a["solana-devnet"] for a in addresses.values()],
+    },
+}
+# POST body to BASE + "/api/auth/verify" and keep the session cookie.
 ```
 
 ### curl cookbook
@@ -292,7 +314,9 @@ signature_hex = key.sign(challenge.encode("utf-8")).hex()
 ```bash
 BASE=https://spellbook.awizard.dev
 CH=$(curl -s $BASE/api/auth/challenge | python3 -c "import json,sys; print(json.load(sys.stdin)['challenge'])")
-# sign $CH locally -> $SIG (128 hex), then:
+SIGNED=$(spellbook --token-file "$SPELLBOOK_REQUEST_TOKEN_FILE" sign-dashboard-challenge --challenge "$CH")
+SIG=$(printf '%s' "$SIGNED" | python3 -c "import json,sys; print(json.load(sys.stdin)['signature_hex'])")
+PUBKEY=$(printf '%s' "$SIGNED" | python3 -c "import json,sys; print(json.load(sys.stdin)['pubkey_hex'])")
 curl -s -c jar.txt -b jar.txt -X POST $BASE/api/auth/verify \
   -H 'Content-Type: application/json' \
   -d "{\"challenge\":\"$CH\",\"signature\":\"$SIG\",\"pubkey\":\"$PUBKEY\",\"addresses\":{\"evm\":[\"$EVM\"],\"solana\":[\"$SOL\"],\"chia\":[\"$CHIA\"]}}"
@@ -309,3 +333,8 @@ Notes:
   fetch a fresh challenge and sign again; never reuse a signature.
 - The dashboard is strictly read-only: it cannot approve, sign,
   broadcast, or mint anything, for either role.
+There is deliberately no "sign it yourself" example. A signature over the
+bare challenge is rejected by the dashboard (it verifies
+`musebook-dashboard-v1:` + challenge), and the only process that should be
+able to produce the prefixed one is your daemon.
+

@@ -40,11 +40,32 @@ from spellbook.config import load_config, load_policy
 from spellbook.ledger import Ledger
 from spellbook.policy import evaluate
 from spellbook.seed import load_seed
+from spellbook import seedrole
 from spellbook import tokens as token_auth
+
+
+class DashboardSignWindow:
+    """Sliding one-minute cap for sign_dashboard_challenge (pure, testable)."""
+
+    def __init__(self, per_minute: int, clock=time.monotonic):
+        if not isinstance(per_minute, int) or per_minute < 1:
+            raise ValueError("per_minute must be a positive integer")
+        self.per_minute = per_minute
+        self._clock = clock
+        self._stamps: list[float] = []
+
+    def allow(self) -> bool:
+        now = self._clock()
+        self._stamps = [t for t in self._stamps if now - t < 60.0]
+        if len(self._stamps) >= self.per_minute:
+            return False
+        self._stamps.append(now)
+        return True
 
 REQUEST_ROUTES = {
     "request_spend", "queue_read", "status", "addresses",
-    "ledger_read", "sign_musebook_request", "chia_read",
+    "ledger_read", "sign_musebook_request", "sign_dashboard_challenge",
+    "chia_read",
     "offer_make", "offer_take", "offer_cancel",
     "offer_import", "offer_delete", "offer_combine",
     "nft_mint", "nft_update", "nft_collection_update", "nft_redownload",
@@ -387,6 +408,20 @@ class Daemon:
         # process. Real seeds enter only after the §10 phase-1 authorization.
         seed_path = self.cfg.get("seed_path")
         self.seed = load_seed(seed_path) if seed_path else None
+        # S-04 / S1: under key_derivation=kdf this seed is the wallet root
+        # for every chain. If it is also a Musebook identity seed, whoever
+        # holds the identity holds the wallet offline and this daemon is
+        # decoration. Refuse to start unless the operator opted in
+        # explicitly (allow_identity_seed_as_wallet_root, documented unsafe).
+        # Only the file's `#` header lines are handed over — never the hex.
+        seed_file_text = None
+        if seed_path:
+            with open(seed_path) as f:
+                seed_file_text = "\n".join(
+                    line for line in f.read().splitlines()
+                    if line.strip().startswith("#"))
+        self.identity_seed_markers = seedrole.check_wallet_root(
+            self.cfg, seed_file_text)
         # Standard-recovery wallet (SPEC §2b): the 64-byte BIP-39 seed whose
         # keys derive the way stock wallets do (Sage / MetaMask). Required
         # exactly when key_derivation == "standard" — the daemon refuses to
@@ -408,6 +443,9 @@ class Daemon:
             self._identity_key = SigningKey(self.seed)
         else:
             self._identity_key = None
+        # sign_dashboard_challenge rate cap: a sliding one-minute window.
+        self._dashboard_sign_window = DashboardSignWindow(
+            self.cfg.get("dashboard_sign_per_minute", 30))
         # EVM chain wiring (SPEC §10): {"chains": {chain: {"rpc_url": str,
         # "enabled": bool}}, "mainnet_submit_enabled": bool}. No chains
         # configured -> approved spends do not submit (honest note, no-op).
@@ -4127,6 +4165,38 @@ class Daemon:
         signed = self._identity_key.sign(canonical)
         self.ledger.append(muse_id, canonical, None, "musebook-sign")
         return {"ok": True, "signature_hex": signed.signature.hex()}
+
+    def rt_sign_dashboard_challenge(self, p: dict, muse_id: str) -> dict:
+        """Sign the holdings dashboard's login challenge (S-04).
+
+        The agent never needs the raw identity seed: it fetches the
+        challenge, has the daemon sign it under DASHBOARD_CHALLENGE_PREFIX
+        and POSTs {challenge, signature, pubkey} to /api/auth/verify. The
+        daemon builds the signed bytes itself from the one typed field and
+        refuses anything that is not shaped like a dashboard challenge, so
+        the route can sign neither arbitrary bytes nor another domain's
+        canonical string (P1). Same S1 gate as sign_musebook_request,
+        rate-capped per minute, every signature ledgered.
+        """
+        if self._identity_key is None:
+            return {"ok": False,
+                    "error": "identity signing is disabled pending the S1 decision"}
+        if "challenge" not in p:
+            return {"ok": False, "error": "missing field challenge"}
+        try:
+            canonical = spellsign.build_dashboard_challenge_canonical(p["challenge"])
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        if not self._dashboard_sign_window.allow():
+            self.ledger.append(muse_id, canonical, None,
+                               "denied:dashboard-sign-rate")
+            return {"ok": False, "error": "dashboard signing rate cap reached; retry later"}
+        signed = self._identity_key.sign(canonical)
+        self.ledger.append(muse_id, canonical, None, "dashboard-challenge-sign")
+        return {"ok": True,
+                "signature_hex": signed.signature.hex(),
+                "pubkey_hex": bytes(self._identity_key.verify_key).hex(),
+                "prefix": spellsign.DASHBOARD_CHALLENGE_PREFIX}
 
     def rt_publish_directory_entry(self, p: dict, muse_id: str) -> dict:
         # Approve token only (checked in handle()). Distinct prefix (P1).

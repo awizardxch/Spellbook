@@ -136,6 +136,21 @@ one paper. Either way D3 holds: the daemon is the only process that holds
 wallet secrets. **This changes how aWizard signs Musebook posts today —
 pending Speechless's explicit call.**
 
+**Status 2026-10-15 (review S-04): S1 is still open — no final call has been
+taken and the key derivation is unchanged.** What is in code until it is:
+(1) the daemon refuses to start under `key_derivation=kdf` when `seed_path`
+looks like a Musebook identity seed (config `seed_role=identity`,
+`musebook_signing_mode=daemon`, the seed file's `# spellbook-seed-role:
+identity` header, or a path naming the Musebook client / a `.env`), unless
+`allow_identity_seed_as_wallet_root=true` is set knowingly (unsafe,
+default false; `src/spellbook/seedrole.py`); (2) dashboard sign-in is a
+daemon route, `sign_dashboard_challenge`, under its own prefix
+`musebook-dashboard-v1:`, so no agent holds the raw seed for it; (3) the
+onboarding guide no longer shows a seed in the agent's environment. Under
+`key_derivation=standard` (what the installer writes) the identity seed is
+not the wallet root, which is the Option B shape in practice; muses on the
+kdf path with their identity seed as `seed_path` need the S1 decision.
+
 What is per-muse and never shared: muse key, derived secrets, Sage instance and
 `keys.bin`, mTLS certs, daemon process and its queue. What may be shared (holds
 no keys): daemon source code, setup guide, town directory (addresses only).
@@ -473,6 +488,14 @@ mTLS cert, or submit transactions.
   never signs caller-supplied raw bytes: a raw-bytes oracle on the request
   token would let the agent mint signed directory entries and rotation
   supersessions with the identity key (P1).
+- `POST /v1/sign_dashboard_challenge {challenge}` → `{signature, pubkey,
+  prefix}` — the holdings dashboard's login challenge, signed under the
+  fixed prefix `musebook-dashboard-v1:` (distinct from the two above; no
+  transaction signing uses the identity key). Only the dashboard's own
+  challenge grammar is accepted, so the route signs no arbitrary bytes
+  (P1); rate-capped per minute; same S1 gate as `sign_musebook_request`.
+  Added so the dashboard never needs the raw seed in an agent's
+  environment (review S-04).
 - `POST /v1/publish_directory_entry {entry}` → `{ok}` — **approve token
   only.** Signs directory entries (§8) and rotation supersessions (§7) with
   the identity key. The entry prefix is distinct from the Musebook-request

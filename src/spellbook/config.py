@@ -55,6 +55,24 @@ spellbook.json (all fields optional unless noted):
   allowed_request_uids  : [uid, ...] allowed to use the request token (optional —
                           when set, the kernel peer UID is ENFORCED, not observed)
   allowed_approve_uids  : [uid, ...] allowed to use the approve token (optional)
+  seed_role             : "identity" | "wallet" (optional). What the seed at
+                          seed_path is. "identity" = a Musebook identity
+                          seed; "wallet" = a daemon-generated wallet root.
+                          Unset = detected from the other markers
+                          (seedrole.py): musebook_signing_mode=daemon, the
+                          seed file's role header, or a seed_path that names
+                          the Musebook client / a .env file.
+  allow_identity_seed_as_wallet_root
+                        : bool (default false). UNSAFE. Under
+                          key_derivation=kdf the seed is the wallet root for
+                          every chain; when it is also the Musebook identity
+                          seed the daemon refuses to start (S1 is open —
+                          review S-04). true accepts that knowingly: whoever
+                          holds the identity seed holds every wallet key
+                          offline. Never set it on a muse that signs from
+                          more than one machine.
+  dashboard_sign_per_minute
+                        : int (default 30). Rate cap on sign_dashboard_challenge.
 
 policy.json: the D9 default-off policy knobs, keyed "chain:asset".
 """
@@ -62,6 +80,7 @@ import json
 import os
 
 from spellbook.policy import Policy
+from spellbook.seedrole import ALLOW_KEY, SEED_ROLES
 
 
 def _must_600(path: str):
@@ -84,6 +103,17 @@ def load_config(config_dir: str) -> dict:
     for key in ("allowed_request_uids", "allowed_approve_uids"):
         if key in cfg and not all(isinstance(u, int) for u in cfg[key]):
             raise ValueError(f"{key} must be a list of integer UIDs")
+    # S-04: the seed's role and the unsafe opt-in are validated here so a
+    # typo ("True", 1, "yes") can never read as consent.
+    if cfg.get("seed_role") is not None and cfg["seed_role"] not in SEED_ROLES:
+        raise ValueError("seed_role must be 'identity' or 'wallet'")
+    cfg.setdefault(ALLOW_KEY, False)
+    if cfg[ALLOW_KEY] is not True and cfg[ALLOW_KEY] is not False:
+        raise ValueError(f"{ALLOW_KEY} must be true or false")
+    cfg.setdefault("dashboard_sign_per_minute", 30)
+    if (not isinstance(cfg["dashboard_sign_per_minute"], int)
+            or cfg["dashboard_sign_per_minute"] < 1):
+        raise ValueError("dashboard_sign_per_minute must be a positive integer")
     return cfg
 
 
