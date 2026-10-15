@@ -240,6 +240,7 @@ def _validate_offer_legs(items, side: str) -> list:
     if not isinstance(items, list) or not items:
         raise chia.SageError(f"offer {side} must be a non-empty list")
     out = []
+    seen = set()
     for it in items:
         if not isinstance(it, dict):
             raise chia.SageError(f"offer {side} leg must be an object")
@@ -249,16 +250,24 @@ def _validate_offer_legs(items, side: str) -> list:
             kind, ref = chia_asset_kind(asset)
         except chia.SageError as e:
             raise chia.SageError(f"offer {side}: {e}") from e
-        if not isinstance(amount, int) or amount <= 0:
+        if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
             raise chia.SageError(
                 f"offer {side}: amount_mojos must be a positive integer")
         if kind == "nft":
             if amount != 1:
                 raise chia.SageError(
                     f"offer {side}: NFT legs must have amount_mojos 1")
-            out.append((f"nft:{ref}", amount))
+            leg = (f"nft:{ref}", amount)
         else:
-            out.append((asset if kind == "native" else ref, amount))
+            leg = (asset if kind == "native" else ref, amount)
+        # Sage sums duplicate legs; policy would judge each alone. Refuse
+        # the split at request time, on the native and the Sage path.
+        if leg[0] in seen:
+            raise chia.SageError(
+                f"offer {side}: asset {leg[0][:20]}… listed twice — "
+                "merge the legs")
+        seen.add(leg[0])
+        out.append(leg)
     return out
 
 
@@ -310,20 +319,36 @@ def _resolve_nft_launcher(rpc, ref: str) -> str | None:
 def _summary_legs(summary: dict, side: str) -> list:
     """Convert a Sage OfferSummary's maker/taker legs to [(asset, amount)].
 
-    Sage's summary uses {"asset": {"asset_id": <hex>|null,
-    "kind": "token"|"nft"|...}, "amount": ...}; asset_id null means XCH.
-    NFT legs come back as "nft:<launcher-id>". DID/option legs raise —
-    offers only carry fungible and NFT legs.
+    Sage's summary (sage/src/utils/offer_summary.rs) uses
+    {"asset": {"asset_id": <hex>|null, "kind": "token"|"nft"|"did"|
+    "option"}, "amount", "royalty", "nft_royalty", "option_assets"};
+    asset_id null means XCH. NFT legs come back as "nft:<launcher-id>".
+
+    Policy must see everything the wallet spends, so:
+      - on the "taker" side (what WE pay when taking) the `royalty` Sage
+        reports for the asset — the NFT royalty the taker also pays, up to
+        655.35 % — is added to the leg's amount in the same asset;
+      - a leg with `option_assets`, or any kind other than token/nft
+        (DID and option singletons), raises: policy cannot price them;
+      - the same asset twice raises: Sage sums duplicates, policy never
+        sees a leg twice.
     """
     legs = summary.get(side)
     if not isinstance(legs, list):
         raise chia.SageError(f"offer summary has no {side!r} legs: "
                              f"{str(summary)[:200]}")
     out = []
+    seen = set()
     for leg in legs:
-        a = (leg or {}).get("asset") or {}
+        if not isinstance(leg, dict):
+            raise chia.SageError("offer leg must be an object")
+        a = leg.get("asset") or {}
         kind = (a.get("kind") or "token")
         asset_id = a.get("asset_id")
+        if leg.get("option_assets") is not None:
+            raise chia.SageError(
+                "offer leg carries option_assets — option legs are not "
+                "supported in offers")
         if kind == "nft":
             if not asset_id or not _HEX64.fullmatch(str(asset_id)):
                 raise chia.SageError(
@@ -338,10 +363,20 @@ def _summary_legs(summary: dict, side: str) -> list:
                 f"offer leg kind {kind!r} not supported")
         try:
             amount = chia.amount_to_int(leg.get("amount"))
+            royalty = chia.amount_to_int(leg.get("royalty", 0) or 0)
         except chia.SageError as e:
             raise chia.SageError(f"bad offer leg amount: {e}") from e
+        if amount < 0 or royalty < 0:
+            raise chia.SageError("offer leg amount must not be negative")
+        if side == "taker":
+            # What we pay: the leg plus the royalty Sage adds for it.
+            amount += royalty
         if amount <= 0:
             raise chia.SageError("offer leg amount must be positive")
+        if asset in seen:
+            raise chia.SageError(
+                f"offer {side} names {asset[:20]}… twice — refusing")
+        seen.add(asset)
         out.append((asset, amount))
     return out
 
@@ -2147,7 +2182,7 @@ class Daemon:
                   "_receive_ph": receive_ph.hex()}
         if p.get("expires_at_second") is not None:
             params["expires_at_second"] = p["expires_at_second"]
-        entries = [(chain, a, m) for a, m in offered]
+        entries = self._velocity_entries(params)
         return self._run_fund_intent(params, muse_id, entries, "offer_make")
 
     def _rt_offer_take_native(self, p: dict, chain: str, muse_id: str) -> dict:
@@ -2188,7 +2223,7 @@ class Daemon:
                   "purpose": p.get("purpose", ""),
                   "_give": [{"asset": a, "amount_mojos": m} for a, m in give],
                   "_get": [{"asset": a, "amount_mojos": m} for a, m in get]}
-        entries = [(chain, a, m) for a, m in give]
+        entries = self._velocity_entries(params)
         return self._run_fund_intent(params, muse_id, entries, "offer_take")
 
     def _rt_offer_cancel_native(self, p: dict, chain: str, ids: list,
@@ -2920,8 +2955,18 @@ class Daemon:
         if self._signing_seed() is None:
             raise chia.SageError("no seed configured — cannot sign")
         fee = params.get("fee_mojos", 0)
-        if not isinstance(fee, int) or fee < 0:
+        if isinstance(fee, bool) or not isinstance(fee, int) or fee < 0:
             raise chia.SageError("fee_mojos must be a non-negative integer")
+        mx = self._max_fee_mojos()
+        if fee > mx:
+            raise chia.SageError(
+                f"fee_mojos {fee} exceeds chia.max_offer_fee_mojos {mx} "
+                "— refusing")
+
+    def _max_fee_mojos(self) -> int:
+        from spellbook.config import DEFAULT_MAX_OFFER_FEE_MOJOS
+        return int(self.chia_cfg.get("max_offer_fee_mojos",
+                                     DEFAULT_MAX_OFFER_FEE_MOJOS))
 
     def _check_offer_balances(self, rpc, legs: list, fee_mojos: int) -> None:
         """Fail closed when the wallet cannot fund the offer's give side.
@@ -2991,12 +3036,16 @@ class Daemon:
         """
         intent = params.get("intent")
         chain = params["chain"]
-        if intent == "offer_make":
-            return [(chain, it["asset"], it["amount_mojos"])
-                    for it in params["offered"]]
-        if intent == "offer_take":
-            return [(chain, it["asset"], it["amount_mojos"])
-                    for it in params["_give"]]
+        if intent in ("offer_make", "offer_take"):
+            # Merge per asset (Sage sums duplicate legs) and count the
+            # offer fee against native: policy sees exactly what the
+            # wallet spends, never a split leg or an uncounted fee.
+            side = "offered" if intent == "offer_make" else "_give"
+            legs = [(it["asset"], it["amount_mojos"]) for it in params[side]]
+            fee = params.get("fee_mojos", 0)
+            if fee:
+                legs.append(("native", fee))
+            return [(chain, a, m) for a, m in _merge_legs(legs)]
         if intent in ("offer_cancel", "message_sign"):
             return []
         fee = params.get("fee_mojos", 0)
@@ -3179,7 +3228,7 @@ class Daemon:
             params["expires_at_second"] = expires
         if recv:
             params["receive_address"] = recv
-        entries = [(chain, a, m) for a, m in offered]
+        entries = self._velocity_entries(params)
         return self._run_fund_intent(params, muse_id, entries, "offer_make")
 
     def rt_offer_take(self, p: dict, muse_id: str) -> dict:
@@ -3226,7 +3275,7 @@ class Daemon:
                   "purpose": p.get("purpose", ""),
                   "_give": [{"asset": a, "amount_mojos": m} for a, m in give],
                   "_get": [{"asset": a, "amount_mojos": m} for a, m in get]}
-        entries = [(chain, a, m) for a, m in give]
+        entries = self._velocity_entries(params)
         return self._run_fund_intent(params, muse_id, entries, "offer_take")
 
     def rt_offer_cancel(self, p: dict, muse_id: str) -> dict:

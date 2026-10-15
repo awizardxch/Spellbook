@@ -515,6 +515,22 @@ below; the daemon enforces whatever is configured, nothing more.
 - `destination_allowlist` (optional) — when set, non-allowlisted destinations
   above the auto-approve level are denied rather than queued
 - All amounts in base units (mojos / wei).
+- **What policy counts (Chia intents).** Policy judges one entry per
+  (chain, asset), summed over everything the wallet gives up in the
+  intent: offer legs are merged per asset (the same asset twice in one
+  offer is refused at request time, on the native and the Sage path),
+  the offer `fee_mojos` is added to the native entry and bounded by
+  `chia.max_offer_fee_mojos` (default 50,000,000), and on a take the
+  NFT royalty Sage reports is added to the give leg in its asset; a taker
+  leg carrying `option_assets` or an unknown asset kind is refused.
+  `option_exercise` counts the option's strike (read from Sage at
+  request time, re-read and compared at execution) as a give leg in the
+  strike asset, because exercising pays the strike to whoever minted the
+  option. A non-fungible move (`option_exercise`, `option_transfer`,
+  `did_transfer`, `nft_assign_did`) is never a zero-value fee entry: each
+  singleton is its own entry, and these four intents **always queue** for
+  a human, like `offer_cancel` and `message_sign` — caps can still deny
+  them, `auto_approve_below` never lifts them.
 - **Decision ledger (S10, Turbo, ARION; P6):** every intent and decision is
   appended to a daemon-user-owned log — never secrets. Row shape, canonical:
   `{ts, requester_muse, canon_digest(request_bytes_stored), sighash?,

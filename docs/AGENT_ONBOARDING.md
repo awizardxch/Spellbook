@@ -23,6 +23,19 @@ Run `install.sh` on the machine that will run the daemon. It provisions:
   **approval token** (the human's). Both print once; the request token
   lives in your environment, never in chat, logs, or code.
 - the paper backup (§6), shown **once**, on the terminal, never logged.
+- the Sage wallet, **provisioned once** by `spellbook sage-provision`
+  (run by the installer as the daemon user): it pins Sage's RPC server
+  certificate into the config and imports the daemon's key. At runtime
+  the daemon only logs in by fingerprint and refuses any listener on the
+  Sage port whose certificate is not the pinned one — it never sends the
+  key again.
+
+Intents that always wait for the human, whatever `auto_approve_below`
+says: `offer_cancel`, `message_sign`, `option_exercise` (its strike is
+counted as a spend in the strike asset), `option_transfer`,
+`did_transfer`, `nft_assign_did`. Offer fees are counted against native
+policy and capped by `chia.max_offer_fee_mojos`; an offer may name each
+asset once; taking an NFT offer counts the royalty you also pay.
 
 Client:
 
