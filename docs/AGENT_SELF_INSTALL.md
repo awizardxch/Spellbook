@@ -42,18 +42,23 @@ off-chain drill. It prints no interactive prompts.
 **4. Follow the HANDOFF protocol.** The installer prints an `AGENT HANDOFF`
 block at the end. It is a protocol, not a suggestion:
 
-- **Yours:** the request token → your environment file. Never in chat,
-  logs, or code.
+- **Yours:** the request token is already a file you own
+  (`/etc/spellbook/request.token`, 0600). Put its PATH in your environment
+  (`SPELLBOOK_REQUEST_TOKEN_FILE`); never its content in chat, logs or
+  code.
 - **Your human's, delivered out-of-band NOW:** the approve token file
   (`/opt/spellbook/approve.token`) — your human copies it to their separate
   device with *their own* machine access. **Never read it into your
   environment.** The daemon verifies approvals against it; you must not be
   able to approve your own spends.
-- **Your human's:** the paper backup (two 24-word sets). The installer
-  displays it once and saves it to `/opt/spellbook/paper-backup.txt` —
-  point your human at the file; they store it somewhere safe (ideally off
-  the machine) and delete it there. Confirm receipt, then drop the words
-  from your context.
+- **Your human's:** the paper backup (two 24-word sets). You never see
+  the words. Your human runs `sudo spellbook export` on their own
+  terminal, or, when they can only reach you, opens
+  `/opt/spellbook/share/ceremony/seal-password-encryptor.html`, makes a
+  reveal key (Step 1) and pastes you its PUBLIC half; you run
+  `sudo spellbook export --reveal-key <public key>` and paste back the
+  envelope it prints; they decrypt it on the page (Step 2) and write both
+  sets on paper. Confirm receipt.
 - **Then seal the seed (required).** Run `spellbook-seed serve`, get the
   one-time link to your human's browser (TLS tunnel / port-forward — see
   §6b), and wait. They set the seal password on that page; you never see

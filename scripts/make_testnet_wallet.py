@@ -53,11 +53,14 @@ def main() -> None:
     with os.fdopen(fd, "w") as f:
         f.write(entropy.hex())
     st = os.stat(SEED_PATH)
-    if st.st_mode & 0o077:
+    if os.name == "posix" and st.st_mode & 0o077:
         fail("seed file permissions are not 0600")
 
-    # Paper backup — the human's recovery path. Written, never printed.
-    with open(BACKUP_PATH, "w") as f:
+    # Paper backup — the human's recovery path. Written 0600 and exclusive
+    # (it never exists with loose modes, review S-05), never printed.
+    os.makedirs(os.path.dirname(BACKUP_PATH), mode=0o700, exist_ok=True)
+    fd = os.open(BACKUP_PATH, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
         f.write("# Spellbook testnet wallet — paper backup\n\n")
         f.write("Created: 2026-09-21. Network: Chia testnet11 (THWACK: testnet\n")
         f.write("coins are worthless; this wallet is for drills and validation).\n\n")

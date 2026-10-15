@@ -42,8 +42,10 @@ binary only if its pinned commit changed.
 queue/velocity state, Sage data, submission gates. `mainnet_submit_enabled`
 is never flipped by an upgrade.
 
-**Never printed again:** upgrades print no key material, ever. The paper
-backup block prints once, on fresh install only.
+**Never printed:** no install or upgrade prints key material. The paper
+backup leaves the machine only through `spellbook export` (on the human's
+terminal, or encrypted to the seal ceremony's reveal key). An upgrade
+warns while a legacy `paper-backup.txt` exists.
 
 ## What doctor checks, and the fail-closed rule
 
