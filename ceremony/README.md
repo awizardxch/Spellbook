@@ -88,7 +88,13 @@ to the agent (review S-16):
    as that user; on an existing install root runs
    `sudo spellbook ceremony-key --prefix /opt/spellbook`. That command and
    `spellbook status` (`custody.ceremony_public_key`) print only the PUBLIC
-   key and its fingerprint.
+   key and its fingerprint (full sha256 of the SPKI DER). The installer
+   publishes the public half root-owned and world-readable at
+   `/usr/local/share/spellbook/ceremony.pub.pem` and points
+   `ceremony_pub_path` at it (the prefix itself is 0700); spellbook.json
+   `ceremony_key_path` names the daemon's own private key, for
+   `spellbook-ceremony apply|restore` run as the daemon user. The human sees
+   the fingerprint out of band on the terminal `spellbook export` screen.
 2. The agent stamps that public key into the delivered copy:
    `python3 ceremony/new_seed_ceremony_key.py --public-key-file PUB.b64`
    (or `--stdin`). The script never makes or reads a private key.

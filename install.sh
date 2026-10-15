@@ -752,6 +752,11 @@ cfg = {
         "mainnet_submit_enabled": False,
     },
     "socket_group": "spellbook-clients",
+    # Review S-16/S-17: the passwordless-ceremony key is the daemon's own
+    # (<prefix>/ceremony/private.pem); its PUBLIC half is published
+    # root-owned and world-readable for the agent's ceremony tools.
+    "ceremony_key_path": f"{prefix}/ceremony/private.pem",
+    "ceremony_pub_path": "/usr/local/share/spellbook/ceremony.pub.pem",
     "musebook_signing_mode": "disabled",   # S1: inert until Speechless decides
     "allowed_request_uids": [agent_uid],
     "allowed_approve_uids": [human_uid],
@@ -828,6 +833,20 @@ CEREMONY_FPR="$(runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/spellbook" ceremo
   || fail "ceremony key creation failed (as ${SPELLBOOK_USER})"
 [ -n "$CEREMONY_FPR" ] || fail "ceremony key creation printed no fingerprint (as ${SPELLBOOK_USER})"
 log "daemon ceremony key ready (fingerprint ${CEREMONY_FPR}; public key: spellbook status)"
+# Publish the PUBLIC half where the agent can read it (the prefix is 0700):
+# root-owned, so the agent cannot swap it. spellbook.json ceremony_pub_path
+# points here on fresh installs; upgrades print the env var instead.
+CEREMONY_PUB_PUBLISHED="/usr/local/share/spellbook/ceremony.pub.pem"
+mkdir -p "$(dirname "$CEREMONY_PUB_PUBLISHED")"
+chown root:root "$(dirname "$CEREMONY_PUB_PUBLISHED")"; chmod 0755 "$(dirname "$CEREMONY_PUB_PUBLISHED")"
+runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/spellbook" ceremony-key --prefix "${PREFIX}" --pem \
+  > "${CEREMONY_PUB_PUBLISHED}.tmp" || fail "could not export the ceremony public key"
+chown root:root "${CEREMONY_PUB_PUBLISHED}.tmp"; chmod 0644 "${CEREMONY_PUB_PUBLISHED}.tmp"
+mv -f "${CEREMONY_PUB_PUBLISHED}.tmp" "$CEREMONY_PUB_PUBLISHED"
+log "ceremony public key published at ${CEREMONY_PUB_PUBLISHED}"
+if [ "$UPGRADE" = "1" ]; then
+  log "  (agent wiring: export SPELLBOOK_CEREMONY_PUB=${CEREMONY_PUB_PUBLISHED} if spellbook.json has no ceremony_pub_path)"
+fi
 if [ "$UPGRADE" != "1" ]; then
   # A fresh or restored install is BACKUP-PENDING: the daemon refuses
   # fund-moving routes until the human proves the paper backup (§6).

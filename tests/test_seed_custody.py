@@ -428,3 +428,70 @@ def test_envelope_path_uses_only_pinned_crypto():
             if name.endswith(".py"):
                 text = open(os.path.join(d, name), encoding="utf-8").read()
                 assert not re.search(r"^\s*(from|import) cryptography\b", text, re.M), name
+
+
+# ---------------------------------------------------------------- S-17 alignment
+
+def test_public_half_is_published_as_pem_with_the_full_fingerprint(tmp_path, home):
+    import hashlib
+    from Crypto.PublicKey import RSA
+    p, *_ = _prefix(tmp_path)
+    info = custody.generate_ceremony_key(p)
+    der = base64.b64decode(info["public_key_b64"])
+    assert info["fingerprint"] == hashlib.sha256(der).hexdigest()  # full, as the pages show
+    pem_path = os.path.join(p, "ceremony", "ceremony.pub.pem")
+    assert stat.S_IMODE(os.stat(pem_path).st_mode) == 0o644
+    k = RSA.import_key(open(pem_path, "rb").read())
+    assert not k.has_private() and k.export_key(format="DER") == der
+    r = subprocess.run([sys.executable, "-m", "spellbook.cli", "ceremony-key",
+                        "--prefix", p, "--pem"], capture_output=True, text=True,
+                       env={**os.environ, "PYTHONPATH": os.path.join(ROOT, "src")})
+    assert r.returncode == 0, r.stderr
+    assert "BEGIN PUBLIC KEY" in r.stdout and "PRIVATE" not in r.stdout
+
+
+def test_config_naming_the_daemon_key_is_not_treated_as_legacy(tmp_path, home):
+    """install.sh sets ceremony_key_path to the daemon's own key (for
+    spellbook-ceremony apply); the daemon must neither move nor remove it."""
+    p, env_path, *_ = _prefix(tmp_path)
+    own = os.path.join(p, "ceremony", "private.pem")
+    cfg = json.load(open(os.path.join(p, "spellbook.json")))
+    cfg["ceremony_key_path"] = own
+    _w(os.path.join(p, "spellbook.json"), json.dumps(cfg))
+    info = custody.generate_ceremony_key(p)
+    seed = os.urandom(64)
+    _seal(env_path, info["public_key_b64"], seed)
+    assert Daemon(p).std_seed == seed
+    assert Daemon(p).std_seed == seed
+    assert os.path.exists(own)
+    r = subprocess.run([sys.executable, "-m", "spellbook.cli", "ceremony-adopt",
+                        "--prefix", p], capture_output=True, text=True,
+                       env={**os.environ, "PYTHONPATH": os.path.join(ROOT, "src")})
+    assert r.returncode == 0 and "already the daemon's key" in r.stdout
+    assert os.path.exists(own)
+
+
+def test_terminal_export_shows_the_ceremony_fingerprint_to_the_human(tmp_path, monkeypatch, capsys):
+    from spellbook.seed import mnemonic_from_entropy
+    p, live = _std_prefix(tmp_path)
+    info = custody.generate_ceremony_key(p)
+    std_entropy = bytes.fromhex(open(os.path.join(p, "std_entropy.key")).read().strip())
+    master, slave = os.openpty()
+    words = mnemonic_from_entropy(std_entropy).split()
+    os.write(master, ("\n" + "\n".join(words[:3]) + "\n").encode())
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(exportmod, "login_uid", lambda: 4242)
+    monkeypatch.setattr(exportmod, "verification_positions", lambda *a, **k: [1, 2, 3])
+    monkeypatch.setattr(exportmod.shutil, "which", lambda name: None)
+    assert exportmod.run_export(p, tty_path=os.ttyname(slave)) == 0
+    seen = b""
+    while select.select([master], [], [], 0.2)[0]:
+        chunk = os.read(master, 65536)
+        if not chunk:
+            break
+        seen += chunk
+    os.close(master)
+    os.close(slave)
+    assert custody.grouped(info["fingerprint"]) in seen.decode(errors="replace")
+    assert info["fingerprint"][:16] not in capsys.readouterr().out

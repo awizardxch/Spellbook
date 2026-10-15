@@ -732,6 +732,9 @@ def main(argv=None):
                          "become unreadable, and the backup is required again")
     ck.add_argument("--public-only", action="store_true",
                     help="print only the base64 public key")
+    ck.add_argument("--pem", action="store_true",
+                    help="print only the public key as PEM (what install.sh "
+                         "publishes at ceremony_pub_path)")
 
     ca_ = sub.add_parser(
         "ceremony-adopt",
@@ -1169,7 +1172,9 @@ def main(argv=None):
         try:
             if a.cmd == "ceremony-key":
                 info = custody.generate_ceremony_key(a.prefix, rotate=a.rotate)
-                if a.public_only:
+                if a.pem:
+                    sys.stdout.write(custody.public_pem(a.prefix).decode() + "\n")
+                elif a.public_only:
                     print(info["public_key_b64"])
                 else:
                     print(f"public_key_b64: {info['public_key_b64']}")
@@ -1179,6 +1184,10 @@ def main(argv=None):
                 src = a.src or custody.legacy_key_path(custody.load_cfg(a.prefix))
                 if not os.path.lexists(src):
                     print(f"nothing to adopt: no key at {src}")
+                    return
+                own = custody.ceremony_key_path(a.prefix)
+                if os.path.exists(own) and os.path.samefile(src, own):
+                    print(f"nothing to adopt: {src} is already the daemon's key")
                     return
                 res = custody.adopt_ceremony_key(a.prefix, src)
                 print(f"moved to {res['moved_to']}; original overwritten: "
