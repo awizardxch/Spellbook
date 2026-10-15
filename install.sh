@@ -707,6 +707,12 @@ cfg = {
         "network": "testnet11",
         "relay_urls": {"testnet11": "", "mainnet": ""},
         "mainnet_submit_enabled": False,
+        # Server-cert pin for Sage's RPC (sha256 of ssl/wallet.crt, DER).
+        # Recorded by `spellbook sage-provision`; until then the on-disk
+        # wallet.crt alone is the pin. The daemon never imports keys at
+        # runtime (sage_runtime_key_import stays false — unsafe legacy).
+        "sage_cert_fingerprint": None,
+        "sage_runtime_key_import": False,
     } if chia else {}),
     # Solana wiring (direct HTTPS JSON-RPC — no relay, no Sage needed):
     # `network` is the active network — "devnet" default; "mainnet-beta" is
@@ -830,6 +836,25 @@ systemctl enable --quiet spellbookd.service
 systemctl restart spellbookd.service
 sleep 2
 systemctl is-active --quiet spellbookd.service || fail "spellbookd did not stay up — see journalctl -u spellbookd"
+
+# ---------------------------------------------------------------- 4b. Sage provisioning (one-time, S-01)
+# The daemon never sends the key to Sage at runtime: it only logs in by
+# fingerprint and fails closed when Sage lacks it. This one human-run step
+# starts Sage, pins its RPC server certificate into spellbook.json
+# (chia.sage_cert_fingerprint) and imports the derived BLS key once. It runs
+# as the daemon user (the only reader of the seed and the Sage data dir).
+# Upgrade mode never rewrites config, so it never provisions: an upgraded
+# install whose Sage already holds the key keeps working (the on-disk
+# wallet.crt is the pin); one that does not fails closed on its first Chia
+# call and names the command to run.
+if [ "$NO_SAGE" -eq 0 ] && [ "$UPGRADE" != "1" ]; then
+  log "provisioning the daemon's key into Sage (one-time; pins the RPC cert) ..."
+  runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/spellbook" sage-provision \
+    --config-dir "${PREFIX}" --chain chia-testnet >/dev/null \
+    || fail "sage-provision failed — Sage did not come up or did not present its own certificate"
+elif [ "$NO_SAGE" -eq 0 ]; then
+  log "upgrade: Sage provisioning untouched; if Chia calls report 'not provisioned', run as ${SPELLBOOK_USER}: ${VENV}/bin/spellbook sage-provision --config-dir ${PREFIX}"
+fi
 
 # ---------------------------------------------------------------- 5. off-chain drill, throwaway key (S14)
 log "running the §10 off-chain drill (throwaway key — never the real one) ..."

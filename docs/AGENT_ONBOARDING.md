@@ -59,6 +59,13 @@ It provisions:
   not treat a down Sage (e.g. the `status` balance warning) as a problem.
   It only needs to run while a Chia request or trading interaction is
   active.
+- **Sage is provisioned once, at install.** `spellbook sage-provision`
+  (the installer runs it as the daemon user) pins Sage's RPC certificate
+  into the config and imports the daemon's key. At runtime the daemon only
+  logs in by fingerprint and refuses any listener on the Sage port whose
+  certificate is not the pinned one; it never sends the key again. If a
+  Chia call says the wallet is "not provisioned", ask your human to run the
+  command it names.
 
 Client:
 

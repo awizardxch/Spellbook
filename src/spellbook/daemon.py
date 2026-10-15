@@ -15,7 +15,8 @@ spend queue, 24h velocity accounting rebuilt from disk, the §2 KDF
 addresses, EVM testnet submission (build/sign/broadcast with pre-broadcast
 verification; mainnet refuses without explicit config), live EVM balances,
 Chia/XCH submission via Sage RPC (daemon-spawned `sage rpc start`, local
-mTLS, key import with local fingerprint verification, testnet11;
+mTLS with the server certificate pinned, login by a locally derived
+fingerprint after one-time `spellbook sage-provision`, testnet11;
 chia-mainnet refuses without the explicit flag), live XCH balances, and
 Ed25519 identity signing behind the S1 gate (Option B adopted).
 
@@ -423,7 +424,7 @@ def _atomic_write_json(path: str, obj):
         f.flush()
         os.fsync(f.fileno())
     os.chmod(tmp, 0o600)
-    os.rename(tmp, path)
+    os.replace(tmp, path)  # atomic on POSIX; also overwrites on Windows
 
 
 def _refuse_if_locked(seed_path: str, std_seed_path: str | None):
@@ -559,6 +560,12 @@ class Daemon:
         # the configured data home and talks to it over local mTLS. If Sage
         # is down, Chia spends fail closed in _execute_chia_spend.
         self._sage_proc = None
+        # Binding to the Sage we start: the child's pid, and whether the
+        # port was already answering before we started anything. Trust is
+        # decided by the certificate pin (chia.sage_cert_fingerprint /
+        # wallet.crt) on every connection; these are belt-and-braces.
+        self._sage_started_pid = None
+        self._sage_listener_preexisting = False
 
     # ------------------------------------------------------------ state
     def _load_queue(self):
@@ -1481,6 +1488,8 @@ class Daemon:
         logs = rcpt.get("logs", []) if isinstance(rcpt, dict) else []
         return {"submitted": True, "tx_hash": tx_hash, "block": block,
                 "logs": logs, "from": sender}
+
+    def _sage_rpc_ready(self) -> bool:
         """True if something answers on the Sage RPC port (TCP only)."""
         port = int(self.chia_cfg.get("rpc_port", 9257))
         try:
@@ -1490,17 +1499,45 @@ class Daemon:
         except OSError:
             return False
 
+    def _sage_client(self) -> "chia.SageRpc":
+        """A pinned SageRpc for the configured data dir.
+
+        Every Sage conversation goes through here so the server-cert pin
+        (wallet.crt on disk, and chia.sage_cert_fingerprint when recorded)
+        is enforced on every connection, status reads included.
+        """
+        data_home = self.chia_cfg.get("sage_data_home")
+        if not data_home:
+            raise chia.SageError(
+                "no chia.sage_data_home configured — cannot reach Sage RPC")
+        data_dir = os.path.join(data_home, "com.rigidnetwork.sage")
+        if not os.path.isdir(data_dir):
+            raise chia.SageError(
+                f"Sage data dir {data_dir} missing — refusing")
+        return chia.SageRpc(
+            data_dir, port=int(self.chia_cfg.get("rpc_port", 9257)),
+            cert_fingerprint=self.chia_cfg.get("sage_cert_fingerprint"))
+
     def _ensure_sage_rpc(self) -> None:
         """Start `sage rpc start` if nothing answers on the RPC port.
 
         Idempotent and crash-tolerant: if the port already answers (e.g. an
-        orphaned Sage from a previous daemon run using the same data dir),
-        we just use it — the mTLS certs on disk decide trust, not the pid.
-        Raises chia.SageError if Sage cannot be brought up.
+        orphaned Sage from a previous daemon run using the same data dir)
+        it is used ONLY if its TLS certificate matches the pinned
+        wallet.crt — a listener that answered before this daemon started a
+        child is remembered as pre-existing and must pass the pin probe
+        before any request is sent. The pid of a child we start is
+        recorded as belt-and-braces; the pin is what decides trust.
+        Raises chia.SageError if Sage cannot be brought up or does not
+        present the pinned certificate.
         """
         if not self.cfg.get("chia_enabled", True):
             raise chia.SageError("chia is not enabled in this install")
         if self._sage_rpc_ready():
+            if self._sage_proc is None or self._sage_proc.poll() is not None:
+                # Nobody we started is alive, yet the port answers.
+                self._sage_listener_preexisting = True
+            self._sage_probe()
             return
         if self._sage_proc is not None and self._sage_proc.poll() is None:
             # We started one and it's still alive but not answering yet —
@@ -1527,9 +1564,12 @@ class Daemon:
                     stdin=subprocess.DEVNULL, start_new_session=True)
             except Exception as e:
                 raise chia.SageError(f"could not start sage rpc: {e}") from e
+            self._sage_started_pid = self._sage_proc.pid
+            self._sage_listener_preexisting = False
         deadline = time.time() + 45
         while time.time() < deadline:
             if self._sage_rpc_ready():
+                self._sage_probe()
                 return
             if self._sage_proc is not None and self._sage_proc.poll() is not None:
                 raise chia.SageError(
@@ -1539,16 +1579,50 @@ class Daemon:
         raise chia.SageError(
             "sage rpc did not answer on its port within 45s — see sage-rpc.log")
 
+    def _sage_probe(self) -> None:
+        """Handshake with the listener and verify the certificate pin
+        before anything is sent. Called whenever the port answers — both
+        for a child we started and for a pre-existing listener."""
+        try:
+            self._sage_client().probe()
+        except chia.SageError as e:
+            origin = ("a listener that was already on the port"
+                      if getattr(self, "_sage_listener_preexisting", False)
+                      else "the Sage child this daemon started")
+            raise chia.SageError(
+                f"refusing {origin} (port "
+                f"{int(self.chia_cfg.get('rpc_port', 9257))}): {e}") from e
+
+    def _chia_expected_fingerprint(self, chain):
+        """The daemon's wallet fingerprint for `chain`, derived locally."""
+        master_sk = self._chia_master_sk(chain)
+        from spellbook import chia_sign
+        return chia.chia_fingerprint(chia_sign.pk_bytes(master_sk).hex())
+
+    @staticmethod
+    def _sage_fingerprints(rpc) -> set:
+        have = set()
+        for k in rpc.get_keys():
+            try:
+                have.add(int(k.get("fingerprint")))
+            except (TypeError, ValueError):
+                continue
+        return have
+
     def _chia_wallet(self, rpc, chain):
         """Select the daemon-owned wallet for `chain` on Sage.
 
-        Switches Sage to the chain's network, imports the daemon's BLS
-        master key when missing (verifying the fingerprint locally — never
-        trusting the RPC's word for which key it imported), and logs in.
+        Switches Sage to the chain's network and logs in by the locally
+        derived fingerprint. The key is NEVER imported here: provisioning
+        (`spellbook sage-provision`, a one-time human step at install)
+        is the only path that sends the secret to Sage, and the daemon
+        fails closed when the fingerprint is absent. The legacy runtime
+        import survives only behind `chia.sage_runtime_key_import: true`,
+        which is documented as unsafe and defaults off.
         Returns (fingerprint, address).
 
-        In standard mode the imported key is the BLS key_gen master key, so
-        Sage operates the exact wallet the mnemonic opens in stock Sage —
+        In standard mode the provisioned key is the BLS key_gen master key,
+        so Sage operates the exact wallet the mnemonic opens in stock Sage —
         the daemon and Sage agree on every address.
 
         Every balance read goes through here. Sage's /get_sync_status
@@ -1557,27 +1631,69 @@ class Daemon:
         into the destination wallet to derive its address) would otherwise
         make status report someone else's balance as the agent's. O10
         requires the agent to surface its own balance/address, so status
-        selects — and if needed imports — the daemon's own wallet first.
+        selects the daemon's own wallet first.
         """
         network = chia.NETWORKS[chain]
         rpc.set_network(network)
-        master_sk = self._chia_master_sk(chain)
-        from spellbook import chia_sign
-        expected_fp = chia.chia_fingerprint(chia_sign.pk_bytes(master_sk).hex())
-        have = set()
-        for k in rpc.get_keys():
-            try:
-                have.add(int(k.get("fingerprint")))
-            except (TypeError, ValueError):
-                continue
-        if expected_fp not in have:
-            got = rpc.import_key("spellbook-default", master_sk.hex())
-            if got != expected_fp:
+        expected_fp = self._chia_expected_fingerprint(chain)
+        if expected_fp not in self._sage_fingerprints(rpc):
+            if not self.chia_cfg.get("sage_runtime_key_import", False):
                 raise chia.SageError(
-                    f"imported fingerprint {got} != derived {expected_fp} "
-                    "— refusing to use an unexpected key")
+                    f"Sage holds no key with fingerprint {expected_fp} — "
+                    "the wallet is not provisioned; run `spellbook "
+                    f"sage-provision --config-dir <prefix> --chain {chain}` "
+                    "once as the daemon user (the daemon never imports "
+                    "keys at runtime)")
+            self._sage_import_key(rpc, chain, expected_fp)
         rpc.login(expected_fp)
         return expected_fp, rpc.wallet_address(expected_fp, network)
+
+    def _sage_import_key(self, rpc, chain, expected_fp) -> int:
+        """Send the derived master key to Sage once, verifying the returned
+        fingerprint locally — never trusting the RPC's word for which key
+        it imported. Only provisioning (or the unsafe runtime flag) calls
+        this, and only over a pinned connection."""
+        master_sk = self._chia_master_sk(chain)
+        got = rpc.import_key("spellbook-default", master_sk.hex())
+        if got != expected_fp:
+            raise chia.SageError(
+                f"imported fingerprint {got} != derived {expected_fp} "
+                "— refusing to use an unexpected key")
+        return got
+
+    def sage_provision(self, chain: str = "chia-testnet") -> dict:
+        """One-time provisioning (`spellbook sage-provision`): start Sage,
+        pin its certificate into the daemon config, and import the
+        daemon's key if Sage does not already hold it.
+
+        Returns {"fingerprint", "cert_fingerprint", "imported": bool,
+        "address"}. Writes chia.sage_cert_fingerprint into spellbook.json
+        (atomic, mode 600) when it is not recorded yet; a recorded pin that
+        no longer matches wallet.crt fails closed inside SageRpc.
+        """
+        if chain not in chia.NETWORKS:
+            raise chia.SageError(f"unknown Chia chain {chain!r}")
+        if self._signing_seed() is None:
+            raise chia.SageError("no seed configured — nothing to provision")
+        self._ensure_sage_rpc()
+        rpc = self._sage_client()
+        rpc.set_network(chia.NETWORKS[chain])
+        expected_fp = self._chia_expected_fingerprint(chain)
+        imported = False
+        if expected_fp not in self._sage_fingerprints(rpc):
+            self._sage_import_key(rpc, chain, expected_fp)
+            imported = True
+        rpc.login(expected_fp)
+        addr = rpc.wallet_address(expected_fp, chia.NETWORKS[chain])
+        if not self.chia_cfg.get("sage_cert_fingerprint"):
+            cfg_path = os.path.join(self.config_dir, "spellbook.json")
+            with open(cfg_path) as f:
+                raw = json.load(f)
+            raw.setdefault("chia", {})["sage_cert_fingerprint"] = rpc.pin
+            _atomic_write_json(cfg_path, raw)
+            self.chia_cfg["sage_cert_fingerprint"] = rpc.pin
+        return {"fingerprint": expected_fp, "cert_fingerprint": rpc.pin,
+                "imported": imported, "address": addr}
 
     # The six standing requirements for any token launch, mint, or
     # issuance. mint_gate.json must attest ALL of them, name the EXACT
@@ -2068,19 +2184,14 @@ class Daemon:
     def _chia_sage_rpc(self, chain: str):
         """Start/connect Sage RPC and select the daemon's wallet for `chain`.
 
-        Shared setup for all Sage-path Chia spends (XCH, CAT, NFT): ensures
-        `sage rpc start` answers, switches to the chain's network, and
-        imports + logs in the daemon's KDF-derived BLS key. Returns
+        Shared setup for all Sage-path Chia spends (XCH, CAT, NFT) and
+        status reads: ensures `sage rpc start` answers and presents the
+        pinned certificate, switches to the chain's network, and logs in
+        the daemon's provisioned BLS key by fingerprint. Returns
         (rpc, fingerprint, sender_address).
         """
         self._ensure_sage_rpc()
-        data_home = self.chia_cfg.get("sage_data_home")
-        data_dir = os.path.join(data_home, "com.rigidnetwork.sage")
-        if not os.path.isdir(data_dir):
-            raise chia.SageError(
-                f"Sage data dir {data_dir} missing after startup — refusing")
-        rpc = chia.SageRpc(data_dir,
-                           port=int(self.chia_cfg.get("rpc_port", 9257)))
+        rpc = self._sage_client()
         expected_fp, sender = self._chia_wallet(rpc, chain)
         return rpc, expected_fp, sender
 
@@ -3583,9 +3694,9 @@ class Daemon:
     def _execute_chia_spend_via_sage(self, params: dict) -> dict:
         """Build, sign, and submit an approved XCH transfer via Sage RPC.
 
-        Flow: switch Sage to the right network, ensure the KDF-derived BLS
-        key is imported (verifying the fingerprint locally — never trusting
-        the RPC's word for which key it imported), log in, send via
+        Flow: switch Sage to the right network, log in by the locally
+        derived fingerprint (the key was provisioned once by `spellbook
+        sage-provision`; a missing key fails closed), send via
         /send_xch with auto_submit, then confirm the outgoing transaction
         appears in /get_transactions paying our destination our amount.
 
@@ -5946,15 +6057,14 @@ class Daemon:
         if (signing_seed is not None and self.cfg.get("chia_enabled", True)
                 and self.chia_cfg.get("sage_data_home")):
             try:
-                data_dir = os.path.join(self.chia_cfg["sage_data_home"],
-                                        "com.rigidnetwork.sage")
-                rpc = chia.SageRpc(
-                    data_dir, port=int(self.chia_cfg.get("rpc_port", 9257)))
-                # Select the daemon's own wallet first: Sage reports the
-                # *selected* wallet, which may be a foreign one left logged
-                # in by earlier tooling. Never report another wallet's
-                # balance/address as the agent's (O10).
-                _, addr = self._chia_wallet(rpc, "chia-testnet")
+                # The same guarded path every spend uses: pinned server
+                # cert, pre-existing-listener probe, login by fingerprint
+                # only (never an import). Select the daemon's own wallet
+                # first: Sage reports the *selected* wallet, which may be a
+                # foreign one left logged in by earlier tooling. Never
+                # report another wallet's balance/address as the agent's
+                # (O10).
+                rpc, _, addr = self._chia_sage_rpc("chia-testnet")
                 st = rpc.sync_status()
                 balances["chia-testnet"] = {
                     "address": addr,

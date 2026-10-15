@@ -618,12 +618,31 @@ def cmd_option_update(a, client: AgentClient):
                                visible=not a.hidden))
 
 
+def cmd_sage_provision(a):
+    """One-time, human-run: start Sage, pin its server certificate into
+    spellbook.json (chia.sage_cert_fingerprint) and import the daemon's
+    key when Sage does not hold it yet. Runs as the daemon user against
+    the config dir — no socket, no token. The daemon itself never imports
+    keys at runtime; it only logs in by fingerprint."""
+    from spellbook.daemon import Daemon
+    d = Daemon(a.config_dir)
+    out = d.sage_provision(a.chain)
+    _show(out)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="spellbook")
     ap.add_argument("--socket")
     ap.add_argument("--token-file")
     ap.add_argument("--muse-id")
     sub = ap.add_subparsers(dest="cmd", required=True)
+
+    sp = sub.add_parser(
+        "sage-provision",
+        help="one-time: pin Sage's cert and import the daemon key "
+             "(run as the daemon user; the daemon never imports at runtime)")
+    sp.add_argument("--config-dir", required=True)
+    sp.add_argument("--chain", default="chia-testnet")
 
     status_p = sub.add_parser("status")
     status_p.add_argument("--balances", action="store_true",
@@ -1032,6 +1051,13 @@ def main(argv=None):
     ou.add_argument("--hidden", action="store_true")
 
     a = ap.parse_args(argv)
+
+    if a.cmd == "sage-provision":
+        try:
+            cmd_sage_provision(a)
+        except Exception as e:  # SageError, config errors — fail loudly
+            raise SystemExit(f"spellbook sage-provision: {e}")
+        return
 
     try:
         if a.cmd in ("version", "upgrade", "doctor", "dex-quote", "cast"):

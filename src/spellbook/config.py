@@ -28,12 +28,27 @@ spellbook.json (all fields optional unless noted):
                           "relay_urls": {"testnet11": url, "mainnet": url}
                               (per-network relay URLs; legacy flat
                               "relay_url" still works as a fallback),
-                          "mainnet_submit_enabled": bool (default false)} —
+                          "mainnet_submit_enabled": bool (default false),
+                          "sage_cert_fingerprint": 64-hex (optional — the
+                              SHA-256 of Sage's ssl/wallet.crt (DER),
+                              recorded by `spellbook sage-provision`; the
+                              daemon refuses any RPC listener whose
+                              certificate does not match it, and refuses
+                              to start Sage if wallet.crt on disk no longer
+                              matches it. Without it the on-disk wallet.crt
+                              alone is the pin),
+                          "sage_runtime_key_import": bool (default false —
+                              UNSAFE legacy behavior: lets the daemon
+                              /import_key the master key at runtime when
+                              Sage lacks the fingerprint. Leave off; run
+                              `spellbook sage-provision` once instead)} —
                           Sage wiring (§10 phase 1); {} or missing with
                           --no-sage. The daemon spawns `sage rpc start` with
                           XDG_DATA_HOME=sage_data_home when the RPC port is
                           silent; Sage keeps its DB + mTLS certs at
-                          <sage_data_home>/com.rigidnetwork.sage.
+                          <sage_data_home>/com.rigidnetwork.sage. The
+                          server certificate is verified (wallet.crt is the
+                          trust anchor) and pinned on every connection.
                           One seed serves both networks: the KDF derives
                           per-chain keys and only the bech32m HRP differs
                           (txch1 vs xch1), so the paper backup covers both.
@@ -71,6 +86,7 @@ policy.json: the D9 default-off policy knobs, keyed "chain:asset".
 """
 import json
 import os
+import re
 
 from spellbook.policy import Policy
 
@@ -95,6 +111,17 @@ def load_config(config_dir: str) -> dict:
     for key in ("allowed_request_uids", "allowed_approve_uids"):
         if key in cfg and not all(isinstance(u, int) for u in cfg[key]):
             raise ValueError(f"{key} must be a list of integer UIDs")
+    chia_cfg = cfg.get("chia") or {}
+    if not isinstance(chia_cfg, dict):
+        raise ValueError("chia must be an object")
+    fp = chia_cfg.get("sage_cert_fingerprint")
+    if fp is not None and not (isinstance(fp, str)
+                               and re.fullmatch(r"[0-9a-fA-F]{64}", fp)):
+        raise ValueError(
+            "chia.sage_cert_fingerprint must be the 64-hex SHA-256 of "
+            "Sage's wallet.crt")
+    if not isinstance(chia_cfg.get("sage_runtime_key_import", False), bool):
+        raise ValueError("chia.sage_runtime_key_import must be a boolean")
     return cfg
 
 

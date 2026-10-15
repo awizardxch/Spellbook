@@ -4,10 +4,17 @@ The daemon is the sole talker to Sage RPC. This module is a small,
 stdlib-only mTLS client for the Sage RPC server (`sage rpc start`):
 
   - mTLS with the Sage data dir's own ssl/wallet.crt + ssl/wallet.key.
-    Sage requires the client to present exactly the wallet cert; the
-    server cert is the same self-signed cert. Trust here comes from file
-    ownership (the data dir is daemon-owned, mode 700), not from a CA —
-    hostname checking and CA verification are off because there is no CA.
+    Sage requires the client to present exactly the wallet cert, and the
+    server presents that same cert. The SERVER is verified too: wallet.crt
+    is loaded as the only trust anchor (CERT_REQUIRED, partial-chain so the
+    leaf itself is the anchor — wallet.crt is issued by Chia's public
+    shared CA, whose key everyone has, so that CA can never be the anchor),
+    and the leaf's SHA-256 fingerprint is pinned: the one on disk, and when
+    the daemon config records `chia.sage_cert_fingerprint`, that one too.
+    A listener on the port whose certificate does not match is refused at
+    the TLS handshake, before any request body (and so before any key
+    material) is written. Hostname checking is off because the peer is
+    127.0.0.1 and the pin, not a name, identifies it.
   - Fail-closed: any transport error, non-2xx status, or RPC-side error
     raises SageError. Sage returns errors as plain text on non-2xx, so
     we surface that text instead of trying to parse JSON.
@@ -34,8 +41,10 @@ Amounts in Sage's API are untagged string-or-number ("Amount"); we send
 plain JSON integers for mojos and accept either form back.
 
 Nothing in this module ever logs key material. The private key is passed
-to Sage's /import_key once per (chain, label) — Sage needs the secret to
-sign — over the local mTLS channel only.
+to Sage's /import_key only by the one-time provisioning step (`spellbook
+sage-provision`, run by a human at install) — Sage needs the secret to
+sign — over the pinned local mTLS channel only. The daemon at runtime
+only logs in by fingerprint.
 """
 
 import http.client
@@ -98,11 +107,79 @@ def chia_fingerprint(master_pubkey_hex: str) -> int:
     return int.from_bytes(digest[:4], "big")
 
 
+def cert_fingerprint(pem_or_der: bytes) -> str:
+    """SHA-256 of a certificate's DER bytes, lowercase hex (the pin).
+
+    Accepts PEM (first certificate block) or raw DER.
+    """
+    import base64
+    import hashlib
+    data = pem_or_der
+    if b"-----BEGIN" in data:
+        lines = []
+        inside = False
+        for line in data.splitlines():
+            if line.startswith(b"-----BEGIN"):
+                inside = True
+                continue
+            if line.startswith(b"-----END"):
+                break
+            if inside:
+                lines.append(line.strip())
+        data = base64.b64decode(b"".join(lines))
+    return hashlib.sha256(data).hexdigest()
+
+
+def cert_fingerprint_of_file(path: str) -> str:
+    with open(path, "rb") as f:
+        return cert_fingerprint(f.read())
+
+
+def _norm_fingerprint(fp) -> str:
+    s = str(fp or "").strip().lower().replace(":", "")
+    if not re.fullmatch(r"[0-9a-f]{64}", s):
+        raise SageError("sage_cert_fingerprint must be the 64-hex SHA-256 "
+                        "of Sage's wallet.crt (DER)")
+    return s
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPSConnection that checks the server's leaf-certificate pin right
+    after the TLS handshake, before a single request byte is written."""
+
+    def __init__(self, *a, pin: str, **k):
+        super().__init__(*a, **k)
+        self._pin = pin
+
+    def connect(self):
+        super().connect()
+        try:
+            der = self.sock.getpeercert(binary_form=True)
+        except Exception as e:
+            self.close()
+            raise SageError(f"could not read Sage's server cert: {e}") from e
+        got = cert_fingerprint(der or b"")
+        if got != self._pin:
+            self.close()
+            raise SageError(
+                "Sage RPC server certificate does not match the pinned "
+                f"wallet.crt (got sha256 {got[:16]}…, expected "
+                f"{self._pin[:16]}…) — refusing to talk to this listener")
+
+
 class SageRpc:
-    """Minimal mTLS client for the Sage RPC server on localhost."""
+    """Minimal mTLS client for the Sage RPC server on localhost.
+
+    The server is verified against the data dir's wallet.crt (the only
+    trust anchor) and its leaf fingerprint is pinned. `cert_fingerprint`
+    is the pin recorded in the daemon config at provisioning: when given
+    it must equal the fingerprint of the wallet.crt on disk (a replaced
+    cert fails closed) and the server must present exactly that cert.
+    """
 
     def __init__(self, data_dir: str, host: str = "127.0.0.1",
-                 port: int = 9257, timeout: int = 60):
+                 port: int = 9257, timeout: int = 60,
+                 cert_fingerprint: str | None = None):
         ssl_dir = os.path.join(data_dir, "ssl")
         crt = os.path.join(ssl_dir, "wallet.crt")
         key = os.path.join(ssl_dir, "wallet.key")
@@ -111,18 +188,28 @@ class SageRpc:
                 raise SageError(
                     f"Sage ssl material not found at {p} — is `sage rpc start` "
                     f"running with this data dir?")
+        try:
+            disk_pin = cert_fingerprint_of_file(crt)
+        except Exception as e:
+            raise SageError(f"could not read Sage wallet.crt: {e}") from e
+        if cert_fingerprint is not None:
+            want = _norm_fingerprint(cert_fingerprint)
+            if want != disk_pin:
+                raise SageError(
+                    "Sage wallet.crt on disk does not match the configured "
+                    "sage_cert_fingerprint — the cert was replaced; refusing "
+                    "(re-run `spellbook sage-provision` only if you did this)")
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        # Loopback peer: identity is the pinned cert, not a hostname.
         ctx.check_hostname = False
-        # f-02: the Sage server cert is self-signed; pin it as the trust
-        # anchor instead of trusting whoever answers the port. The daemon
-        # owns the data dir, so the cert file itself is the root of trust.
-        # No hostname to check on loopback.
         ctx.verify_mode = ssl.CERT_REQUIRED
+        # wallet.crt is issued by Chia's public shared CA (everyone has its
+        # key), so the LEAF is the trust anchor: partial-chain verification
+        # accepts a chain that ends at a cert in the store without needing
+        # its issuer there.
+        ctx.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
         try:
             ctx.load_verify_locations(cafile=crt)
-        except Exception as e:
-            raise SageError(f"could not load Sage server cert as trust anchor: {e}") from e
-        try:
             ctx.load_cert_chain(certfile=crt, keyfile=key)
         except Exception as e:
             raise SageError(f"could not load Sage client cert: {e}") from e
@@ -130,17 +217,41 @@ class SageRpc:
         self._port = port
         self._timeout = timeout
         self._ctx = ctx
+        self.pin = disk_pin
+
+    def _connection(self) -> _PinnedHTTPSConnection:
+        return _PinnedHTTPSConnection(
+            self._host, self._port, timeout=self._timeout,
+            context=self._ctx, pin=self.pin)
+
+    def probe(self) -> str:
+        """TLS-handshake with the listener and verify the pin; send
+        nothing. Returns the pin. Raises SageError on any mismatch or
+        transport failure."""
+        conn = self._connection()
+        try:
+            conn.connect()
+        except SageError:
+            raise
+        except Exception as e:
+            raise SageError(
+                f"Sage RPC listener failed certificate verification: {e}"
+            ) from e
+        finally:
+            conn.close()
+        return self.pin
 
     def call(self, endpoint: str, body: dict | None = None) -> dict:
         """POST /{endpoint} with a JSON body; returns the parsed JSON response."""
         payload = json.dumps(body or {}).encode()
-        conn = http.client.HTTPSConnection(
-            self._host, self._port, timeout=self._timeout, context=self._ctx)
+        conn = self._connection()
         try:
             conn.request("POST", "/" + endpoint.lstrip("/"), body=payload,
                          headers={"Content-Type": "application/json"})
             resp = conn.getresponse()
             raw = resp.read()
+        except SageError:
+            raise
         except Exception as e:
             raise SageError(f"Sage RPC transport failure on /{endpoint}: {e}") from e
         finally:
