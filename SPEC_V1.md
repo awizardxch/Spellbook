@@ -1313,7 +1313,10 @@ own installs without risking their identity. Design, implemented on
    one strict `X.Y.Z` tag, refuses downgrades and `--from-dir` (unsigned),
    and execs the pinned installer copy — so the agent can only ever install
    maintainer-signed releases (SHA-256 + release-key GPG verified pre-install),
-   moving strictly forward. The release-key fingerprint
+   moving strictly forward. The key alone is not enough (review S-22): the
+   wrapper also requires the signed tag on the canonical `main`, the tarball
+   hash published on `main`, no entry in `releases/YANKED`, and a 24 h delay
+   window (docs/RELEASE_KEY.md, "Release acceptance"). The release-key fingerprint
    (`SPELLBOOK_RELEASE_KEY_FPR`) is still unconfigured: release installation
    fails closed until Speechless pins it (open decision, carried).
 4. **Doctor.** `spellbook doctor` (request-token side, via the daemon's

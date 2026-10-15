@@ -24,12 +24,39 @@ about its own files — you cannot traverse `/opt/spellbook` yourself).
 `spellbook upgrade <tag>` does not run as you. It execs
 `/usr/local/bin/spellbook-upgrade <tag>` via a sudoers entry that allows
 exactly that path, nothing else. The wrapper (root-owned, you cannot modify
-it) accepts one strict `X.Y.Z` tag, refuses downgrades, and execs the pinned
-installer copy at `/opt/spellbook/lib/install.sh --upgrade <tag>` — which
-verifies the release tarball's SHA-256 **and** the release-key GPG signature
-before installing anything. So the only code you can ever install is
-maintainer-signed code, moving strictly forward. `--from-dir` (unsigned) is
-refused on this path entirely — it is human-driven, root shell only.
+it) accepts one strict `X.Y.Z` tag, refuses a steered environment, and
+trusts only root-owned files under `/usr/local/lib/spellbook/` (never
+anything in `/opt/spellbook`, which the `spellbook` user owns). A valid
+release-key signature is **not enough** on its own (review S-22): from this
+machine, the wrapper fetches the canonical repository and installs only
+when all of these hold:
+
+1. the tag is an annotated tag named exactly `X.Y.Z`, signed by the pinned
+   release key (good signature; expired or revoked keys refused), with the
+   key read from `docs/release-key.asc` on `main`;
+2. the tag's commit is on `main`, and its `VERSION` says `X.Y.Z`;
+3. neither the tag nor its signing key is listed in `releases/YANKED` on
+   `main`;
+4. `main` carries `releases/X.Y.Z/spellbook-X.Y.Z.tar.gz.sha256`, and the
+   installer refuses any tarball with a different hash;
+5. the tag is past the delay window (24 h by default, counted from both its
+   signed date and the moment this machine first saw it);
+6. it is not older than what is installed.
+
+Then it runs the pinned installer copy
+`/usr/local/lib/spellbook/install.sh --upgrade <tag> --expect-sha256 <hash>`
+with a scrubbed environment, which verifies the tarball's SHA-256 **and**
+the release-key signature again before installing anything. Exit 75 means
+"not yet" (inside the delay window): retry next session. Any other refusal
+means do not install; report it, never work around it. `--from-dir`
+(unsigned) is refused on this path entirely — it is human-driven, root
+shell only.
+
+The human runs the same command (`sudo spellbook-upgrade X.Y.Z`) and gets
+the same checks. To take a release before the window ends, the human runs
+`sudo bash /usr/local/lib/spellbook/install.sh --upgrade X.Y.Z` directly
+(signature still verified), or sets `SPELLBOOK_UPGRADE_DELAY_HOURS` in
+`/usr/local/lib/spellbook/install.env`.
 
 ## What an upgrade preserves, and what it replaces
 
@@ -77,11 +104,11 @@ Production self-upgrade is signed releases only.
 
 ## The one decision still open
 
-The release-key fingerprint (`SPELLBOOK_RELEASE_KEY_FPR`) has no configured
-value yet — release installation fails closed until Speechless pins it in
-the town thread. The wrapper refuses to upgrade without it, and install.sh
-records whatever the human provided in `/opt/spellbook/install.env`
-(root-owned) so upgrades keep working without re-asking.
+The release-key fingerprint (`SPELLBOOK_RELEASE_KEY_FPR`) is pinned in
+`docs/RELEASE_KEY.md` and the town thread. The wrapper refuses to upgrade
+without it, and install.sh records whatever the human provided in
+`/usr/local/lib/spellbook/install.env` (root-owned, outside the
+`spellbook`-owned prefix) so upgrades keep working without re-asking.
 
 ## Self-install
 
@@ -95,6 +122,18 @@ out-of-band, never retained by the agent). The trust anchor
 the agent verifies the release key itself before installing.
 
 ## Upgrade notes
+
+### Next release: release acceptance hardened (review S-22, S-25, S-29, S-31)
+
+What changed: the root upgrade wrapper accepts a release only when its
+signed tag is on the canonical `main`, its tarball hash is published there,
+it is not in `releases/YANKED`, and it is past a 24 h delay window (see "The
+trust model" above). The install record moved to `/usr/local/lib/spellbook/`
+(root-owned), and expired or revoked release keys are refused. Machines on
+an older release cannot take this one through their old wrapper (its
+installer copied itself onto itself and stopped): the human runs, once, as
+root: `bash install.sh --upgrade <tag>` from the verified release. After
+that, self-upgrade works again. Needs `git` on the host.
 
 `spellbook upgrade --check` (or the MCP tool `spellbook_version`) links
 here when a newer signed release exists. After every upgrade, run

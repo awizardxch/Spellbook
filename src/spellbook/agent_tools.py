@@ -263,7 +263,10 @@ TOOLS = [
           "Installed Spellbook version vs the latest signed release. If "
           "upgrade_available, read upgrade_notes, then upgrade with the "
           "`how` command (signed releases only, forward-only, keys never "
-          "touched) and follow the notes' after-upgrade steps.",
+          "touched) and follow the notes' after-upgrade steps. The root "
+          "wrapper installs only a signed tag that is on main, not yanked "
+          "and past the delay window; a NOT YET or REFUSED answer is "
+          "final for this session, never work around it.",
           _version, read_only=True),
     _tool("spellbook_doctor",
           "Install health check (presence/permissions only, never key contents).",

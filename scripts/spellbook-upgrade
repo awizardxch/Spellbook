@@ -3,67 +3,261 @@
 #
 # Installed root:root 0755 at /usr/local/bin/spellbook-upgrade; the sudoers
 # entry created by install.sh allows the agent user NOPASSWD for exactly
-# this path. Trust anchors:
-#   1. install.sh verifies the release tarball (sha256 + GPG release-key
-#      signature) before installing anything — the agent can only ever
-#      install maintainer-signed code, never arbitrary code.
-#   2. This wrapper accepts exactly one argument, a strict X.Y.Z release
-#      tag. No --from-dir (unsigned), no extra flags, no downgrades: the
-#      installed VERSION is compared and older-or-equal tags are refused.
-#      Downgrades are the human's call via install.sh run directly as root.
+# this path. The human runs the same command (`sudo spellbook-upgrade X.Y.Z`).
 #
-# Usage: spellbook-upgrade 0.2.0
+# The release key alone is NOT enough to get code installed here (review
+# S-22). A release is installed only when ALL of these hold, each checked
+# from this machine against the canonical repository, never taken from the
+# caller's word:
+#   1. the argument is one strict X.Y.Z tag, the environment is clean, and
+#      the root-trusted files below are root-owned and writable by no one
+#      else (S-29);
+#   2. the tag exists on the canonical repo as an annotated tag named
+#      exactly X.Y.Z, signed by the pinned release key: GOODSIG + VALIDSIG
+#      with the pinned fingerprint; an expired, revoked or bad signature is
+#      refused (S-31). The public key is read from docs/release-key.asc on
+#      the canonical main branch, so a revocation published there is honored;
+#   3. the tag's commit is reachable from the canonical main branch (so an
+#      attacker also needs a merge to main), and its VERSION file says X.Y.Z;
+#   4. neither the tag nor the signing key is listed in releases/YANKED on
+#      main;
+#   5. main carries releases/X.Y.Z/spellbook-X.Y.Z.tar.gz.sha256, and the
+#      installer is told to refuse any tarball whose SHA-256 differs;
+#   6. the tag is older than the delay window (default 24 h), both by its
+#      signed tagger date and by when THIS machine first saw it, so a
+#      malicious tag can be noticed and yanked before installs take it;
+#   7. forward-only: a tag older than the installed version is refused.
+# Then the root-owned installer copy runs with a scrubbed environment and
+# verifies the tarball's SHA-256 and release-key signature again.
+#
+# Exit codes: 0 installed; 75 not yet (inside the delay window: retry
+# later, nothing is wrong); anything else refused.
+#
+# Usage: spellbook-upgrade 0.4.0
 set -eu
 
-PREFIX="/opt/spellbook"
-INSTALLER="${PREFIX}/lib/install.sh"
-VERSION_FILE="${PREFIX}/VERSION"
-ENV_FILE="${PREFIX}/install.env"
+# ---- fixed configuration --------------------------------------------------
+# Nothing here is read from the environment. The installed copy is
+# root-owned; the test suite substitutes these lines on its own copy.
+REQUIRED_UID=0
+CONF_DIR="/usr/local/lib/spellbook"
+STATE_DIR="/var/lib/spellbook-upgrade"
+SAFE_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+DEFAULT_REPO="https://github.com/awizardxch/Spellbook.git"
+CANONICAL_BRANCH="main"
+DEFAULT_DELAY_HOURS=24
+# ---------------------------------------------------------------------------
 
-die() { echo "spellbook-upgrade: FATAL: $*" >&2; exit 1; }
+PATH="$SAFE_PATH"; export PATH
+unset IFS   # default word splitting: space, tab, newline
+umask 077
+LC_ALL=C; export LC_ALL
 
-[ "$(id -u)" = "0" ] || die "run via sudo (the sudoers entry allows the agent user NOPASSWD)"
+INSTALLER="${CONF_DIR}/install.sh"
+ENV_FILE="${CONF_DIR}/install.env"
+VERSION_FILE="${CONF_DIR}/VERSION"
+
+die()     { echo "spellbook-upgrade: FATAL: $*" >&2; exit 1; }
+refuse()  { echo "spellbook-upgrade: REFUSED: $*" >&2; exit 1; }
+not_yet() { echo "spellbook-upgrade: NOT YET: $*" >&2; exit 75; }
+
+# ---- 1b. argument: exactly one strict X.Y.Z tag (a leading v is accepted) --
 [ "$#" = "1" ] || die "usage: spellbook-upgrade <tag>  (exactly one X.Y.Z tag)"
 TAG="$1"
+case "$TAG" in v*) TAG="${TAG#v}" ;; esac
 case "$TAG" in
-  ""|*[!0-9.]*|*..*|.*|*.) die "bad tag ${TAG} — want X.Y.Z" ;;
+  ""|*[!0-9.]*|*..*|.*|*.) die "bad tag — want X.Y.Z" ;;
 esac
-# strict X.Y.Z: three numeric components
-case "$TAG" in
-  [0-9]*.[0-9]*.[0-9]*) ;;
-  *) die "bad tag ${TAG} — want X.Y.Z" ;;
-esac
-n_dots=$(printf '%s' "$TAG" | tr -cd '.' | wc -c)
-[ "$n_dots" = "2" ] || die "bad tag ${TAG} — want X.Y.Z"
+printf '%s\n' "$TAG" | grep -Eqx '[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}' \
+  || die "bad tag ${TAG} — want X.Y.Z"
 
-[ -f "$VERSION_FILE" ] || die "$VERSION_FILE missing — not installed or record corrupted; human-driven reinstall needed"
-INSTALLED="$(cat "$VERSION_FILE")"
-# Forward-only for the agent: reinstalling the same signed tag is allowed
-# (repair); anything older is refused. Downgrades are the human's call via
-# install.sh run directly as root.
+# ---- 1c. root ---------------------------------------------------------------
+[ "$(id -u)" = "$REQUIRED_UID" ] \
+  || die "run via sudo (the sudoers entry allows the agent user NOPASSWD)"
+
+# ---- 1d. environment: refuse anything that could steer root's children ----
+# sudo's env_reset normally strips these; the wrapper does not rely on it.
+# Every child below also runs under `env -i`, so this is belt and braces.
+poisoned=""
+for name in $(env | sed -n 's/^\([^=]*\)=.*/\1/p'); do
+  case "$name" in
+    LD_*|BASH_ENV|ENV|BASH_FUNC_*|SHELLOPTS|BASHOPTS|PS4|CDPATH|GLOBIGNORE|\
+    GNUPGHOME|GPG_*|GIT_*|PYTHON*|PERL5*|PERLLIB|RUBY*|NODE_OPTIONS|\
+    SSL_CERT_*|CURL_CA_BUNDLE|SPELLBOOK_*|SAGE_*|CARGO_*|RUSTUP_*|TMPDIR)
+      poisoned="${poisoned} ${name}" ;;
+  esac
+done
+[ -z "$poisoned" ] \
+  || refuse "environment carries${poisoned}; run plain \`sudo spellbook-upgrade X.Y.Z\` (no sudo -E, no VAR=...)"
+
+# ---- 1e. root-trusted files nobody else can replace (S-29) ----------------
+# $1 = path. It and every parent must be owned by root (or REQUIRED_UID),
+# must not be a symlink, and must not be group/other-writable; a parent may
+# be a root-owned sticky directory (/tmp-style).
+trusted() {
+  p="$1"; leaf=1
+  while :; do
+    [ -e "$p" ] || die "$p missing — human-driven reinstall needed"
+    [ ! -L "$p" ] || die "$p is a symlink — refusing to trust it"
+    owner="$(stat -c '%u' "$p")"; mode="$(stat -c '%a' "$p")"
+    case "$owner" in
+      0|"$REQUIRED_UID") ;;
+      *) die "$p is owned by uid ${owner}, not root — refusing to trust it" ;;
+    esac
+    m=$((0$mode))
+    if [ $((m & 18)) -ne 0 ]; then   # 18 = 022: group/other write
+      if [ "$leaf" = "1" ] || [ $((m & 512)) -eq 0 ] || [ "$owner" != "0" ]; then
+        die "$p is writable by others (mode ${mode}) — refusing to trust it"
+      fi
+    fi
+    [ "$p" = "/" ] && break
+    p="$(dirname "$p")"; leaf=0
+  done
+}
+trusted "$INSTALLER"
+trusted "$ENV_FILE"
+trusted "$VERSION_FILE"
+
+# install.env is parsed, never sourced.
+conf_val() {
+  sed -n "s/^$1=//p" "$ENV_FILE" | tail -1 | sed 's/^"\(.*\)"$/\1/'
+}
+AGENT_USER="$(conf_val SPELLBOOK_AGENT_USER)"
+HUMAN_USER="$(conf_val SPELLBOOK_HUMAN_USER)"
+NO_SAGE="$(conf_val SPELLBOOK_NO_SAGE)"
+FPR="$(conf_val SPELLBOOK_RELEASE_KEY_FPR | tr -d ' ' | tr 'a-f' 'A-F')"
+REPO="$(conf_val SPELLBOOK_CANONICAL_REPO)"
+[ -n "$REPO" ] || REPO="$DEFAULT_REPO"
+DELAY_HOURS="$(conf_val SPELLBOOK_UPGRADE_DELAY_HOURS)"
+[ -n "$DELAY_HOURS" ] || DELAY_HOURS="$DEFAULT_DELAY_HOURS"
+
+valid_user() { printf '%s\n' "$1" | grep -Eqx '[a-z_][a-z0-9_-]{0,31}'; }
+valid_user "$AGENT_USER" || die "install.env has no valid SPELLBOOK_AGENT_USER"
+valid_user "$HUMAN_USER" || die "install.env has no valid SPELLBOOK_HUMAN_USER"
+printf '%s\n' "$FPR" | grep -Eqx '[0-9A-F]{40}' \
+  || die "install.env has no SPELLBOOK_RELEASE_KEY_FPR — no signed-release trust anchor; human must set it (run install.sh once with SPELLBOOK_RELEASE_KEY_FPR=...)"
+printf '%s\n' "$DELAY_HOURS" | grep -Eqx '[0-9]{1,4}' \
+  || die "install.env SPELLBOOK_UPGRADE_DELAY_HOURS must be a whole number of hours"
+case "$REPO" in
+  https://*|file://*|/*) ;;
+  *) die "install.env SPELLBOOK_CANONICAL_REPO must be an https:// URL" ;;
+esac
+
+# ---- 7. forward-only (read from the root-owned copy, not /opt/spellbook) --
+INSTALLED="$(tr -d '[:space:]' < "$VERSION_FILE")"
 if [ "$INSTALLED" != "$TAG" ]; then
   older="$(printf '%s\n%s\n' "$INSTALLED" "$TAG" | sort -V | head -1)"
   [ "$older" = "$INSTALLED" ] \
-    || die "refusing: installed is ${INSTALLED}, requested ${TAG} (agent upgrades move forward only; downgrades are the human's call)"
+    || refuse "installed is ${INSTALLED}, requested ${TAG} (upgrades move forward only; downgrades are the human's call via install.sh as root)"
 fi
 
-[ -f "$INSTALLER" ] || die "$INSTALLER missing — installer copy lost; human-driven reinstall needed"
-[ -f "$ENV_FILE" ] || die "$ENV_FILE missing — install record lost; human-driven reinstall needed"
+# ---- fetch the canonical repo's main + the tag into a private work dir ----
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+trap 'exit 1' HUP INT TERM
+mkdir -m 0700 "${WORK}/gnupg" "${WORK}/home"
+# Every git/gpg call runs with an empty environment plus exactly these.
+G() {
+  env -i PATH="$SAFE_PATH" HOME="${WORK}/home" LC_ALL=C GNUPGHOME="${WORK}/gnupg" \
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
+    git -C "${WORK}/repo" "$@"
+}
+GPG() {
+  env -i PATH="$SAFE_PATH" HOME="${WORK}/home" LC_ALL=C GNUPGHOME="${WORK}/gnupg" \
+    gpg --batch --no-tty --quiet "$@"
+}
+env -i PATH="$SAFE_PATH" HOME="${WORK}/home" git init -q --bare "${WORK}/repo" >/dev/null 2>&1 \
+  || die "git init failed (is git installed?)"
+G fetch -q --no-tags "$REPO" \
+    "+refs/heads/${CANONICAL_BRANCH}:refs/canonical/main" \
+    "+refs/tags/${TAG}:refs/canonical/tag" >/dev/null 2>&1 \
+  || refuse "tag ${TAG} is not published on ${REPO} (or the repo is unreachable)"
 
-# shellcheck disable=SC1090
-. "$ENV_FILE"   # root-owned, agent cannot tamper; defines SPELLBOOK_* vars
-AGENT_USER="${SPELLBOOK_AGENT_USER:-}"
-HUMAN_USER="${SPELLBOOK_HUMAN_USER:-}"
-[ -n "$AGENT_USER" ] || die "install.env has no SPELLBOOK_AGENT_USER"
-[ -n "$HUMAN_USER" ] || die "install.env has no SPELLBOOK_HUMAN_USER"
-[ -n "${SPELLBOOK_RELEASE_KEY_FPR:-}" ] \
-  || die "install.env has no SPELLBOOK_RELEASE_KEY_FPR — no signed-release trust anchor; human must set it (run install.sh once with SPELLBOOK_RELEASE_KEY_FPR=...)"
+# ---- 2. signed annotated tag, named exactly TAG, by the pinned key --------
+[ "$(G cat-file -t refs/canonical/tag)" = "tag" ] \
+  || refuse "tag ${TAG} is not an annotated, signed tag"
+G cat-file tag refs/canonical/tag > "${WORK}/tag.txt"
+TAG_NAME="$(sed -n '/^$/q;s/^tag //p' "${WORK}/tag.txt")"
+[ "$TAG_NAME" = "$TAG" ] \
+  || refuse "the tag object under ${TAG} names itself '${TAG_NAME}'"
+TAGGER_TS="$(sed -n '/^$/q;s/^tagger .* \([0-9][0-9]*\) [-+][0-9][0-9][0-9][0-9]$/\1/p' "${WORK}/tag.txt")"
+printf '%s\n' "$TAGGER_TS" | grep -Eqx '[0-9]+' || refuse "tag ${TAG} has no tagger date"
 
-NO_SAGE_FLAG=""
-[ "${SPELLBOOK_NO_SAGE:-0}" = "1" ] && NO_SAGE_FLAG="--no-sage"
+G show "refs/canonical/main:docs/release-key.asc" > "${WORK}/release-key.asc" 2>/dev/null \
+  || refuse "${CANONICAL_BRANCH} has no docs/release-key.asc"
+GPG --import "${WORK}/release-key.asc" >/dev/null 2>&1 \
+  || refuse "docs/release-key.asc on ${CANONICAL_BRANCH} does not import"
+G verify-tag --raw refs/canonical/tag > /dev/null 2> "${WORK}/sig.status" || true
+bad="$(grep -Eo '^\[GNUPG:\] (BADSIG|ERRSIG|EXPSIG|EXPKEYSIG|REVKEYSIG|NO_PUBKEY) ' "${WORK}/sig.status" \
+  | head -1 | awk '{print $2}')" || true
+[ -z "$bad" ] || refuse "tag ${TAG} signature status ${bad} (bad signature, unknown, expired or revoked key)"
+grep -q '^\[GNUPG:\] GOODSIG ' "${WORK}/sig.status" \
+  || refuse "tag ${TAG} has no good signature from a known key"
+[ "$(grep -c '^\[GNUPG:\] VALIDSIG ' "${WORK}/sig.status")" = "1" ] \
+  || refuse "tag ${TAG} must carry exactly one valid signature"
+SIG_FPR="$(awk '/^\[GNUPG:\] VALIDSIG /{print $3}' "${WORK}/sig.status" | tr 'a-f' 'A-F')"
+[ "$SIG_FPR" = "$FPR" ] \
+  || refuse "tag ${TAG} is signed by ${SIG_FPR}, not the pinned release key"
 
-echo "[spellbook-upgrade] upgrading ${INSTALLED} -> ${TAG} (keys/config/ledger untouched)"
-# shellcheck disable=SC2086
-exec env "SPELLBOOK_RELEASE_KEY_FPR=${SPELLBOOK_RELEASE_KEY_FPR}" \
-  bash "$INSTALLER" --upgrade "$TAG" \
-  --agent-user "$AGENT_USER" --human-user "$HUMAN_USER" $NO_SAGE_FLAG
+# ---- 3. reachable from canonical main, VERSION matches --------------------
+COMMIT="$(G rev-parse "refs/canonical/tag^{commit}")"
+G merge-base --is-ancestor "$COMMIT" refs/canonical/main \
+  || refuse "tag ${TAG} (${COMMIT}) is not on ${CANONICAL_BRANCH} of ${REPO}; a release must be merged first"
+[ "$(G show "${COMMIT}:VERSION" 2>/dev/null | tr -d '[:space:]')" = "$TAG" ] \
+  || refuse "VERSION inside tag ${TAG} is not ${TAG}"
+
+# ---- 4. yank / revocation list on main ------------------------------------
+G show "refs/canonical/main:releases/YANKED" > "${WORK}/yanked" 2>/dev/null \
+  || : > "${WORK}/yanked"
+if awk -v t="$TAG" -v f="$SIG_FPR" '
+     /^[[:space:]]*(#|$)/ { next }
+     { k = $1; if (k == t || toupper(k) == f) { found = 1 } }
+     END { exit found ? 0 : 1 }' "${WORK}/yanked"; then
+  refuse "tag ${TAG} or its signing key is listed in releases/YANKED on ${CANONICAL_BRANCH}"
+fi
+
+# ---- 5. the artifact hash published on main -------------------------------
+SHA="$(G show "refs/canonical/main:releases/${TAG}/spellbook-${TAG}.tar.gz.sha256" 2>/dev/null \
+  | awk 'NR==1{print $1}' | tr 'A-F' 'a-f')" || true
+printf '%s\n' "$SHA" | grep -Eqx '[0-9a-f]{64}' \
+  || refuse "${CANONICAL_BRANCH} has no releases/${TAG}/spellbook-${TAG}.tar.gz.sha256"
+
+# ---- 6. delay window -------------------------------------------------------
+NOW="$(date +%s)"
+DELAY_S=$((DELAY_HOURS * 3600))
+mkdir -p "$STATE_DIR"
+chmod 0700 "$STATE_DIR"
+trusted "$STATE_DIR"
+SEEN_FILE="${STATE_DIR}/seen-${TAG}"
+SEEN_TS=""
+if [ -f "$SEEN_FILE" ] && [ ! -L "$SEEN_FILE" ]; then
+  seen_a=""; seen_b=""
+  read -r seen_a seen_b < "$SEEN_FILE" || true
+  if [ "$seen_b" = "$COMMIT" ] && printf '%s\n' "$seen_a" | grep -Eqx '[0-9]{1,12}'; then
+    SEEN_TS="$seen_a"
+  fi
+fi
+if [ -z "$SEEN_TS" ]; then
+  SEEN_TS="$NOW"
+  printf '%s %s\n' "$SEEN_TS" "$COMMIT" > "${SEEN_FILE}.tmp"
+  mv -f "${SEEN_FILE}.tmp" "$SEEN_FILE"
+fi
+READY_AT="$SEEN_TS"
+[ "$TAGGER_TS" -gt "$READY_AT" ] && READY_AT="$TAGGER_TS"
+READY_AT=$((READY_AT + DELAY_S))
+if [ "$NOW" -lt "$READY_AT" ]; then
+  when="$(date -u -d "@${READY_AT}" '+%Y-%m-%d %H:%M UTC' 2>/dev/null || echo "epoch ${READY_AT}")"
+  not_yet "tag ${TAG} is inside the ${DELAY_HOURS} h delay window; eligible after ${when}"
+fi
+
+# ---- run the root-owned installer with a scrubbed environment -------------
+set -- --upgrade "$TAG" --expect-sha256 "$SHA" \
+  --agent-user "$AGENT_USER" --human-user "$HUMAN_USER"
+[ "$NO_SAGE" = "1" ] && set -- "$@" --no-sage
+
+echo "[spellbook-upgrade] ${INSTALLED} -> ${TAG}: signed tag on ${CANONICAL_BRANCH}, not yanked, past the delay window (keys/config/ledger untouched)"
+rc=0
+env -i PATH="$SAFE_PATH" HOME=/root LC_ALL=C GNUPGHOME="${WORK}/gnupg" \
+  SPELLBOOK_RELEASE_KEY_FPR="$FPR" \
+  bash "$INSTALLER" "$@" || rc=$?
+exit "$rc"

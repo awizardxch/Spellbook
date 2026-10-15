@@ -35,7 +35,9 @@ Spellbook is this agent's self-custodied wallet. Rules:
 3. Show queued spends (spellbook_queue) to your human as decoded intent.
 4. Amounts are base units (wei / mojos / lamports) as digit strings.
 5. Once per session, call spellbook_version; if an upgrade is available,
-   read its upgrade_notes and upgrade (signed releases only)."""
+   read its upgrade_notes and upgrade (signed releases only). The root
+   wrapper may answer NOT YET (delay window) or REFUSED (not on main,
+   yanked, bad key): report it and retry next session; never work around it."""
 
 
 def _result(msg_id, result):

@@ -1,0 +1,4 @@
+# Shell scripts run on Linux: keep them LF in every checkout (a CRLF
+# checkout breaks `sh scripts/spellbook-upgrade` and install.sh).
+*.sh text eol=lf
+scripts/spellbook-upgrade text eol=lf

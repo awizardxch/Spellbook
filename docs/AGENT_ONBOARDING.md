@@ -121,7 +121,11 @@ The rules that keep this safe:
 
 - `upgrade` only ever installs maintainer-signed releases (SHA-256 + GPG
   release-key signature, verified before anything is replaced), and only
-  moves forward — downgrades are the human's call.
+  moves forward — downgrades are the human's call. The root wrapper also
+  checks the canonical repo itself: the signed tag must be on `main`,
+  its tarball hash published there, not yanked, and past a 24 h delay
+  window (`docs/RELEASE_KEY.md`). `NOT YET` (exit 75) means wait; a
+  refusal means do not install. Report either; never work around them.
 - `doctor --repair` fixes **code** (package, VERSION, Sage, daemon). It
   never regenerates keys, never mints tokens, never hand-edits config, never
   reconstructs the ledger — state problems fail closed with guidance for

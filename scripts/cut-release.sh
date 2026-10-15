@@ -9,6 +9,14 @@
 #
 # The tarball is built from the TAG (git archive), whatever HEAD is, so the
 # signed files land on main where install.sh's vendored fallback looks.
+#
+# The release key alone does not ship a release (review S-22). Installed
+# machines' spellbook-upgrade accepts a tag only when it is a SIGNED tag
+# (git tag -s) on a commit reachable from the canonical main, main carries
+# releases/<tag>/spellbook-<tag>.tar.gz.sha256, the tag is not listed in
+# releases/YANKED, and the tag is older than the delay window (24 h by
+# default). The releases/<tag>/ commit reaches main through a reviewed
+# merge; that merge is the human's step.
 # Preconditions it checks: the tag exists and its VERSION == tag, a clean
 # tree, and the release key (docs/RELEASE_KEY.md) available to gpg.
 # Output: releases/<tag>/ with the signed files install.sh fetches (the
@@ -26,7 +34,15 @@ fail() { printf 'cut-release: %s\n' "$*" >&2; exit 1; }
 cd "$(git rev-parse --show-toplevel)"
 [ -z "$(git status --porcelain)" ] || fail "working tree not clean"
 git rev-parse -q --verify "refs/tags/$TAG" >/dev/null \
-  || fail "tag $TAG missing: git tag -a $TAG -m 'Spellbook $TAG' && git push origin $TAG"
+  || fail "tag $TAG missing: git tag -s -u $FPR $TAG -m 'Spellbook $TAG' && git push origin $TAG"
+[ "$(git cat-file -t "refs/tags/$TAG")" = "tag" ] \
+  || fail "tag $TAG is not an annotated signed tag: re-create it with git tag -s -u $FPR"
+TAG_STATUS="$(git verify-tag --raw "$TAG" 2>&1 >/dev/null || true)"
+TAG_SIG_FPR="$(printf '%s\n' "$TAG_STATUS" | awk '/^\[GNUPG:\] VALIDSIG /{print $3; exit}')"
+{ printf '%s\n' "$TAG_STATUS" | grep -q '^\[GNUPG:\] GOODSIG ' && [ "$TAG_SIG_FPR" = "$FPR" ]; } \
+  || fail "tag $TAG is not signed by the release key $FPR (installs refuse it): git tag -f -s -u $FPR $TAG"
+git merge-base --is-ancestor "$TAG" HEAD \
+  || fail "tag $TAG is not on this branch's history: tag a commit that is on main"
 [ "$(git show "$TAG:VERSION" | tr -d '[:space:]')" = "$TAG" ] \
   || fail "VERSION inside tag $TAG is not $TAG"
 git symbolic-ref -q HEAD >/dev/null \
@@ -120,14 +136,21 @@ fi
 cat <<EOF
 Signed release $TAG ready in $OUT/ (sha256 + signature verified).
 
-Publish:
-  1. git add $OUT && git commit -m "vendor signed $TAG artifacts" && git push
-     (check: git show --stat HEAD must list the files)
-  2. GitHub release "$TAG" (tag $TAG) with these assets — names matter,
+Publish (installs take the release only after ALL of these):
+  1. git push origin $TAG   (the signed tag)
+  2. git add $OUT && git commit -m "vendor signed $TAG artifacts", then a PR
+     to main that a human reviews and merges. The reviewer checks the hash:
+       git archive --format=tar.gz --prefix=spellbook-$TAG/ $TAG | sha256sum
+     must equal $OUT/$TGZ.sha256 (git >= 2.38 gzips reproducibly). That merge publishes the hash installs
+     cross-check; no merge, no install.
+  3. GitHub release "$TAG" (tag $TAG) with these assets — names matter,
      install.sh fetches exactly these:
        $OUT/$TGZ          as  $TGZ
        $OUT/$TGZ.sha256   as  spellbook-$TAG.sha256
        $OUT/$TGZ.asc      as  $TGZ.asc
 $SAGE_PUBLISH_LINES
-Agents then see it via \`spellbook upgrade --check\` / spellbook_version.
+Agents then see it via \`spellbook upgrade --check\` / spellbook_version,
+and installs take it once the tag is past the delay window (24 h by default).
+To stop a bad release: add a line "$TAG <reason>" (or the key fingerprint)
+to releases/YANKED on main before the window ends.
 EOF

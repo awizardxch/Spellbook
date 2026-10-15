@@ -66,6 +66,11 @@ SAGE_COMMIT="f2ec89dd59d07227bed657bc268fc32ce97551f6"   # SPEC §3/D4
 SPELLBOOK_USER="spellbook"
 CLIENT_GROUP="spellbook-clients"
 PREFIX="/opt/spellbook"
+# Root-trusted install record (review S-29): the installer copy the upgrade
+# wrapper runs, install.env and the installed VERSION live here, root:root,
+# outside the spellbook-owned ${PREFIX}, so the spellbook user cannot
+# rename a replacement into place.
+ROOT_LIB="/usr/local/lib/spellbook"
 SOCK_DIR="/run/spellbook"
 SOCK_PATH="${SOCK_DIR}/spellbook.sock"
 # The agent's copy of the request token: a 0600 file owned by the agent
@@ -102,13 +107,23 @@ detect_sage_platform() {
   esac
 }
 
-# $1 = .asc file, $2 = data file. Returns 0 iff gpg reports VALIDSIG from
-# the pinned release key — the same trust rule as the release tarball.
+# $1 = .asc file, $2 = data file. Returns 0 iff gpg reports exactly one
+# GOODSIG + VALIDSIG from the pinned release key and nothing bad (review
+# S-31: gpg also emits VALIDSIG next to EXPKEYSIG / REVKEYSIG, so VALIDSIG
+# alone accepted an expired or revoked key). The keyring is $GNUPGHOME when
+# set (the upgrade wrapper points it at a keyring holding only the key
+# published on the canonical main branch), else root's default keyring.
 verify_release_sig() {
   [ -n "${RELEASE_KEY_FPR:-}" ] || return 1
-  local sig_fpr
-  sig_fpr="$(gpg --status-fd 1 --verify "$1" "$2" 2>/dev/null \
-    | awk '/^\[GNUPG:\] VALIDSIG /{print $3}' | tail -1)"
+  local status sig_fpr
+  status="$(gpg --batch --status-fd 1 --verify "$1" "$2" 2>/dev/null || true)"
+  if printf '%s\n' "$status" \
+      | grep -Eq '^\[GNUPG:\] (BADSIG|ERRSIG|EXPSIG|EXPKEYSIG|REVKEYSIG|NO_PUBKEY) '; then
+    return 1
+  fi
+  printf '%s\n' "$status" | grep -q '^\[GNUPG:\] GOODSIG ' || return 1
+  [ "$(printf '%s\n' "$status" | grep -c '^\[GNUPG:\] VALIDSIG ')" = "1" ] || return 1
+  sig_fpr="$(printf '%s\n' "$status" | awk '/^\[GNUPG:\] VALIDSIG /{print $3}')"
   [ -n "$sig_fpr" ] || return 1
   [ "$(norm_fpr "$sig_fpr")" = "$(norm_fpr "$RELEASE_KEY_FPR")" ]
 }
@@ -220,19 +235,25 @@ try_prebuilt_sage() {
   fi
 
   # 3. Network: GitHub Release assets, then the repo-vendored copy.
-  if ! curl -fsSL -o "${dir}/${tgz}" "${REPO}/releases/download/${TAG}/${tgz}" 2>/dev/null \
-      && ! curl -fsSL -o "${dir}/${tgz}" "${VENDORED_BASE}/${TAG}/${tgz}" 2>/dev/null; then
+  #    A wrapper-driven upgrade (--expect-sha256) takes the prebuilt only
+  #    from the copy vendored on main: a GitHub Release asset is bound to
+  #    nothing but the release key, and the key alone must not be enough
+  #    to put a binary on this machine (review S-22).
+  fetch_prebuilt_file() {  # $1 = file name
+    if [ -z "$EXPECT_SHA256" ] \
+        && curl -fsSL -o "${dir}/$1" "${REPO}/releases/download/${TAG}/$1" 2>/dev/null; then
+      return 0
+    fi
+    curl -fsSL -o "${dir}/$1" "${VENDORED_BASE}/${TAG}/$1" 2>/dev/null
+  }
+  if ! fetch_prebuilt_file "${tgz}"; then
     warn "no prebuilt sage ${tgz} for release ${TAG} — building from source"
     return 1
   fi
-  if ! curl -fsSL -o "${dir}/${tgz}.sha256" "${REPO}/releases/download/${TAG}/${tgz}.sha256" 2>/dev/null \
-      && ! curl -fsSL -o "${dir}/${tgz}.sha256" "${VENDORED_BASE}/${TAG}/${tgz}.sha256" 2>/dev/null; then
-    fail "prebuilt ${tgz} is published but its checksum file is missing — refusing to continue"
-  fi
-  if ! curl -fsSL -o "${dir}/${tgz}.asc" "${REPO}/releases/download/${TAG}/${tgz}.asc" 2>/dev/null \
-      && ! curl -fsSL -o "${dir}/${tgz}.asc" "${VENDORED_BASE}/${TAG}/${tgz}.asc" 2>/dev/null; then
-    fail "prebuilt ${tgz} is published but its signature is missing — refusing to continue"
-  fi
+  fetch_prebuilt_file "${tgz}.sha256" \
+    || fail "prebuilt ${tgz} is published but its checksum file is missing — refusing to continue"
+  fetch_prebuilt_file "${tgz}.asc" \
+    || fail "prebuilt ${tgz} is published but its signature is missing — refusing to continue"
   use_prebuilt_sage "$dir" "$tgz" network
   return 0
 }
@@ -254,6 +275,8 @@ usage() {
   echo "                   instead of generating fresh keys. The agent obtains them"
   echo "                   by decrypting the human's restore blob from the ceremony"
   echo "                   HTML page. FILE is shredded after use."
+  echo "  --expect-sha256 HEX  refuse the <tag> tarball unless its SHA-256 is HEX"
+  echo "                   (the upgrade wrapper passes the hash published on main)"
   echo "  --no-sage        install EVM-only (Chia/Sage skipped; SPEC primary deliverable)"
   echo "  --agent-user     OS user the conversational agent runs as (required; in"
   echo "                   --upgrade mode defaults to the value in install.env)"
@@ -272,12 +295,14 @@ usage() {
 
 TAG=""
 RESTORE_FILE=""
+EXPECT_SHA256=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-sage) NO_SAGE=1; NO_SAGE_SET=1; shift ;;
     --upgrade) UPGRADE=1; shift ;;
     --restore) RESTORE_FILE="${2:-}"; shift 2 ;;
     --from-dir) FROM_DIR="${2:-}"; shift 2 ;;
+    --expect-sha256) EXPECT_SHA256="${2:-}"; shift 2 ;;
     --agent-user) AGENT_USER="${2:-}"; shift 2 ;;
     --human-user) HUMAN_USER="${2:-}"; shift 2 ;;
     --as-agent) AS_AGENT=1; shift ;;
@@ -286,6 +311,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$TAG" ] || [ -n "$FROM_DIR" ] || usage
+if [ -n "$EXPECT_SHA256" ]; then
+  [ -n "$TAG" ] || fail "--expect-sha256 needs a release <tag>"
+  printf '%s\n' "$EXPECT_SHA256" | grep -Eqx '[0-9a-f]{64}' \
+    || fail "--expect-sha256 wants 64 lowercase hex characters"
+fi
 
 # --restore and --upgrade are mutually exclusive: restore loads backed-up keys
 # into a FRESH install; upgrade preserves the keys already on disk.
@@ -302,13 +332,25 @@ fi
 if [ "$UPGRADE" = "1" ]; then
   [ -f "${PREFIX}/VERSION" ] \
     || fail "no install at ${PREFIX} — run a fresh install first (no --upgrade)"
-  [ -f "${PREFIX}/install.env" ] \
-    || fail "${PREFIX}/install.env missing — install record lost; human-driven reinstall needed"
-  env_val() { grep -E "^${1}=" "${PREFIX}/install.env" | cut -d= -f2- | tr -d '"'; }
+  # The record lives in ${ROOT_LIB}; installs made before review S-29 kept
+  # it in ${PREFIX}, which is accepted only when it is a root-owned
+  # regular file (a human-run migration; the new wrapper never reads it).
+  INSTALL_ENV="${ROOT_LIB}/install.env"
+  if [ ! -f "$INSTALL_ENV" ]; then
+    INSTALL_ENV="${PREFIX}/install.env"
+    { [ -f "$INSTALL_ENV" ] && [ ! -L "$INSTALL_ENV" ] \
+      && [ "$(stat -c '%u' "$INSTALL_ENV")" = "0" ]; } \
+      || fail "install record missing (${ROOT_LIB}/install.env) — human-driven reinstall needed"
+    warn "migrating the install record from ${PREFIX} to ${ROOT_LIB}"
+  fi
+  env_val() { grep -E "^${1}=" "$INSTALL_ENV" | cut -d= -f2- | tr -d '"'; }
   [ -n "$AGENT_USER" ] || AGENT_USER="$(env_val SPELLBOOK_AGENT_USER)"
   [ -n "$HUMAN_USER" ] || HUMAN_USER="$(env_val SPELLBOOK_HUMAN_USER)"
   [ "$NO_SAGE_SET" = "1" ] || NO_SAGE="$(env_val SPELLBOOK_NO_SAGE)"
   ENV_SAGE_COMMIT="$(env_val SPELLBOOK_SAGE_COMMIT)"
+  # A human-run upgrade reuses the pinned fingerprint from the root-owned
+  # record; the wrapper passes it explicitly.
+  [ -n "$RELEASE_KEY_FPR" ] || RELEASE_KEY_FPR="$(env_val SPELLBOOK_RELEASE_KEY_FPR)"
   log "upgrade mode: installed version $(cat "${PREFIX}/VERSION"), identity will be preserved"
 fi
 [ -n "$AGENT_USER" ] || fail "--agent-user is required (the OS user your agent runs as)"
@@ -359,21 +401,25 @@ else
 
   log "verifying checksum ..."
   sha256sum -c "spellbook-${TAG}.sha256" || fail "checksum mismatch — refusing to install"
+  if [ -n "$EXPECT_SHA256" ]; then
+    # The hash the upgrade wrapper read from the canonical main branch
+    # (review S-22): a tarball signed by the release key but not the one
+    # published on main is refused.
+    [ "$(sha256sum "spellbook-${TAG}.tar.gz" | awk '{print $1}')" = "$EXPECT_SHA256" ] \
+      || fail "tarball SHA-256 differs from the hash published on main — refusing to install"
+    log "tarball matches the hash published on main"
+  fi
 
   if [ -n "$RELEASE_KEY_FPR" ]; then
     log "verifying release signature ..."
     # The release public key must be imported out-of-band (see README: the
     # fingerprint is pinned in the town thread; import the key, compare its
     # fingerprint yourself). We trust the signature ONLY if gpg reports a
-    # valid signature AND the signer's fingerprint equals the pinned value.
-    # A valid signature from any other key is refused.
-    SIG_FPR="$(gpg --status-fd 1 --verify "spellbook-${TAG}.tar.gz.asc" \
-      "spellbook-${TAG}.tar.gz" 2>/dev/null \
-      | awk '/^\[GNUPG:\] VALIDSIG /{print $3}' | tail -1)"
-    [ -n "$SIG_FPR" ] || fail "signature mismatch — refusing to install"
-    [ "$(norm_fpr "$SIG_FPR")" = "$(norm_fpr "$RELEASE_KEY_FPR")" ] \
-      || fail "signature valid but not from the pinned release key — refusing to install"
-    log "signature OK (release key $(norm_fpr "$SIG_FPR"))"
+    # good, unexpired, unrevoked signature AND the signer's fingerprint
+    # equals the pinned value (verify_release_sig). Any other key is refused.
+    verify_release_sig "spellbook-${TAG}.tar.gz.asc" "spellbook-${TAG}.tar.gz" \
+      || fail "signature missing, bad, expired, revoked or not from the pinned release key — refusing to install"
+    log "signature OK (release key $(norm_fpr "$RELEASE_KEY_FPR"))"
   else
     fail "no release-key fingerprint configured (SPELLBOOK_RELEASE_KEY_FPR). refusing to install unverified code."
   fi
@@ -795,22 +841,42 @@ fi
 # VERSION is the machine's canonical version. install.env is root-owned and
 # records who installed and with what options, so --upgrade can run without
 # re-asking (and so the upgrade wrapper can exec install.sh as root).
-# ${PREFIX}/lib/install.sh is the pinned installer copy the privileged
+# ${ROOT_LIB}/install.sh is the pinned installer copy the privileged
 # wrapper runs; /usr/local/bin/spellbook-upgrade is the agent's only root
 # action (sudoers, NOPASSWD, exact path). All of these are refreshed on every
 # install so upgrades keep the self-serve path working.
+#
+# Every root-trusted file is copied from $SRC (the root-owned, verified
+# release tree, or the human's --from-dir checkout), never from $STAGE,
+# which the spellbook user owns and pip builds in (review S-29). The
+# installer copy comes from the release being installed, not from the
+# running script: a wrapper-driven upgrade runs ${ROOT_LIB}/install.sh, and
+# copying that onto itself failed under `set -e` (review S-25). Each file is
+# written to a temp name and renamed, so the running copy keeps its inode.
 log "writing install record ..."
-[ -f "${STAGE}/VERSION" ] || fail "release tree has no VERSION file — refusing to install an unversioned build"
-NEW_VERSION="$(cat "${STAGE}/VERSION")"
+[ -f "${SRC}/VERSION" ] || fail "release tree has no VERSION file — refusing to install an unversioned build"
+NEW_VERSION="$(tr -d '[:space:]' < "${SRC}/VERSION")"
 printf '%s\n' "$NEW_VERSION" > "${PREFIX}/VERSION"
 chmod 0644 "${PREFIX}/VERSION"
-[ -f "${STAGE}/scripts/spellbook-upgrade" ] \
+[ -f "${SRC}/scripts/spellbook-upgrade" ] \
   || fail "release tree has no scripts/spellbook-upgrade — refusing to install a build without the self-serve path"
-mkdir -p "${PREFIX}/lib"
-# INSTALLER_SRC was resolved before cd "$WORK" (see above) — $0 may be
-# relative and no longer resolves from here.
-cp "$INSTALLER_SRC" "${PREFIX}/lib/install.sh"
-chown root:root "${PREFIX}/lib/install.sh"; chmod 0755 "${PREFIX}/lib/install.sh"
+command -v git >/dev/null 2>&1 \
+  || warn "git is not installed: spellbook-upgrade checks releases against the canonical repo with git and refuses until it is"
+# root_install SRC DEST MODE: atomic root:root copy.
+root_install() {
+  cp "$1" "${2}.new.$$"
+  chown root:root "${2}.new.$$"; chmod "$3" "${2}.new.$$"
+  mv -f "${2}.new.$$" "$2"
+}
+mkdir -p "$ROOT_LIB"; chown root:root "$ROOT_LIB"; chmod 0755 "$ROOT_LIB"
+NEW_INSTALLER="${SRC}/install.sh"
+[ -f "$NEW_INSTALLER" ] || NEW_INSTALLER="$INSTALLER_SRC"
+root_install "$NEW_INSTALLER" "${ROOT_LIB}/install.sh" 0755
+printf '%s\n' "$NEW_VERSION" > "${ROOT_LIB}/VERSION.new.$$"
+chown root:root "${ROOT_LIB}/VERSION.new.$$"; chmod 0644 "${ROOT_LIB}/VERSION.new.$$"
+mv -f "${ROOT_LIB}/VERSION.new.$$" "${ROOT_LIB}/VERSION"
+# The pre-S-29 locations inside ${PREFIX} are retired.
+rm -f "${PREFIX}/lib/install.sh" "${PREFIX}/install.env"
 # Seal ceremony HTML pages — offline human/agent handoff for fresh installs.
 # The agent embeds a per-ceremony seal public key before handing to the human.
 # See ceremony/README.md.
@@ -821,19 +887,30 @@ if [ -d "${STAGE}/ceremony" ]; then
   chmod 0644 "${PREFIX}"/share/ceremony/*
   log "installed seal ceremony pages to ${PREFIX}/share/ceremony/"
 fi
-cat > "${PREFIX}/install.env" <<EOF
-# written by install.sh — root-owned; the spellbook-upgrade wrapper sources this
+# Kept across upgrades when the human set them: the canonical repo and the
+# delay window the wrapper enforces (empty = GitHub main, 24 h).
+OLD_CANONICAL_REPO=""; OLD_DELAY_HOURS=""
+if [ -f "${ROOT_LIB}/install.env" ]; then
+  OLD_CANONICAL_REPO="$(sed -n 's/^SPELLBOOK_CANONICAL_REPO="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "${ROOT_LIB}/install.env" | tail -1)"
+  OLD_DELAY_HOURS="$(sed -n 's/^SPELLBOOK_UPGRADE_DELAY_HOURS="\{0,1\}\([0-9]*\)"\{0,1\}$/\1/p' "${ROOT_LIB}/install.env" | tail -1)"
+fi
+cat > "${ROOT_LIB}/install.env.new.$$" <<EOF
+# written by install.sh — root-owned; the spellbook-upgrade wrapper parses this
 SPELLBOOK_AGENT_USER="${AGENT_USER}"
 SPELLBOOK_HUMAN_USER="${HUMAN_USER}"
 SPELLBOOK_NO_SAGE="${NO_SAGE}"
 SPELLBOOK_SAGE_COMMIT="${SAGE_COMMIT}"
 SPELLBOOK_INSTALLED_TAG="${TAG:-from-dir}"
 SPELLBOOK_RELEASE_KEY_FPR="${RELEASE_KEY_FPR:-}"
+SPELLBOOK_CANONICAL_REPO="${OLD_CANONICAL_REPO}"
+SPELLBOOK_UPGRADE_DELAY_HOURS="${OLD_DELAY_HOURS}"
 EOF
-chown root:root "${PREFIX}/install.env"; chmod 0600 "${PREFIX}/install.env"
-cp "${STAGE}/scripts/spellbook-upgrade" /usr/local/bin/spellbook-upgrade
-chown root:root /usr/local/bin/spellbook-upgrade; chmod 0755 /usr/local/bin/spellbook-upgrade
-printf '# Spellbook: the agent user may run the signed-release upgrade wrapper only.\n%s ALL=(root) NOPASSWD: /usr/local/bin/spellbook-upgrade\n' \
+chown root:root "${ROOT_LIB}/install.env.new.$$"; chmod 0600 "${ROOT_LIB}/install.env.new.$$"
+mv -f "${ROOT_LIB}/install.env.new.$$" "${ROOT_LIB}/install.env"
+root_install "${SRC}/scripts/spellbook-upgrade" /usr/local/bin/spellbook-upgrade 0755
+# env_reset for this one command whatever the host's defaults; the wrapper
+# also refuses a steered environment and runs its children under env -i.
+printf '# Spellbook: the agent user may run the signed-release upgrade wrapper only.\nDefaults!/usr/local/bin/spellbook-upgrade env_reset\n%s ALL=(root) NOPASSWD: /usr/local/bin/spellbook-upgrade\n' \
   "$AGENT_USER" > /etc/sudoers.d/spellbook-agent-upgrade
 chmod 0440 /etc/sudoers.d/spellbook-agent-upgrade
 if command -v visudo >/dev/null 2>&1; then

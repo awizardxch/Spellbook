@@ -159,7 +159,7 @@ def cmd_upgrade(a, client=None):
     if a.from_dir:
         # Human-driven dev path: no signature to verify, so the privileged
         # wrapper refuses it. Needs a root shell.
-        installer = os.path.join(ver.prefix(), "lib", "install.sh")
+        installer = "/usr/local/lib/spellbook/install.sh"   # root-owned (S-29)
         if os.geteuid() != 0:
             raise SystemExit(
                 "spellbook: --from-dir upgrades need a root shell (no release "
