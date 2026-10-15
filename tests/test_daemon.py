@@ -198,6 +198,13 @@ def test_s1_gate_closed_by_default(live):
                             {"method": "POST", "path": "/api/post", "body": "{}"})
 
 
+def test_dashboard_challenge_route_behind_the_same_s1_gate(live):
+    # S-04: the dashboard route exists on the request token, but with
+    # identity signing disabled it answers exactly like sign_musebook_request.
+    with pytest.raises(SpellbookError, match="S1"):
+        live["agent"].sign_dashboard_challenge("eyJ2IjoxfQ.00ff")
+
+
 def test_cli_status(live):
     env = dict(os.environ, SPELLBOOK_SOCKET=live["sock"],
                SPELLBOOK_REQUEST_TOKEN=live["req_token"])

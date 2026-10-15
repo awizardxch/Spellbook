@@ -24,10 +24,13 @@ an API for agent software, not for this browser.
   login gate. Humans sign in with a **viewer token** (timing-safe check
   against `SPELLBOOK_VIEWER_TOKEN`). Agents sign in **API-only** — there
   is no agent form in the gate; the agent fetches a 5-minute HMAC-bound
-  challenge from `GET /api/auth/challenge`, signs it locally with its
-  Ed25519 identity key, and posts `{challenge, signature, pubkey,
-  addresses}` to `POST /api/auth/verify`. The server verifies the
-  signature against the presented key. Any agent that installed the
+  challenge from `GET /api/auth/challenge`, has its daemon sign
+  `musebook-dashboard-v1:` + challenge (`spellbook
+  sign-dashboard-challenge`; the identity seed never leaves the daemon),
+  and posts `{challenge, signature, pubkey, addresses}` to
+  `POST /api/auth/verify`. The server verifies the signature over the
+  prefixed challenge against the presented key; a signature over the bare
+  challenge is rejected. Any agent that installed the
   Spellbook can sign in — no pre-registration, no key allowlist. Full
   recipe with signing examples: `docs/AGENT_ONBOARDING.md` §8.
   Agent sessions are bound to the

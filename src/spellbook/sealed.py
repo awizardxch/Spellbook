@@ -50,7 +50,8 @@ from urllib.parse import parse_qs
 
 from Crypto.Cipher import AES
 
-from spellbook.seed import load_seed, load_std_seed
+from spellbook.seed import header_lines, load_seed, load_std_seed
+from spellbook import seedrole
 
 FORMAT = "spellbook-sealed-seed"
 VERSION = 1
@@ -174,8 +175,15 @@ def check_password(password: str) -> None:
 
 
 def seal_bytes(seed: bytes, std_seed: bytes | None, password: str,
-               *, n: int = SCRYPT_N) -> dict:
-    """Encrypt the seed pair; returns the sealed document (a dict)."""
+               *, n: int = SCRYPT_N, seed_role: str | None = None) -> dict:
+    """Encrypt the seed pair; returns the sealed document (a dict).
+
+    `seed_role` (review S-04) is the seed file's role header, carried inside
+    the authenticated plaintext so unlock can write it back: a seed
+    labelled as a Musebook identity seed stays labelled across a wipe.
+    """
+    if seed_role is not None and seed_role not in seedrole.SEED_ROLES:
+        raise SealError("seed_role must be 'identity' or 'wallet'")
     if len(seed) != 32:
         raise SealError("seed must be exactly 32 bytes")
     if std_seed is not None and len(std_seed) != 64:
@@ -194,8 +202,11 @@ def seal_bytes(seed: bytes, std_seed: bytes | None, password: str,
         "has_std_seed": std_seed is not None,
     }
     key = _derive(password, header["kdf"])
-    plain = json.dumps({"seed": seed.hex(),
-                        "std_seed": std_seed.hex() if std_seed else None})
+    body = {"seed": seed.hex(),
+            "std_seed": std_seed.hex() if std_seed else None}
+    if seed_role is not None:
+        body["seed_role"] = seed_role
+    plain = json.dumps(body)
     c = AES.new(key, AES.MODE_GCM, nonce=_unb64(header["nonce"]))
     c.update(_aad(header))
     ct, tag = c.encrypt_and_digest(plain.encode())
@@ -204,6 +215,12 @@ def seal_bytes(seed: bytes, std_seed: bytes | None, password: str,
 
 def open_bytes(doc: dict, password: str) -> tuple[bytes, bytes | None]:
     """Decrypt a sealed document -> (seed, std_seed | None)."""
+    seed, std, _role = _open(doc, password)
+    return seed, std
+
+
+def _open(doc: dict, password: str) -> tuple[bytes, bytes | None, str | None]:
+    """Decrypt a sealed document -> (seed, std_seed | None, seed_role | None)."""
     if not isinstance(doc, dict) or doc.get("format") != FORMAT:
         raise SealError("not a Spellbook sealed seed file")
     if doc.get("version") != VERSION:
@@ -234,7 +251,10 @@ def open_bytes(doc: dict, password: str) -> tuple[bytes, bytes | None]:
         raise SealError("sealed seed file is corrupt")
     if not hmac.compare_digest(fingerprint(seed), str(doc.get("fingerprint"))):
         raise SealError("sealed seed fingerprint mismatch")
-    return seed, std
+    role = body.get("seed_role")
+    if role is not None and role not in seedrole.SEED_ROLES:
+        raise SealError("sealed seed file is corrupt")
+    return seed, std, role
 
 
 # ---------------------------------------------------------------- files
@@ -307,7 +327,9 @@ def seal(password: str, *, config_dir: str | None = None,
             raise SealError(
                 "the existing seal holds a DIFFERENT wallet than the seed on "
                 "disk — refusing to replace it; move it aside by hand first")
-    doc = seal_bytes(seed, std, password, n=n)
+    with open(loc["seed_path"]) as f:
+        role = seedrole.seed_file_role(header_lines(f.read()))
+    doc = seal_bytes(seed, std, password, n=n, seed_role=role)
     write_sealed(doc, p, replace=replace)
     return {"sealed_path": p, "fingerprint": doc["fingerprint"],
             "has_std_seed": doc["has_std_seed"]}
@@ -321,8 +343,11 @@ def unlock(password: str, *, config_dir: str | None = None,
     must match the sealed one byte-for-byte (then this is a no-op).
     """
     doc = read_sealed(path)
-    seed, std = open_bytes(doc, password)
+    seed, std, role = _open(doc, password)
     loc = locate(config_dir)
+    # The role header (S-04) goes back above the hex, exactly as sealed.
+    header = {"identity": seedrole.IDENTITY_ROLE_HEADER + "\n",
+              "wallet": seedrole.WALLET_ROLE_HEADER + "\n"}.get(role, "")
     targets = [(loc["seed_path"], seed.hex(), load_seed)]
     if std is not None:
         std_path = loc["std_seed_path"] or os.path.join(
@@ -343,7 +368,7 @@ def unlock(password: str, *, config_dir: str | None = None,
         else:
             todo.append((p, hex_value))
     for p, hex_value in todo:
-        _write_private(p, hex_value)
+        _write_private(p, (header if p == loc["seed_path"] else "") + hex_value)
     return {"written": [p for p, _ in todo],
             "already_present": len(todo) == 0,
             "fingerprint": doc["fingerprint"]}

@@ -3,6 +3,7 @@
 
 Request-token commands (the agent's side):
   spellbook status | queue | ledger | addresses
+  spellbook sign-dashboard-challenge --challenge <str>   # dashboard login (§8)
   spellbook doctor [--repair]            # read-only install health, self-repair
   spellbook version                      # local vs daemon version
   spellbook upgrade --check              # latest release vs local
@@ -77,6 +78,10 @@ def cmd_ledger(a, client):
 
 def cmd_addresses(a, client):
     _show(client.addresses())
+
+
+def cmd_sign_dashboard_challenge(a, client):
+    _show(client.sign_dashboard_challenge(a.challenge))
 
 
 # ---------------------------------------------------------------- lifecycle:
@@ -632,6 +637,13 @@ def main(argv=None):
     sub.add_parser("ledger")
     sub.add_parser("addresses")
 
+    sd = sub.add_parser(
+        "sign-dashboard-challenge",
+        help="have the daemon sign a dashboard login challenge "
+             "(docs/AGENT_ONBOARDING.md §8); the seed stays in the daemon")
+    sd.add_argument("--challenge", required=True,
+                    help="the exact string from GET /api/auth/challenge")
+
     # Lifecycle (SPEC §12b item 4): local-first, no approve token ever.
     sub.add_parser("version")
     up = sub.add_parser("upgrade")
@@ -1057,6 +1069,7 @@ def main(argv=None):
                                                muse_id=_muse_id(a))
             {"status": cmd_status, "queue": cmd_queue, "ledger": cmd_ledger,
              "addresses": cmd_addresses, "request-spend": cmd_request_spend,
+             "sign-dashboard-challenge": cmd_sign_dashboard_challenge,
              "dex-swap": cmd_dex_swap, "dex-lp-add": cmd_dex_lp_add,
              "dex-lp-remove": cmd_dex_lp_remove,
              "dex-lp-claim": cmd_dex_lp_claim,
