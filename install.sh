@@ -44,7 +44,8 @@
 #      pauses, clears the screen and asks for 3 SET 1 words back. Without a
 #      terminal the install completes and prints how the backup leaves the
 #      machine later: `sudo spellbook export` for a human at a terminal, or
-#      `spellbook export --reveal-key` for the seal ceremony (ciphertext
+#      `spellbook export --reveal-key` for the hosted backup page
+#      (https://spellbook.awizard.dev/ceremony/backup.html; ciphertext
 #      only). Then next steps (policy opt-in, directory entry §8).
 #
 # What it NEVER does: asks for keys, prints a mnemonic, a private key or a
@@ -66,6 +67,11 @@ SAGE_COMMIT="f2ec89dd59d07227bed657bc268fc32ce97551f6"   # SPEC §3/D4
 SPELLBOOK_USER="spellbook"
 CLIENT_GROUP="spellbook-clients"
 PREFIX="/opt/spellbook"
+# Root-trusted install record (review S-29): the installer copy the upgrade
+# wrapper runs, install.env and the installed VERSION live here, root:root,
+# outside the spellbook-owned ${PREFIX}, so the spellbook user cannot
+# rename a replacement into place.
+ROOT_LIB="/usr/local/lib/spellbook"
 SOCK_DIR="/run/spellbook"
 SOCK_PATH="${SOCK_DIR}/spellbook.sock"
 # The agent's copy of the request token: a 0600 file owned by the agent
@@ -102,13 +108,23 @@ detect_sage_platform() {
   esac
 }
 
-# $1 = .asc file, $2 = data file. Returns 0 iff gpg reports VALIDSIG from
-# the pinned release key — the same trust rule as the release tarball.
+# $1 = .asc file, $2 = data file. Returns 0 iff gpg reports exactly one
+# GOODSIG + VALIDSIG from the pinned release key and nothing bad (review
+# S-31: gpg also emits VALIDSIG next to EXPKEYSIG / REVKEYSIG, so VALIDSIG
+# alone accepted an expired or revoked key). The keyring is $GNUPGHOME when
+# set (the upgrade wrapper points it at a keyring holding only the key
+# published on the canonical main branch), else root's default keyring.
 verify_release_sig() {
   [ -n "${RELEASE_KEY_FPR:-}" ] || return 1
-  local sig_fpr
-  sig_fpr="$(gpg --status-fd 1 --verify "$1" "$2" 2>/dev/null \
-    | awk '/^\[GNUPG:\] VALIDSIG /{print $3}' | tail -1)"
+  local status sig_fpr
+  status="$(gpg --batch --status-fd 1 --verify "$1" "$2" 2>/dev/null || true)"
+  if printf '%s\n' "$status" \
+      | grep -Eq '^\[GNUPG:\] (BADSIG|ERRSIG|EXPSIG|EXPKEYSIG|REVKEYSIG|NO_PUBKEY) '; then
+    return 1
+  fi
+  printf '%s\n' "$status" | grep -q '^\[GNUPG:\] GOODSIG ' || return 1
+  [ "$(printf '%s\n' "$status" | grep -c '^\[GNUPG:\] VALIDSIG ')" = "1" ] || return 1
+  sig_fpr="$(printf '%s\n' "$status" | awk '/^\[GNUPG:\] VALIDSIG /{print $3}')"
   [ -n "$sig_fpr" ] || return 1
   [ "$(norm_fpr "$sig_fpr")" = "$(norm_fpr "$RELEASE_KEY_FPR")" ]
 }
@@ -220,19 +236,25 @@ try_prebuilt_sage() {
   fi
 
   # 3. Network: GitHub Release assets, then the repo-vendored copy.
-  if ! curl -fsSL -o "${dir}/${tgz}" "${REPO}/releases/download/${TAG}/${tgz}" 2>/dev/null \
-      && ! curl -fsSL -o "${dir}/${tgz}" "${VENDORED_BASE}/${TAG}/${tgz}" 2>/dev/null; then
+  #    A wrapper-driven upgrade (--expect-sha256) takes the prebuilt only
+  #    from the copy vendored on main: a GitHub Release asset is bound to
+  #    nothing but the release key, and the key alone must not be enough
+  #    to put a binary on this machine (review S-22).
+  fetch_prebuilt_file() {  # $1 = file name
+    if [ -z "$EXPECT_SHA256" ] \
+        && curl -fsSL -o "${dir}/$1" "${REPO}/releases/download/${TAG}/$1" 2>/dev/null; then
+      return 0
+    fi
+    curl -fsSL -o "${dir}/$1" "${VENDORED_BASE}/${TAG}/$1" 2>/dev/null
+  }
+  if ! fetch_prebuilt_file "${tgz}"; then
     warn "no prebuilt sage ${tgz} for release ${TAG} — building from source"
     return 1
   fi
-  if ! curl -fsSL -o "${dir}/${tgz}.sha256" "${REPO}/releases/download/${TAG}/${tgz}.sha256" 2>/dev/null \
-      && ! curl -fsSL -o "${dir}/${tgz}.sha256" "${VENDORED_BASE}/${TAG}/${tgz}.sha256" 2>/dev/null; then
-    fail "prebuilt ${tgz} is published but its checksum file is missing — refusing to continue"
-  fi
-  if ! curl -fsSL -o "${dir}/${tgz}.asc" "${REPO}/releases/download/${TAG}/${tgz}.asc" 2>/dev/null \
-      && ! curl -fsSL -o "${dir}/${tgz}.asc" "${VENDORED_BASE}/${TAG}/${tgz}.asc" 2>/dev/null; then
-    fail "prebuilt ${tgz} is published but its signature is missing — refusing to continue"
-  fi
+  fetch_prebuilt_file "${tgz}.sha256" \
+    || fail "prebuilt ${tgz} is published but its checksum file is missing — refusing to continue"
+  fetch_prebuilt_file "${tgz}.asc" \
+    || fail "prebuilt ${tgz} is published but its signature is missing — refusing to continue"
   use_prebuilt_sage "$dir" "$tgz" network
   return 0
 }
@@ -251,9 +273,12 @@ usage() {
   echo "                   refuses them, install.sh obeys."
   echo "  --restore FILE   restore from backup: FILE has two lines — seed.key hex"
   echo "                   (64 chars) then std_seed.key hex (128 chars). Uses these"
-  echo "                   instead of generating fresh keys. The agent obtains them"
-  echo "                   by decrypting the human's restore blob from the ceremony"
-  echo "                   HTML page. FILE is shredded after use."
+  echo "                   instead of generating fresh keys. The key holder (root or"
+  echo "                   the daemon user, never the agent) writes it with"
+  echo "                   'spellbook-ceremony restore ENVELOPE --out FILE' from the"
+  echo "                   hosted restore page's envelope. FILE is shredded after use."
+  echo "  --expect-sha256 HEX  refuse the <tag> tarball unless its SHA-256 is HEX"
+  echo "                   (the upgrade wrapper passes the hash published on main)"
   echo "  --no-sage        install EVM-only (Chia/Sage skipped; SPEC primary deliverable)"
   echo "  --agent-user     OS user the conversational agent runs as (required; in"
   echo "                   --upgrade mode defaults to the value in install.env)"
@@ -265,19 +290,21 @@ usage() {
   echo "                   request token file) vs what goes to the human (approve"
   echo "                   token file location; the paper backup, which leaves the"
   echo "                   machine only by 'spellbook export' — on the human's"
-  echo "                   terminal, or encrypted to the seal ceremony's reveal key)."
+  echo "                   terminal, or encrypted to the hosted backup page's reveal key)."
   echo "                   Nothing secret is printed either way."
   exit 2
 }
 
 TAG=""
 RESTORE_FILE=""
+EXPECT_SHA256=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-sage) NO_SAGE=1; NO_SAGE_SET=1; shift ;;
     --upgrade) UPGRADE=1; shift ;;
     --restore) RESTORE_FILE="${2:-}"; shift 2 ;;
     --from-dir) FROM_DIR="${2:-}"; shift 2 ;;
+    --expect-sha256) EXPECT_SHA256="${2:-}"; shift 2 ;;
     --agent-user) AGENT_USER="${2:-}"; shift 2 ;;
     --human-user) HUMAN_USER="${2:-}"; shift 2 ;;
     --as-agent) AS_AGENT=1; shift ;;
@@ -286,6 +313,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$TAG" ] || [ -n "$FROM_DIR" ] || usage
+if [ -n "$EXPECT_SHA256" ]; then
+  [ -n "$TAG" ] || fail "--expect-sha256 needs a release <tag>"
+  printf '%s\n' "$EXPECT_SHA256" | grep -Eqx '[0-9a-f]{64}' \
+    || fail "--expect-sha256 wants 64 lowercase hex characters"
+fi
 
 # --restore and --upgrade are mutually exclusive: restore loads backed-up keys
 # into a FRESH install; upgrade preserves the keys already on disk.
@@ -302,16 +334,52 @@ fi
 if [ "$UPGRADE" = "1" ]; then
   [ -f "${PREFIX}/VERSION" ] \
     || fail "no install at ${PREFIX} — run a fresh install first (no --upgrade)"
-  [ -f "${PREFIX}/install.env" ] \
-    || fail "${PREFIX}/install.env missing — install record lost; human-driven reinstall needed"
-  env_val() { grep -E "^${1}=" "${PREFIX}/install.env" | cut -d= -f2- | tr -d '"'; }
+  # The record lives in ${ROOT_LIB}; installs made before review S-29 kept
+  # it in ${PREFIX}, which is accepted only when it is a root-owned
+  # regular file (a human-run migration; the new wrapper never reads it).
+  INSTALL_ENV="${ROOT_LIB}/install.env"
+  if [ ! -f "$INSTALL_ENV" ]; then
+    INSTALL_ENV="${PREFIX}/install.env"
+    { [ -f "$INSTALL_ENV" ] && [ ! -L "$INSTALL_ENV" ] \
+      && [ "$(stat -c '%u' "$INSTALL_ENV")" = "0" ]; } \
+      || fail "install record missing (${ROOT_LIB}/install.env) — human-driven reinstall needed"
+    warn "migrating the install record from ${PREFIX} to ${ROOT_LIB}"
+  fi
+  env_val() { grep -E "^${1}=" "$INSTALL_ENV" | cut -d= -f2- | tr -d '"'; }
   [ -n "$AGENT_USER" ] || AGENT_USER="$(env_val SPELLBOOK_AGENT_USER)"
   [ -n "$HUMAN_USER" ] || HUMAN_USER="$(env_val SPELLBOOK_HUMAN_USER)"
   [ "$NO_SAGE_SET" = "1" ] || NO_SAGE="$(env_val SPELLBOOK_NO_SAGE)"
   ENV_SAGE_COMMIT="$(env_val SPELLBOOK_SAGE_COMMIT)"
+  # A human-run upgrade reuses the pinned fingerprint from the root-owned
+  # record; the wrapper passes it explicitly.
+  [ -n "$RELEASE_KEY_FPR" ] || RELEASE_KEY_FPR="$(env_val SPELLBOOK_RELEASE_KEY_FPR)"
+  ENV_HTTPS_PROXY="$(env_val SPELLBOOK_HTTPS_PROXY || true)"
+  ENV_HTTP_PROXY="$(env_val SPELLBOOK_HTTP_PROXY || true)"
+  ENV_NO_PROXY="$(env_val SPELLBOOK_NO_PROXY || true)"
   log "upgrade mode: installed version $(cat "${PREFIX}/VERSION"), identity will be preserved"
 fi
 [ -n "$AGENT_USER" ] || fail "--agent-user is required (the OS user your agent runs as)"
+
+# Proxy (hosts whose egress goes through one, e.g. cloud agent VMs): taken
+# from this install's environment, else, on --upgrade, from the install
+# record. It is recorded in install.env so the root upgrade wrapper, which
+# refuses proxy variables from its caller, can pass it to git and to this
+# installer, and written into the daemon's unit for its own RPC calls.
+PROXY_HTTPS="${https_proxy:-${HTTPS_PROXY:-${ENV_HTTPS_PROXY:-}}}"
+PROXY_HTTP="${http_proxy:-${HTTP_PROXY:-${ENV_HTTP_PROXY:-}}}"
+PROXY_NO="${no_proxy:-${NO_PROXY:-${ENV_NO_PROXY:-}}}"
+valid_proxy_url() {
+  [ -z "$1" ] && return 0
+  printf '%s\n' "$1" \
+    | grep -Eqx '(https?|socks5h?)://([A-Za-z0-9._~%!+-]+(:[A-Za-z0-9._~%!+-]*)?@)?[A-Za-z0-9.-]+(:[0-9]{1,5})?/?'
+}
+valid_proxy_url "$PROXY_HTTPS" || fail "https_proxy is not a proxy URL (scheme://host[:port])"
+valid_proxy_url "$PROXY_HTTP" || fail "http_proxy is not a proxy URL (scheme://host[:port])"
+{ [ -z "$PROXY_NO" ] || printf '%s\n' "$PROXY_NO" | grep -Eqx '[A-Za-z0-9.*:/_-]+(,[A-Za-z0-9.*:/_-]+)*'; } \
+  || fail "no_proxy is not a comma-separated host list"
+if [ -n "$PROXY_HTTPS" ]; then export https_proxy="$PROXY_HTTPS" HTTPS_PROXY="$PROXY_HTTPS"; fi
+if [ -n "$PROXY_HTTP" ]; then export http_proxy="$PROXY_HTTP" HTTP_PROXY="$PROXY_HTTP"; fi
+if [ -n "$PROXY_NO" ]; then export no_proxy="$PROXY_NO" NO_PROXY="$PROXY_NO"; fi
 [ "$(id -u)" = "0" ] || fail "run as root (it creates the ${SPELLBOOK_USER} user)"
 id "$AGENT_USER" >/dev/null 2>&1 || fail "agent user '$AGENT_USER' does not exist"
 if [ -n "$HUMAN_USER" ]; then
@@ -359,21 +427,25 @@ else
 
   log "verifying checksum ..."
   sha256sum -c "spellbook-${TAG}.sha256" || fail "checksum mismatch — refusing to install"
+  if [ -n "$EXPECT_SHA256" ]; then
+    # The hash the upgrade wrapper read from the canonical main branch
+    # (review S-22): a tarball signed by the release key but not the one
+    # published on main is refused.
+    [ "$(sha256sum "spellbook-${TAG}.tar.gz" | awk '{print $1}')" = "$EXPECT_SHA256" ] \
+      || fail "tarball SHA-256 differs from the hash published on main — refusing to install"
+    log "tarball matches the hash published on main"
+  fi
 
   if [ -n "$RELEASE_KEY_FPR" ]; then
     log "verifying release signature ..."
     # The release public key must be imported out-of-band (see README: the
     # fingerprint is pinned in the town thread; import the key, compare its
     # fingerprint yourself). We trust the signature ONLY if gpg reports a
-    # valid signature AND the signer's fingerprint equals the pinned value.
-    # A valid signature from any other key is refused.
-    SIG_FPR="$(gpg --status-fd 1 --verify "spellbook-${TAG}.tar.gz.asc" \
-      "spellbook-${TAG}.tar.gz" 2>/dev/null \
-      | awk '/^\[GNUPG:\] VALIDSIG /{print $3}' | tail -1)"
-    [ -n "$SIG_FPR" ] || fail "signature mismatch — refusing to install"
-    [ "$(norm_fpr "$SIG_FPR")" = "$(norm_fpr "$RELEASE_KEY_FPR")" ] \
-      || fail "signature valid but not from the pinned release key — refusing to install"
-    log "signature OK (release key $(norm_fpr "$SIG_FPR"))"
+    # good, unexpired, unrevoked signature AND the signer's fingerprint
+    # equals the pinned value (verify_release_sig). Any other key is refused.
+    verify_release_sig "spellbook-${TAG}.tar.gz.asc" "spellbook-${TAG}.tar.gz" \
+      || fail "signature missing, bad, expired, revoked or not from the pinned release key — refusing to install"
+    log "signature OK (release key $(norm_fpr "$RELEASE_KEY_FPR"))"
   else
     fail "no release-key fingerprint configured (SPELLBOOK_RELEASE_KEY_FPR). refusing to install unverified code."
   fi
@@ -632,9 +704,11 @@ if [ "$UPGRADE" = "1" ]; then
   done
   log "key material present (untouched by upgrade)"
 elif [ -n "$RESTORE_FILE" ]; then
-  # Restore from backup: the agent decrypted the human's restore blob (from the
-  # ceremony HTML) and wrote the two hex keys to RESTORE_FILE. Validate and
-  # install them instead of generating fresh keys.
+  # Restore from backup: the key holder (root or the daemon user, never the
+  # agent; review S-17) opened the human's restore envelope from the hosted
+  # restore page with `spellbook-ceremony restore`, which wrote the two hex
+  # keys to RESTORE_FILE. Validate and install them instead of generating
+  # fresh keys.
   [ ! -e "${PREFIX}/seed.key" ] || fail "${PREFIX}/seed.key already exists — this machine looks installed. Refusing to overwrite; uninstall first."
   [ ! -e "${PREFIX}/std_seed.key" ] || fail "${PREFIX}/std_seed.key already exists — this machine looks installed. Refusing to overwrite; uninstall first."
   log "restoring keys from backup ..."
@@ -752,6 +826,11 @@ cfg = {
         "mainnet_submit_enabled": False,
     },
     "socket_group": "spellbook-clients",
+    # Review S-16/S-17: the passwordless-ceremony key is the daemon's own
+    # (<prefix>/ceremony/private.pem); its PUBLIC half is published
+    # root-owned and world-readable for the agent's ceremony tools.
+    "ceremony_key_path": f"{prefix}/ceremony/private.pem",
+    "ceremony_pub_path": "/usr/local/share/spellbook/ceremony.pub.pem",
     "musebook_signing_mode": "disabled",   # S1: inert until Speechless decides
     "allowed_request_uids": [agent_uid],
     "allowed_approve_uids": [human_uid],
@@ -791,49 +870,151 @@ chown "${AGENT_USER}" "${AGENT_TOKEN_FILE}"
 chmod 0600 "${AGENT_TOKEN_FILE}"
 fi
 
+# --- passwordless-ceremony key + forced backup (review S-16) ---
+# The key that decrypts the human's sealed-seed envelope belongs to the
+# daemon user: <prefix>/ceremony/private.pem, 0600 in a 0700 dir, made
+# here AS that user. Only its PUBLIC half ever leaves (`spellbook status`,
+# `spellbook ceremony-key`, the root-owned published copy below), for the
+# agent to put in the hosted ceremony page link (review S-17). The same key
+# opens the hosted pages' seal/unlock/restore envelopes
+# (`sudo -u spellbook spellbook-ceremony apply|restore`).
+# Upgrade first MOVES any key the old agent-run ceremony left in the
+# agent's workspace into that dir (overwrite + unlink the original), so an
+# envelope sealed to it keeps opening at daemon start.
+if [ "$UPGRADE" = "1" ]; then
+  AGENT_HOME="$(getent passwd "$AGENT_USER" | cut -d: -f6)"
+  LEGACY_CEREMONY_KEY="$("${VENV}/bin/python" - "$PREFIX" "$AGENT_HOME" <<'EOF'
+import json, os, sys
+prefix, home = sys.argv[1], sys.argv[2]
+try:
+    p = json.load(open(os.path.join(prefix, "spellbook.json"))).get("ceremony_key_path") or ""
+except Exception:
+    p = ""
+if p.startswith("~"):
+    p = home + p[1:]
+print(p or os.path.join(home, "workspace/.spellbook/seed-derive/private.pem"))
+EOF
+)"
+  if [ -e "$LEGACY_CEREMONY_KEY" ] || [ -L "$LEGACY_CEREMONY_KEY" ]; then
+    if "${VENV}/bin/spellbook" ceremony-adopt --prefix "${PREFIX}" --from "$LEGACY_CEREMONY_KEY"; then
+      log "moved the agent-held ceremony key into ${PREFIX}/ceremony (S-16); treat it as exposed and re-seed when practical"
+    else
+      warn "could NOT move the ceremony key at ${LEGACY_CEREMONY_KEY} out of the"
+      warn "agent's reach (S-16). The agent can still decrypt the live seed. Fix:"
+      warn "  sudo ${VENV}/bin/spellbook ceremony-adopt --prefix ${PREFIX} --from ${LEGACY_CEREMONY_KEY}"
+    fi
+  fi
+fi
+CEREMONY_FPR="$(runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/spellbook" ceremony-key \
+  --prefix "${PREFIX}" | sed -n 's/^fingerprint: *//p')" \
+  || fail "ceremony key creation failed (as ${SPELLBOOK_USER})"
+[ -n "$CEREMONY_FPR" ] || fail "ceremony key creation printed no fingerprint (as ${SPELLBOOK_USER})"
+log "daemon ceremony key ready. Spellbook daemon key fingerprint (the hosted"
+log "ceremony pages show it; compare at least the first 16 digits there):"
+log "  ${CEREMONY_FPR}"
+# Publish the PUBLIC half where the agent can read it (the prefix is 0700):
+# root-owned, so the agent cannot swap it. spellbook.json ceremony_pub_path
+# points here on fresh installs; upgrades print the env var instead.
+CEREMONY_PUB_PUBLISHED="/usr/local/share/spellbook/ceremony.pub.pem"
+mkdir -p "$(dirname "$CEREMONY_PUB_PUBLISHED")"
+chown root:root "$(dirname "$CEREMONY_PUB_PUBLISHED")"; chmod 0755 "$(dirname "$CEREMONY_PUB_PUBLISHED")"
+runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/spellbook" ceremony-key --prefix "${PREFIX}" --pem \
+  > "${CEREMONY_PUB_PUBLISHED}.tmp" || fail "could not export the ceremony public key"
+chown root:root "${CEREMONY_PUB_PUBLISHED}.tmp"; chmod 0644 "${CEREMONY_PUB_PUBLISHED}.tmp"
+mv -f "${CEREMONY_PUB_PUBLISHED}.tmp" "$CEREMONY_PUB_PUBLISHED"
+log "ceremony public key published at ${CEREMONY_PUB_PUBLISHED}"
+if [ "$UPGRADE" = "1" ]; then
+  log "  (agent wiring: export SPELLBOOK_CEREMONY_PUB=${CEREMONY_PUB_PUBLISHED} if spellbook.json has no ceremony_pub_path)"
+fi
+if [ "$UPGRADE" != "1" ]; then
+  # A fresh or restored install is BACKUP-PENDING: the daemon refuses
+  # fund-moving routes until the human proves the paper backup (§6).
+  # Upgrades never flip this on, so running wallets are not blocked.
+  runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" -c \
+    "import sys; from spellbook import custody; custody.require_backup(sys.argv[1])" "${PREFIX}" \
+    || fail "could not record the backup-pending state"
+fi
+
 # --- install record + agent self-serve upgrade path (fresh and upgrade) ---
 # VERSION is the machine's canonical version. install.env is root-owned and
 # records who installed and with what options, so --upgrade can run without
 # re-asking (and so the upgrade wrapper can exec install.sh as root).
-# ${PREFIX}/lib/install.sh is the pinned installer copy the privileged
+# ${ROOT_LIB}/install.sh is the pinned installer copy the privileged
 # wrapper runs; /usr/local/bin/spellbook-upgrade is the agent's only root
 # action (sudoers, NOPASSWD, exact path). All of these are refreshed on every
 # install so upgrades keep the self-serve path working.
+#
+# Every root-trusted file is copied from $SRC (the root-owned, verified
+# release tree, or the human's --from-dir checkout), never from $STAGE,
+# which the spellbook user owns and pip builds in (review S-29). The
+# installer copy comes from the release being installed, not from the
+# running script: a wrapper-driven upgrade runs ${ROOT_LIB}/install.sh, and
+# copying that onto itself failed under `set -e` (review S-25). Each file is
+# written to a temp name and renamed, so the running copy keeps its inode.
 log "writing install record ..."
-[ -f "${STAGE}/VERSION" ] || fail "release tree has no VERSION file — refusing to install an unversioned build"
-NEW_VERSION="$(cat "${STAGE}/VERSION")"
+[ -f "${SRC}/VERSION" ] || fail "release tree has no VERSION file — refusing to install an unversioned build"
+NEW_VERSION="$(tr -d '[:space:]' < "${SRC}/VERSION")"
 printf '%s\n' "$NEW_VERSION" > "${PREFIX}/VERSION"
 chmod 0644 "${PREFIX}/VERSION"
-[ -f "${STAGE}/scripts/spellbook-upgrade" ] \
+[ -f "${SRC}/scripts/spellbook-upgrade" ] \
   || fail "release tree has no scripts/spellbook-upgrade — refusing to install a build without the self-serve path"
-mkdir -p "${PREFIX}/lib"
-# INSTALLER_SRC was resolved before cd "$WORK" (see above) — $0 may be
-# relative and no longer resolves from here.
-cp "$INSTALLER_SRC" "${PREFIX}/lib/install.sh"
-chown root:root "${PREFIX}/lib/install.sh"; chmod 0755 "${PREFIX}/lib/install.sh"
-# Seal ceremony HTML pages — offline human/agent handoff for fresh installs.
-# The agent embeds a per-ceremony seal public key before handing to the human.
+command -v git >/dev/null 2>&1 \
+  || warn "git is not installed: spellbook-upgrade checks releases against the canonical repo with git and refuses until it is"
+# root_install SRC DEST MODE: atomic root:root copy.
+root_install() {
+  cp "$1" "${2}.new.$$"
+  chown root:root "${2}.new.$$"; chmod "$3" "${2}.new.$$"
+  mv -f "${2}.new.$$" "$2"
+}
+mkdir -p "$ROOT_LIB"; chown root:root "$ROOT_LIB"; chmod 0755 "$ROOT_LIB"
+NEW_INSTALLER="${SRC}/install.sh"
+[ -f "$NEW_INSTALLER" ] || NEW_INSTALLER="$INSTALLER_SRC"
+root_install "$NEW_INSTALLER" "${ROOT_LIB}/install.sh" 0755
+printf '%s\n' "$NEW_VERSION" > "${ROOT_LIB}/VERSION.new.$$"
+chown root:root "${ROOT_LIB}/VERSION.new.$$"; chmod 0644 "${ROOT_LIB}/VERSION.new.$$"
+mv -f "${ROOT_LIB}/VERSION.new.$$" "${ROOT_LIB}/VERSION"
+# The pre-S-29 locations inside ${PREFIX} are retired.
+rm -f "${PREFIX}/lib/install.sh" "${PREFIX}/install.env"
+# Ceremony reference copies (review S-17): the pages a human types into are
+# HOSTED (https://spellbook.awizard.dev/ceremony/); the ceremony/*.html here
+# are pointers to them, and asset-index.json is this release's copy of the
+# published hash index (compare: python -m spellbook.asset_index verify).
 # See ceremony/README.md.
 if [ -d "${STAGE}/ceremony" ]; then
   mkdir -p "${PREFIX}/share/ceremony"
-  cp "${STAGE}/ceremony/"*.html "${STAGE}/ceremony/README.md" "${PREFIX}/share/ceremony/" 2>/dev/null || true
+  cp "${STAGE}/ceremony/"*.html "${STAGE}/ceremony/README.md" \
+     "${STAGE}/ceremony/asset-index.json" "${PREFIX}/share/ceremony/" 2>/dev/null || true
   chown -R root:root "${PREFIX}/share/ceremony"; chmod 0755 "${PREFIX}/share/ceremony"
   chmod 0644 "${PREFIX}"/share/ceremony/*
-  log "installed seal ceremony pages to ${PREFIX}/share/ceremony/"
+  log "installed ceremony pointer pages and asset index to ${PREFIX}/share/ceremony/"
 fi
-cat > "${PREFIX}/install.env" <<EOF
-# written by install.sh — root-owned; the spellbook-upgrade wrapper sources this
+# Kept across upgrades when the human set them: the canonical repo and the
+# delay window the wrapper enforces (empty = GitHub main, 24 h).
+OLD_CANONICAL_REPO=""; OLD_DELAY_HOURS=""
+if [ -f "${ROOT_LIB}/install.env" ]; then
+  OLD_CANONICAL_REPO="$(sed -n 's/^SPELLBOOK_CANONICAL_REPO="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "${ROOT_LIB}/install.env" | tail -1)"
+  OLD_DELAY_HOURS="$(sed -n 's/^SPELLBOOK_UPGRADE_DELAY_HOURS="\{0,1\}\([0-9]*\)"\{0,1\}$/\1/p' "${ROOT_LIB}/install.env" | tail -1)"
+fi
+cat > "${ROOT_LIB}/install.env.new.$$" <<EOF
+# written by install.sh — root-owned; the spellbook-upgrade wrapper parses this
 SPELLBOOK_AGENT_USER="${AGENT_USER}"
 SPELLBOOK_HUMAN_USER="${HUMAN_USER}"
 SPELLBOOK_NO_SAGE="${NO_SAGE}"
 SPELLBOOK_SAGE_COMMIT="${SAGE_COMMIT}"
 SPELLBOOK_INSTALLED_TAG="${TAG:-from-dir}"
 SPELLBOOK_RELEASE_KEY_FPR="${RELEASE_KEY_FPR:-}"
+SPELLBOOK_CANONICAL_REPO="${OLD_CANONICAL_REPO}"
+SPELLBOOK_UPGRADE_DELAY_HOURS="${OLD_DELAY_HOURS}"
+SPELLBOOK_HTTPS_PROXY="${PROXY_HTTPS}"
+SPELLBOOK_HTTP_PROXY="${PROXY_HTTP}"
+SPELLBOOK_NO_PROXY="${PROXY_NO}"
 EOF
-chown root:root "${PREFIX}/install.env"; chmod 0600 "${PREFIX}/install.env"
-cp "${STAGE}/scripts/spellbook-upgrade" /usr/local/bin/spellbook-upgrade
-chown root:root /usr/local/bin/spellbook-upgrade; chmod 0755 /usr/local/bin/spellbook-upgrade
-printf '# Spellbook: the agent user may run the signed-release upgrade wrapper only.\n%s ALL=(root) NOPASSWD: /usr/local/bin/spellbook-upgrade\n' \
+chown root:root "${ROOT_LIB}/install.env.new.$$"; chmod 0600 "${ROOT_LIB}/install.env.new.$$"
+mv -f "${ROOT_LIB}/install.env.new.$$" "${ROOT_LIB}/install.env"
+root_install "${SRC}/scripts/spellbook-upgrade" /usr/local/bin/spellbook-upgrade 0755
+# env_reset for this one command whatever the host's defaults; the wrapper
+# also refuses a steered environment and runs its children under env -i.
+printf '# Spellbook: the agent user may run the signed-release upgrade wrapper only.\nDefaults!/usr/local/bin/spellbook-upgrade env_reset\n%s ALL=(root) NOPASSWD: /usr/local/bin/spellbook-upgrade\n' \
   "$AGENT_USER" > /etc/sudoers.d/spellbook-agent-upgrade
 chmod 0440 /etc/sudoers.d/spellbook-agent-upgrade
 if command -v visudo >/dev/null 2>&1; then
@@ -843,6 +1024,18 @@ fi
 log "install record written (version ${NEW_VERSION}; self-serve upgrade ready)"
 
 log "installing the systemd unit ..."
+# The daemon makes its own HTTPS RPC calls (EVM/Solana); on hosts whose
+# egress goes through a proxy it must inherit the proxy or its RPC calls
+# die with SSL WRONG_VERSION_NUMBER (b8ac6c8; values validated above).
+PROXY_UNIT_ENV=""
+for pv in "https_proxy=${PROXY_HTTPS}" "HTTPS_PROXY=${PROXY_HTTPS}" \
+          "http_proxy=${PROXY_HTTP}" "HTTP_PROXY=${PROXY_HTTP}" \
+          "no_proxy=${PROXY_NO}" "NO_PROXY=${PROXY_NO}"; do
+  if [ -n "${pv#*=}" ]; then
+    PROXY_UNIT_ENV="${PROXY_UNIT_ENV}Environment=${pv}
+"
+  fi
+done
 cat > /etc/systemd/system/spellbookd.service <<EOF
 [Unit]
 Description=Spellbook policy daemon (per-agent wallet custody)
@@ -853,7 +1046,7 @@ Type=simple
 User=${SPELLBOOK_USER}
 Group=${SPELLBOOK_USER}
 RuntimeDirectory=spellbook
-ExecStart=${VENV}/bin/spellbookd --socket ${SOCK_PATH} --config ${PREFIX}
+${PROXY_UNIT_ENV}ExecStart=${VENV}/bin/spellbookd --socket ${SOCK_PATH} --config ${PREFIX}
 Restart=on-failure
 RestartSec=5
 # No auto-update, no network egress needed. Secrets never leave this host.
@@ -902,9 +1095,9 @@ chmod 0600 "${PREFIX}/drill-status.json"
 #   - on a real terminal (stdin AND stdout TTYs) it writes the words to
 #     /dev/tty, waits for Enter, clears the screen, then asks for 3 SET 1
 #     words back; it refuses pipes and the agent's OS user;
-#   - for the seal ceremony (the human reaches only the agent) it encrypts
-#     the backup to the reveal key the human's page made (--reveal-key) and
-#     prints only that envelope.
+#   - for the hosted backup page (the human reaches only the agent) it
+#     encrypts the backup to the reveal key the human's browser made
+#     (--reveal-key) and prints only that envelope.
 # Non-interactive runs (agent bootstrap, CI, cloud-init, `script`) complete
 # the install and print how the backup leaves the machine later.
 if [ "$UPGRADE" = "1" ]; then
@@ -958,32 +1151,47 @@ runuser -u "${AGENT_USER}" -- env "SPELLBOOK_SOCKET=${SOCK_PATH}" \
   "${VENV}/bin/spellbook" --token-file "${AGENT_TOKEN_FILE}" addresses
 
 echo
+BACKUP_CONFIRMED=0
 if [ -t 0 ] && [ -t 1 ]; then
   log "PAPER BACKUP (§6): shown on this terminal once, then cleared, then"
-  log "3 SET 1 words are asked back. Have pen and paper ready."
-  if ! "${VENV}/bin/spellbook" export --prefix "${PREFIX}"; then
+  log "3 SET 1 words are asked back. Have pen and paper ready. The wallet"
+  log "refuses to move funds until this check passes (S-16)."
+  if "${VENV}/bin/spellbook" export --prefix "${PREFIX}"; then
+    BACKUP_CONFIRMED=1
+  else
     warn "the paper backup was NOT shown or NOT verified (see the reason above)."
     warn "Show it again, as the human, from a terminal:  sudo ${VENV}/bin/spellbook export --prefix ${PREFIX}"
   fi
 else
+  log "BACKUP PENDING (S-16): read-only routes work; every fund-moving route"
+  log "refuses until the human proves the paper backup with one of the"
+  log "commands below."
   log "PAPER BACKUP (§6): NOT shown — this run has no terminal (stdin/stdout"
   log "is a pipe, a log or an agent's tool output). The install is complete;"
   log "the words exist only in ${PREFIX} (0600, ${SPELLBOOK_USER}). They leave"
   log "the machine one of two ways, nothing secret on any stdout:"
   log "  human at a terminal, own login:"
   log "    sudo ${VENV}/bin/spellbook export --prefix ${PREFIX}"
-  log "  seal ceremony (human reaches only the agent): the human's page"
-  log "  (${PREFIX}/share/ceremony/seal-password-encryptor.html, Step 1) makes"
-  log "  a reveal key; the agent relays its PUBLIC half and the envelope only:"
+  log "  hosted backup page (human reaches only the agent): the human opens"
+  log "  https://spellbook.awizard.dev/ceremony/backup.html, which makes a"
+  log "  reveal key; the agent relays its PUBLIC half and the envelope only:"
   log "    sudo ${VENV}/bin/spellbook export --prefix ${PREFIX} --reveal-key <public key>"
+  log "  then, with the one-time code inside that backup (stdin, never argv):"
+  log "    sudo ${VENV}/bin/spellbook backup-confirm --prefix ${PREFIX}"
 fi
 
 cat <<EOF
 
 SEAL THE SEED (required before the install is called done — survives
 machine wipes, docs/SEALED_SEED.md): a password-locked copy of the seed the
-human can unlock after a wipe from a one-time local page:
-    ${VENV}/bin/spellbook-seed --config-dir ${PREFIX} --sealed <persistent path> serve
+human can unlock after a wipe. The human types the password on the hosted
+seal page, in their own browser; the link (public key only) comes from:
+    ${VENV}/bin/spellbook-ceremony url seal
+and the daemon user opens the envelope the page prints:
+    sudo -u ${SPELLBOOK_USER} ${VENV}/bin/spellbook-ceremony apply <envelope file>
+(A human at this machine may instead run the local viewer as the daemon
+user; it refuses the agent's OS user:
+    sudo -u ${SPELLBOOK_USER} ${VENV}/bin/spellbook-seed --config-dir ${PREFIX} --sealed <persistent path> serve)
 
 NEXT STEPS (all opt-in):
   - policy knobs: approval_threshold, allowlists, velocity caps (default: all off)
@@ -1018,13 +1226,24 @@ HUMAN'S (deliver out-of-band NOW, then never touch again):
   2. Paper backup — you never see the words. Either your human runs
        sudo ${VENV}/bin/spellbook export --prefix ${PREFIX}
      on their own terminal, or (they can only reach you) you hand them
-     ${PREFIX}/share/ceremony/seal-password-encryptor.html: they make a
-     reveal key (Step 1) and paste you its PUBLIC half; you run
+     https://spellbook.awizard.dev/ceremony/backup.html: they make a
+     reveal key (step 1) and paste you its PUBLIC half; you run
        sudo ${VENV}/bin/spellbook export --prefix ${PREFIX} --reveal-key <public key>
      and paste back the envelope it prints; they decrypt it on the page
-     (Step 2) and write both sets down, offline, two copies in two places.
-  3. Then seal the seed (required): spellbook-seed serve, one-time link to
-     your human; they set the password on that page; you never see it.
+     (step 2) and write the words down, offline, two copies in two places.
+     The decrypted backup ends with a BACKUP CONFIRMATION CODE; when they
+     give it to you, pipe it (never argv) to
+       sudo ${VENV}/bin/spellbook backup-confirm --prefix ${PREFIX}
+     Until then the daemon is BACKUP PENDING: reads work, and every
+     fund-moving route refuses (S-16). spellbook status shows the state.
+  3. Then seal the seed (required): give your human the hosted seal link
+       ${VENV}/bin/spellbook-ceremony url seal
+     (public key only; or the spellbook_seed_viewer tool). They set the
+     password in their own browser after checking the Spellbook daemon key
+     fingerprint against the one this installer logged, and paste you an
+     envelope. Save it to a file; the daemon user opens it:
+       sudo -u ${SPELLBOOK_USER} ${VENV}/bin/spellbook-ceremony apply <file>
+     You never see the password and cannot open the envelope.
 
 VERIFY BEFORE YOU FINISH:
   spellbook doctor    # every check green
@@ -1034,4 +1253,13 @@ From here you self-serve: spellbook upgrade --check / spellbook upgrade
 <tag> (signed releases, forward-only) and spellbook doctor --repair.
 ================================================================
 EOF
+fi
+# Forced backup (S-16): an interactive install is not finished until the
+# human has proven the paper backup. Everything is installed and the
+# daemon runs BACKUP PENDING (reads only); the exit status says so.
+if [ "$UPGRADE" != "1" ] && [ -t 0 ] && [ -t 1 ] && [ "${BACKUP_CONFIRMED:-0}" != "1" ]; then
+  warn "INSTALL INCOMPLETE: the paper backup is not confirmed. The daemon is"
+  warn "running BACKUP PENDING: read-only routes work, fund-moving routes refuse."
+  warn "Finish it, as the human, from a terminal:  sudo ${VENV}/bin/spellbook export --prefix ${PREFIX}"
+  exit 3
 fi

@@ -1,0 +1,156 @@
+{
+ "api_routes": [
+  {
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/activity",
+   "sha256": "e1108c29f446245315e6d3b92de4bacc8088d73f2d7da95d68e1d63dfa546c88",
+   "source": "web/app/api/activity/route.ts"
+  },
+  {
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/auth/challenge",
+   "sha256": "e0ee527eb5160524628776048463929dbe39ac41dddcedb21d5cc1c2d0a82ce5",
+   "source": "web/app/api/auth/challenge/route.ts"
+  },
+  {
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/auth/logout",
+   "sha256": "eeedb1c1299bbbe34ab026c15a564771220d6555b66f6ceb5d2900bfcb3b318d",
+   "source": "web/app/api/auth/logout/route.ts"
+  },
+  {
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/auth/verify",
+   "sha256": "6ed01ae78ca2e45aed8f5063db2223be184ffdf84e4d0ee71d7225e6bcf0f320",
+   "source": "web/app/api/auth/verify/route.ts"
+  },
+  {
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/auth/viewer",
+   "sha256": "cf3b960a68097ec4a7b9089f8e6b7521c9edd5a2616459e9de58f8fcc7e01cbf",
+   "source": "web/app/api/auth/viewer/route.ts"
+  },
+  {
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/auth/viewer-token",
+   "sha256": "b030f90070149bed10afe90a25006e657bb811500cdc9bb54c9595f95a5607ea",
+   "source": "web/app/api/auth/viewer-token/route.ts"
+  },
+  {
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/holdings",
+   "sha256": "458071bcc733d7ff2335f140437d07fc25ab333abdc920b4d9e16d61afb31dca",
+   "source": "web/app/api/holdings/route.ts"
+  },
+  {
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/lp-positions",
+   "sha256": "da41c4930e49ef4a906b4e3e13d012e6099323d14feedc56940cdc58b34b2add",
+   "source": "web/app/api/lp-positions/route.ts"
+  },
+  {
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/swap/quote",
+   "sha256": "e9d22f9fa77837bf528dc617531504e7796b41020379e53a43459aa6a8a9165b",
+   "source": "web/app/api/swap/quote/route.ts"
+  }
+ ],
+ "assets": [
+  {
+   "bytes": 2924,
+   "path": "/ceremony/backup.js",
+   "sha256": "908526943e460098c9ddc2f27f8ded9ba6ccd9f677bf35328f07d1e94405c9dd",
+   "sri": "sha384-/4tzpDbhMuq+WHB/RUNx1ZHDfNnxH2h9ReQ8AAVd8xaMpXJ/j0dF787becZxp8sR"
+  },
+  {
+   "bytes": 17353,
+   "path": "/ceremony/bip39.js",
+   "sha256": "e4b118dc40c1d53cdb76483a1cf351d4d410b842f16e430c6b3f724e24169516",
+   "sri": "sha384-0qxqvj/gC7RUgEuIChe4epjlWjKcZDvN1e0VOxRZuCGf5WyjqO5sBcBSqVoItwih"
+  },
+  {
+   "bytes": 2635,
+   "path": "/ceremony/ceremony.css",
+   "sha256": "b662e3bfded877278238edd4873c7f267c9050ec2ff6e17c19456d8fe3c60a97",
+   "sri": "sha384-WNsHLN+O2nzkXkIM+JeDphAgFyPztWrawwG4fo4LCk/Kbsr/RoXCyoiMfi07VhsM"
+  },
+  {
+   "bytes": 9742,
+   "path": "/ceremony/common.js",
+   "sha256": "375a3cdb7aeadc42976cfc7bbcadadd1b1dc1baa28d065383eead47092497999",
+   "sri": "sha384-IrrVPr8wTyyGxSBBT6VOjYqGvb3a2VURC0VSpjjCwJM7m9XpRj/upkyYNBmA+G00"
+  },
+  {
+   "bytes": 2649,
+   "path": "/ceremony/restore.js",
+   "sha256": "475350ff229e92a3d84e388939f743215d876101d4207450db6438b3e943e89e",
+   "sri": "sha384-vgYoxxFDOaRHGUqTl/hLGg+94f93Q0w0ESCZrkyaZgyzFRibYflZwaLVe+e6SYbY"
+  },
+  {
+   "bytes": 3030,
+   "path": "/ceremony/seal.js",
+   "sha256": "def886c97891112587afe54a0c63c930974c09d08e6816fdc326c858b4495442",
+   "sri": "sha384-cUeKJBJ1TP1SnHx/rWWD+DLpKYiLNUcAebY0VyhNxrcEN6lbv5GAFX1qjahTKMqT"
+  }
+ ],
+ "ceremony_csp": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'",
+ "ceremony_meta_csp": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'none'; form-action 'none'; base-uri 'none'",
+ "format": "spellbook-asset-index",
+ "origin": "https://spellbook.awizard.dev",
+ "pages": [
+  {
+   "bytes": 4094,
+   "loads": [
+    "/ceremony/ceremony.css",
+    "/ceremony/common.js",
+    "/ceremony/backup.js"
+   ],
+   "path": "/ceremony/backup.html",
+   "sha256": "ef2139a0a4f2b3f0025f19a71c31eb134bff2cfa3c1cbcb26e192e272f2d1c05",
+   "sri": "sha384-NIVnqjJSDlKjEsfedjVb9HviDwimcsdfOyGQq3Bm2lhKNBsyLU+1hyafQ+7D78zr"
+  },
+  {
+   "bytes": 4240,
+   "loads": [
+    "/ceremony/ceremony.css",
+    "/ceremony/bip39.js",
+    "/ceremony/common.js",
+    "/ceremony/restore.js"
+   ],
+   "path": "/ceremony/restore.html",
+   "sha256": "7d97e394bc1ec90470c7005e1c94704ff1b6bd09053d67954e8c38a39a25b67b",
+   "sri": "sha384-rpF2x9MvURWkWKg1TwnKC1EXd17KUtAe36Q4Fh0d+LjbK89YkHQgzlQHKE949ACO"
+  },
+  {
+   "bytes": 4399,
+   "loads": [
+    "/ceremony/ceremony.css",
+    "/ceremony/bip39.js",
+    "/ceremony/common.js",
+    "/ceremony/seal.js"
+   ],
+   "path": "/ceremony/seal.html",
+   "sha256": "7e841338708d3575ce1b68b645dc997e3d67d58c91122de5541168790b6c26c1",
+   "sri": "sha384-efvU1z9Ecrnx0GLthkXdIyHX5On0ElAZpFV8F3EeTfGTAp1anDBMxXYklhRKbVGf"
+  }
+ ],
+ "version": 1
+}

@@ -30,8 +30,11 @@ spellbook-seed status      # 0 unlocked · 3 locked · 4 unsealed · 7 no_access
 spellbook upgrade --check  # newer signed release? follow its upgrade notes
 ```
 
-- `locked` or `unsealed`: run `spellbook-seed serve` and give your human the
-  link. They enter their password there, never in chat.
+- `locked` or `unsealed`: run `spellbook-ceremony url seal` (or the
+  `spellbook_seed_viewer` tool) and give your human the hosted link. They
+  enter their password there, in their own browser, never in chat, and
+  paste you an encrypted envelope; the daemon user opens it
+  (`sudo -u spellbook spellbook-ceremony apply FILE`).
   ([SEALED_SEED.md](SEALED_SEED.md))
 - Upgrade available: `spellbook upgrade <tag>`, then do the steps in
   [AGENT_LIFECYCLE.md → Upgrade notes](AGENT_LIFECYCLE.md#upgrade-notes).
@@ -108,7 +111,7 @@ spellbook ledger
   the daemon's OS user owns them, and the API is the only door.
 - Never put key material, tokens, or mnemonics in chat, logs, or tools.
 - Never ask for, handle, or pass along your human's **seal password**. They
-  type it only into the `spellbook-seed serve` page or their own terminal.
+  type it only into the hosted seal page or their own terminal.
 - Nothing goes on-chain without explicit instruction — the daemon itself
   can't submit yet (chain RPC is the next build phase), and when it can,
   testnet needs a go-ahead and mainnet needs a separate one with amounts.

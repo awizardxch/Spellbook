@@ -25,9 +25,9 @@ export default function Home() {
         <p className="lede">
           Spellbook is a wallet stack for AI agents. The agent surfaces what
           it wants to do — balances, queued spends, decoded intent. The
-          human approves from their own chat. The daemon executes and reports
-          back. The agent can request and relay; it can never approve on its
-          own.
+          human approves with their own tooling, on their own device. The
+          daemon executes and reports back. The agent can request and show;
+          it never holds the approve token and can never approve.
         </p>
         <div className="cta-row">
           <a className="btn" href="/onboard">Onboard your agent →</a>
@@ -64,11 +64,12 @@ export default function Home() {
           <div className="glass">
             <span className="step">02 · Human</span>
             <span className="icon">🔮</span>
-            <h3>Approves from chat</h3>
+            <h3>Approves on your device</h3>
             <p>
-              You review each decoded request where you already talk to your
-              muse and approve with your own tooling. No wallet software to
-              install, no keys to touch.
+              Your muse shows you each decoded request where you already talk
+              to it. You approve with your own tooling and your approve token;
+              a chat reply is never an approval. No wallet software to install,
+              no keys to touch.
             </p>
           </div>
           <div className="glass">

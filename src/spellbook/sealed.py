@@ -12,7 +12,12 @@ words into the machine. The sealed seed makes that routine:
           with the same wallet.
   serve   a one-time local web page (the "human viewer") for seal/unlock,
           so the password goes from the human's browser straight to this
-          process — never through the agent's conversation.
+          process — never through the agent's conversation. Started by
+          the HUMAN as the daemon user or root; it refuses the agent's OS
+          user (review S-18). The agent's route is the hosted seal page
+          (spellbook.ceremony): the password is encrypted in the human's
+          browser to the daemon's public key and opened by
+          `spellbook-ceremony apply` as the daemon user.
 
 Format (JSON, version 1):
   header  {format, version, kdf: {name: "scrypt", n, r, p, salt},
@@ -431,11 +436,16 @@ def status(*, config_dir: str | None = None, path: str | None = None) -> dict:
 
 STATE_HINT = {
     "unlocked": "seed present and matches the seal — nothing to do",
-    "locked": "seed is SEALED and not loaded: ask your human to unlock it "
-              "(spellbook-seed serve, then they open the link and enter "
-              "their password). Never ask for the password in chat.",
+    "locked": "seed is SEALED and not loaded: give your human the hosted "
+              "seal page link (`spellbook-ceremony url seal`; it carries only "
+              "the daemon's public key). They enter the password in their own "
+              "browser and return an encrypted envelope, which the daemon "
+              "user opens: `sudo -u spellbook spellbook-ceremony apply FILE`. "
+              "Never ask for the password in chat.",
     "unsealed": "seed present but NOT sealed: a VM wipe now needs the paper "
-                "backup. Ask your human to seal it (spellbook-seed serve).",
+                "backup. Give your human the hosted seal page link "
+                "(`spellbook-ceremony url seal`) and relay the envelope they "
+                "return to the daemon user (`spellbook-ceremony apply`).",
     "mismatch": "seed on disk differs from the seal — do not unlock over it; "
                 "tell your human (re-seal only if the disk seed is the right one)",
     "empty": "no seed and no seal: fresh install, or restore from the paper "
@@ -647,8 +657,9 @@ def _read_password(a, confirm: bool) -> str:
     if a.password_stdin:
         return sys.stdin.readline().rstrip("\n")
     if not sys.stdin.isatty():
-        raise SealError("no TTY: pass --password-stdin, or use "
-                        "`spellbook-seed serve` for the browser viewer")
+        raise SealError("no TTY: pass --password-stdin from the human's own "
+                        "pipe, or use the hosted seal page "
+                        "(`spellbook-ceremony url seal`)")
     pw = getpass.getpass("Seal password: ")
     if confirm and getpass.getpass("Repeat password: ") != pw:
         raise SealError("passwords do not match")
@@ -677,7 +688,9 @@ def main(argv=None) -> int:
         if name == "seal":
             p.add_argument("--replace", action="store_true",
                            help="re-seal the SAME wallet (password change)")
-    v = sub.add_parser("serve", help="one-time local web page for the human")
+    v = sub.add_parser("serve", help="one-time local web page, started by "
+                       "the HUMAN as the daemon user or root (refuses the "
+                       "agent's OS user; agents use the hosted seal page)")
     v.add_argument("--host", default="127.0.0.1")
     v.add_argument("--port", type=int, default=8787)
     v.add_argument("--allow-remote", action="store_true",
@@ -711,6 +724,16 @@ def main(argv=None) -> int:
                 print("unlocked -> " + ", ".join(r["written"]))
             return 0
         if a.cmd == "serve":
+            # Review S-18: the human starts the local viewer, as the daemon
+            # user or root; never the agent (its OS user would hold the
+            # password and the decrypted seed). The agent's route is the
+            # hosted seal page (spellbook.ceremony).
+            from spellbook import ceremony
+            try:
+                ceremony.refuse_agent_uid(a.config_dir)
+            except ceremony.CeremonyError as e:
+                raise SealError(str(e) + ". Use the hosted seal page: "
+                                "`spellbook-ceremony url seal`")
             if a.host not in ("127.0.0.1", "localhost", "::1") \
                     and not a.allow_remote:
                 raise SealError("non-loopback --host needs --allow-remote "

@@ -89,4 +89,13 @@ def upgrade_check(prefix_override=None) -> dict:
         out["upgrade_notes"] = (f"https://github.com/{REPO}/blob/{latest}/"
                                 "docs/AGENT_LIFECYCLE.md#upgrade-notes")
         out["how"] = f"spellbook upgrade {latest}"
+        # The root wrapper decides, not this check: it installs only a tag
+        # signed by the pinned key, on the canonical main branch, with its
+        # hash published there, not yanked, and past the delay window
+        # (review S-22). Exit 75 = not yet; try again next session.
+        out["gate"] = ("installs only once the signed tag is on main, its "
+                       "hash is published there, it is not yanked, and it "
+                       "is past the delay window (default 24 h); a 'NOT "
+                       "YET' refusal (exit 75) is expected: retry next "
+                       "session, never work around it")
     return out

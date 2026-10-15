@@ -12,7 +12,9 @@ same surface as TOOLS: named, JSON-Schema-described functions. Adapters:
 
 Security is the daemon's, unchanged (SPEC S7): these tools hold the
 REQUEST token only. There is no approve, reject, reveal, seal-password or
-unlock-password tool, and none can be added through `spellbook_call`
+unlock-password tool, no tool starts or serves a page (the human's
+ceremony pages are hosted; review S-17/S-18), and none can be added
+through `spellbook_call`
 (it dispatches to AgentClient methods only, which have no approve path).
 Spends come back approved / queued / denied per the HUMAN's policy.
 
@@ -26,12 +28,8 @@ Configuration (environment of the process running the tools):
 import inspect
 import json
 import os
-import select
-import subprocess
-import sys
-import time
 
-from spellbook import sealed
+from spellbook import ceremony, sealed
 from spellbook.client import AgentClient, SpellbookError
 
 DEFAULT_SOCKET = "/run/spellbook/spellbook.sock"
@@ -83,57 +81,109 @@ _CHAIN = {"type": "string",
 
 # ---------------------------------------------------------------- handlers
 
+# Review 2026-10-15 S-17/S-18: the agent never runs or serves a page the
+# human types a secret into, and never holds a key that opens one. The
+# seed tools only hand out the HOSTED page link (public key in the URL
+# fragment) and inspect envelope headers; the daemon user opens envelopes.
+_RELAY = ("Save the envelope your human sends you to a file and have the "
+          "daemon user open it: `sudo -u spellbook spellbook-ceremony {cmd}`. "
+          "You cannot open it yourself: you never hold the ceremony private "
+          "key.")
+AGENT_HINT = dict(sealed.STATE_HINT)
+AGENT_HINT.update({
+    "locked": "seed is SEALED and not loaded: call spellbook_seed_viewer and "
+              "give your human the hosted link it returns. They type the "
+              "password in their own browser and give you an encrypted "
+              "envelope; relay it to the daemon user. Never ask for the "
+              "password in chat.",
+    "unsealed": "seed present but NOT sealed: a VM wipe now needs the paper "
+                "backup. Call spellbook_seed_viewer and give your human the "
+                "hosted seal link; relay the envelope they return.",
+})
+
+
+def _relay(kind: str) -> str:
+    return _RELAY.format(cmd="restore <file> --out <new path>"
+                         if kind == "restore" else "apply <file>")
+
+
 def _seed_status(_args):
     st = sealed.status()
-    st["hint"] = sealed.STATE_HINT[st["state"]]
+    st["hint"] = AGENT_HINT[st["state"]]
     return st
 
 
-_VIEWERS: list = []  # running viewer processes, reaped on the next call
-
-
 def _seed_viewer(args):
-    _VIEWERS[:] = [p for p in _VIEWERS if p.poll() is None]
+    page = args.get("page") or "seal"
+    if page not in ("seal", "restore", "backup"):
+        raise ToolError("page must be seal, restore or backup")
     st = sealed.status()
-    if st["state"] not in ("locked", "unsealed"):
-        return {"state": st["state"], "started": False,
-                "hint": sealed.STATE_HINT[st["state"]]}
-    port = args.get("port")
-    port = 8787 if port is None else int(port)
-    cmd = [sys.executable, "-m", "spellbook.sealed", "serve", "--port", str(port)]
-    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                            start_new_session=True, bufsize=0)
-    # serve prints exactly two lines at startup (the link, then guidance);
-    # read both (raw, so select sees every byte) so the pipe never breaks
-    # under it.
-    buf, deadline = b"", time.monotonic() + 10
-    fd = proc.stdout.fileno()
-    while buf.count(b"\n") < 2 and time.monotonic() < deadline:
-        r, _, _ = select.select([fd], [], [], 0.2)
-        if r:
-            chunk = os.read(fd, 4096)
-            if not chunk:
-                break
-            buf += chunk
-    lines = buf.decode("utf-8", "replace").splitlines()
-    url = next((w for ln in lines for w in ln.split() if w.startswith("http")), None)
-    if not url:
-        proc.kill()
-        raise ToolError(f"seed viewer did not start (port {port} busy? a "
-                        "viewer may already be running — reuse its link)")
-    _VIEWERS.append(proc)
-    return {
-        "state": st["state"], "started": True, "url": url,
+    out = {"state": st["state"], "page": page, "started": False}
+    if page == "backup":
+        out.update({
+            "url": ceremony.hosted_url("backup"),
+            "tell_your_human": (
+                "Open this page in your own browser, press 'Make reveal key' "
+                "and paste me the public key it shows. Keep the tab open: I "
+                "will send back an envelope only that tab can decrypt. When "
+                "the words are on paper, send me the BACKUP CONFIRMATION "
+                "CODE the page shows: until then the wallet cannot move "
+                "funds."),
+            "then": ("run `sudo spellbook export --reveal-key <their public "
+                     "key>` and paste them the envelope it prints. It is "
+                     "ciphertext to you. When they send the confirmation "
+                     "code, pipe it on stdin (never argv) to `sudo spellbook "
+                     "backup-confirm`."),
+        })
+        return out
+    if page == "seal" and st["state"] not in ("locked", "unsealed"):
+        out.update({"url": None, "hint": AGENT_HINT[st["state"]]})
+        return out
+    op = "restore" if page == "restore" else \
+        "unlock" if st["state"] == "locked" else "seal"
+    pub = ceremony.find_public_key()
+    if not pub:
+        raise ToolError(
+            "no ceremony public key is published (SPELLBOOK_CEREMONY_PUB, "
+            "ceremony_pub_path in spellbook.json, or the installer's "
+            "root-owned copy at /usr/local/share/spellbook/ceremony.pub.pem). "
+            "The daemon user makes the key pair (`sudo spellbook "
+            "ceremony-key`) and only the public half is published; ask your "
+            "human.")
+    try:
+        with open(pub, "rb") as f:
+            der = ceremony.public_der(f.read())
+    except OSError as e:
+        raise ToolError(f"cannot read the ceremony public key: {e.strerror}")
+    fp = ceremony.grouped(ceremony.key_fingerprint(der))
+    what = {"unlock": "enter your seal password to unlock the wallet",
+            "seal": "choose a password to seal the wallet's seed",
+            "restore": "type your paper words to restore the wallet"}[op]
+    out.update({
+        "op": op,
+        "url": ceremony.hosted_url(page, pub_der=der, op=op),
+        "key_fingerprint": fp,
         "tell_your_human": (
-            "Open this one-time link on the machine running the agent (or "
-            "through an SSH tunnel to it) and "
-            + ("enter your seal password to unlock the wallet."
-               if st["state"] == "locked" else
-               "choose a password to seal the wallet's seed.")
-            + " Never paste the password into this chat."),
-        "then": "call spellbook_seed_status until it reports 'unlocked'",
-    }
+            f"Open this link in your own browser and {what}. It runs only "
+            "in your browser and encrypts to your daemon's key. First compare "
+            "the Spellbook daemon key fingerprint the page shows with the one "
+            "your daemon printed for you (the installer log, your terminal "
+            "`spellbook export` screen, or `sudo spellbook ceremony-key` in "
+            "your own shell), not only the one I quote. Then paste me the "
+            "envelope "
+            "it makes. Never paste the password or words into this chat."),
+        "then": _relay(op) + (" Then call spellbook_seed_status until it "
+                              "reports 'unlocked'." if op != "restore" else ""),
+    })
+    return out
+
+
+def _ceremony_inspect(args):
+    """Public header of an envelope: what it is and which key opens it."""
+    env = ceremony.parse_envelope(args["envelope"])
+    return {"kind": env["kind"],
+            "key_fingerprint": ceremony.grouped(env["kfp"]),
+            "relay_to": _relay(env["kind"])}
 
 
 def _status(_a):
@@ -247,23 +297,40 @@ TOOLS = [
     _tool("spellbook_seed_status",
           "Check the wallet's seed lock. Call at the START OF EVERY SESSION "
           "(including after context compaction). States: unlocked (ready), "
-          "locked (sealed seed not loaded — start the viewer for your human), "
-          "unsealed (not yet sealed — start the viewer so your human can "
-          "seal it), mismatch, empty. Needs no password and no daemon.",
+          "locked (sealed seed not loaded — get your human the seal link), "
+          "unsealed (not yet sealed — get your human the seal link), "
+          "mismatch, empty. Needs no password and no daemon.",
           _seed_status, read_only=True),
     _tool("spellbook_seed_viewer",
-          "Start the one-time local page where your HUMAN seals or unlocks "
-          "the seed with their password. Returns a link to give them. You "
-          "never see, ask for, or relay the password.",
+          "Link to the HOSTED ceremony page your human opens in their own "
+          "browser: seal or unlock (page=seal, the default), restore from "
+          "paper (restore) or see the paper backup (backup). Starts nothing "
+          "locally. The link carries only the daemon's PUBLIC key; your "
+          "human returns an encrypted envelope, which you relay to the "
+          "daemon user. You never see, ask for, or decrypt a password or "
+          "recovery word.",
           _seed_viewer,
-          {"port": {"type": "integer", "description": "Local port (default 8787)."}}),
+          {"page": {"type": "string", "enum": ["seal", "restore", "backup"],
+                    "description": "Which page (default seal)."}},
+          read_only=True),
+    _tool("spellbook_ceremony_inspect",
+          "Read the public header of a ceremony envelope your human pasted "
+          "(its kind and the key fingerprint that opens it) and how to relay "
+          "it. Decrypts nothing.",
+          _ceremony_inspect,
+          {"envelope": {"type": "string",
+                        "description": "The SPELLBOOK-CEREMONY1. envelope."}},
+          ("envelope",), read_only=True),
     _tool("spellbook_status", "Daemon status: version, networks, gates.",
           _status, read_only=True),
     _tool("spellbook_version",
           "Installed Spellbook version vs the latest signed release. If "
           "upgrade_available, read upgrade_notes, then upgrade with the "
           "`how` command (signed releases only, forward-only, keys never "
-          "touched) and follow the notes' after-upgrade steps.",
+          "touched) and follow the notes' after-upgrade steps. The root "
+          "wrapper installs only a signed tag that is on main, not yanked "
+          "and past the delay window; a NOT YET or REFUSED answer is "
+          "final for this session, never work around it.",
           _version, read_only=True),
     _tool("spellbook_doctor",
           "Install health check (presence/permissions only, never key contents).",
@@ -353,7 +420,8 @@ def call_tool(name: str, args: dict | None = None) -> tuple[bool, str]:
         return False, f"missing required argument(s): {', '.join(missing)}"
     try:
         result = tool["handler"](args)
-    except (ToolError, SpellbookError, sealed.SealError, ValueError) as e:
+    except (ToolError, SpellbookError, sealed.SealError,
+            ceremony.CeremonyError, ValueError) as e:
         return False, str(e)
     except KeyError as e:
         return False, f"missing argument {e}"

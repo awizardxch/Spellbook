@@ -99,6 +99,16 @@ APPROVE_ROUTES = {
     # uncancellable: the human (approve token) decides deletes.
     "offer_delete",
 }
+# Routes that still answer while the install is BACKUP-PENDING (review S-16):
+# reads, identity signing for the dashboard/musebook (no wallet key), and
+# rejecting a queued item. Every other route moves, encumbers or signs for
+# funds and is refused until the human has proven the paper backup.
+BACKUP_PENDING_ROUTES = {
+    "status", "addresses", "doctor", "queue_read", "ledger_read",
+    "chia_read", "dex_venues", "contract_call_view",
+    "sign_musebook_request", "sign_dashboard_challenge",
+    "queue_reject",
+}
 # Intents that never auto-approve, whatever auto_approve_below says. Policy
 # caps still deny them; a human always sees them. offer_cancel and
 # message_sign queue on their own routes; these go through _run_fund_intent.
@@ -540,8 +550,9 @@ def _refuse_if_locked(seed_path: str, std_seed_path: str | None):
     if os.path.exists(sealed.sealed_path()):
         raise FileNotFoundError(
             "seed is sealed and not unlocked (" + ", ".join(missing) +
-            " missing): ask the human to unlock it — `spellbook-seed serve`, "
-            "they open the link and enter their seal password. Never "
+            " missing): ask the human to unlock it on the hosted seal page "
+            "(`spellbook-ceremony url seal`); the daemon user opens the "
+            "envelope they return. Never "
             "re-install over a locked wallet.")
 
 
@@ -609,6 +620,7 @@ class Daemon:
         if self.key_derivation not in ("kdf", "standard"):
             raise ValueError("key_derivation must be 'kdf' or 'standard'")
         self.std_seed = None
+        self.custody_info = None
         if self.key_derivation == "standard":
             std_seed_path = self.cfg.get("std_seed_path")
             if std_seed_path and os.path.exists(std_seed_path):
@@ -616,14 +628,29 @@ class Daemon:
                 self.std_seed = load_std_seed(std_seed_path)
             elif self.cfg.get("sealed_envelope_path"):
                 # Passwordless seal: decrypt the ENC2 envelope with the
-                # ceremony private key and hold the seed in memory only.
-                # Keys survive daemon restarts via re-decryption; no
-                # plaintext seed is ever written to disk.
+                # daemon's own ceremony key (S-16) and hold the seed in
+                # memory only. Keys survive daemon restarts via
+                # re-decryption; the plaintext seed is not written to disk
+                # by this path (the envelope is ciphertext).
                 self.std_seed = self._load_std_seed_from_envelope()
             else:
                 raise ValueError(
                     "key_derivation=standard requires std_seed_path or "
                     "sealed_envelope_path")
+        # Forced backup (review S-16): the confirmation in backup.json is
+        # bound to this fingerprint of the live signing seed and re-read on
+        # every gated request, so `spellbook export` flips the state without
+        # a restart. No route writes backup.json.
+        from spellbook import custody
+        live = self._signing_seed()
+        self._live_seed_fp = (custody.seed_fingerprint(live)
+                              if live is not None else None)
+        if self.backup_status()["state"] == "legacy":
+            custody.warn(
+                "this install has no confirmed paper backup on record (it "
+                "predates forced backup). Fund-moving routes stay open so "
+                "running wallets are not blocked; the human should run "
+                f"`sudo spellbook export --prefix {config_dir}` to confirm.")
         if self.seed and self.cfg.get("musebook_signing_mode") == "daemon":
             from nacl.signing import SigningKey
             self._identity_key = SigningKey(self.seed)
@@ -672,6 +699,23 @@ class Daemon:
         except dex_mod.DexError as e:
             raise ValueError(f"bad dex.recommended_venues: {e}")
         self._dex_recommended_set = frozenset(self.dex_recommended_venues)
+        # Pinned DEX contracts (S-20/S-21): the in-code table in dex.py is
+        # the only source of swap targets, spenders and LP contracts. The
+        # operator may add or replace entries explicitly with
+        # {"dex": {"pinned_contracts": {"<chain id>": {"<role>": "0x.."}}}};
+        # every override is logged here and labeled in the queue.
+        try:
+            self.dex_pin_overrides = dex_mod.parse_pin_overrides(
+                dex_cfg.get("pinned_contracts"))
+        except dex_mod.DexError as e:
+            raise ValueError(f"bad dex.pinned_contracts: {e}")
+        for cid, roles in sorted(self.dex_pin_overrides.items()):
+            for role, addr in sorted(roles.items()):
+                builtin = dex_mod.PINNED_CONTRACTS.get(cid, {}).get(role)
+                note = (f" (replaces built-in {builtin})"
+                        if builtin and builtin != addr else "")
+                print(f"spellbookd: OPERATOR OVERRIDE: dex pinned {role} on "
+                      f"chain {cid} = {addr}{note}", file=sys.stderr)
         # The Sage RPC child process, if we started one. The daemon owns the
         # whole Chia execution path (O10): it spawns `sage rpc start` against
         # the configured data home and talks to it over local mTLS. If Sage
@@ -789,6 +833,18 @@ class Daemon:
             return {"ok": False, "error": "approve token required"}
         if route not in REQUEST_ROUTES and route not in APPROVE_ROUTES:
             return {"ok": False, "error": f"unknown route {route!r}"}
+        if route not in BACKUP_PENDING_ROUTES:
+            st = self.backup_status()
+            if st["state"] == "pending":
+                # S-16: no fund-moving route until the human has proven
+                # the backup. The state lives in daemon-owned backup.json,
+                # which no route (and so no token) can write.
+                self.ledger.append(req.get("muse_id", "?"),
+                                   _redacted(req).encode(),
+                                   None, "denied:backup-pending")
+                from spellbook import custody
+                return {"ok": False, "backup_pending": True,
+                        "error": custody.pending_message(self.config_dir)}
 
         handler = getattr(self, "rt_" + route, None)
         if handler is None:
@@ -808,6 +864,15 @@ class Daemon:
             # Untrusted CLVM / JSON shapes must never take the process
             # down; the parsers are iterative, this is the backstop.
             return {"ok": False, "error": "request too deeply nested"}
+
+    def backup_status(self) -> dict:
+        """Forced-backup state (review S-16): confirmed | pending | legacy."""
+        from spellbook import custody
+        config_dir = getattr(self, "config_dir", None)
+        if config_dir is None:  # a bare test double with no config dir
+            return {"state": "legacy"}
+        return custody.backup_status(config_dir,
+                                     getattr(self, "_live_seed_fp", None))
 
     # ------------------------------------------------------------ chain execution
     def _signing_seed(self):
@@ -837,69 +902,31 @@ class Daemon:
     def _load_std_seed_from_envelope(self) -> bytes:
         """Decrypt the passwordless ENC2 envelope and return the 64-byte seed.
 
-        The envelope (SPELLBOOK-SEED-ENC2) is hybrid-encrypted: the AES-256-GCM
-        key is wrapped with RSA-OAEP-SHA256 to the ceremony keypair. The
-        envelope file and the private key must both be mode 0600; the
-        decrypted seed lives in memory only and is never logged, never
-        returned by any route, never written to disk.
+        Review S-16: the decrypting key is the daemon's OWN ceremony key,
+        <config_dir>/ceremony/private.pem (daemon user, 0600, 0700 dir),
+        generated by `spellbook ceremony-key` as that user. The envelope may
+        sit anywhere, including in agent reach. A legacy key the old
+        ceremony left in the agent's workspace is moved into the daemon's
+        dir when the daemon has one of its own (custody.load_envelope_seed);
+        otherwise it is used with a loud warning so an existing install
+        still starts. The decrypted seed is held in memory only, never
+        logged and never returned by any route.
 
-        Fails closed on any permissions, format, or decryption problem.
+        Fails closed on any ownership, permissions, format, or decryption
+        problem.
         """
-        import base64
-        import json
-
-        envelope_path = os.path.expanduser(self.cfg["sealed_envelope_path"])
-        key_path = os.path.expanduser(self.cfg.get(
-            "ceremony_key_path",
-            "~/workspace/.spellbook/seed-derive/private.pem"))
-
-        for path, label in ((envelope_path, "sealed envelope"),
-                            (key_path, "ceremony private key")):
-            if not os.path.exists(path):
-                raise FileNotFoundError(
-                    f"{label} not found at {path} — cannot load sealed seed")
-            st = os.stat(path)
-            if st.st_mode & 0o077:
-                raise PermissionError(
-                    f"{label} at {path} is not 0600 — refusing to load")
-
-        with open(envelope_path) as f:
-            envelope = f.read().strip()
-        if not envelope.startswith("SPELLBOOK-SEED-ENC2."):
-            raise ValueError("sealed envelope has wrong prefix — refusing")
-        try:
-            payload = json.loads(
-                base64.b64decode(envelope.split(".", 1)[1]))
-        except Exception as e:
-            raise ValueError(f"sealed envelope is not valid JSON: {e}")
-        if payload.get("v") != 2 or payload.get(
-                "algo") != "RSA-OAEP-SHA256+AES-GCM-256":
-            raise ValueError("unsupported envelope version/algorithm — refusing")
-
-        from cryptography.hazmat.primitives import hashes, serialization
-        from cryptography.hazmat.primitives.asymmetric import padding
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-        with open(key_path, "rb") as f:
-            private_key = serialization.load_pem_private_key(
-                f.read(), password=None)
-        try:
-            aes_key = private_key.decrypt(
-                bytes.fromhex(payload["ek"]),
-                padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                             algorithm=hashes.SHA256(), label=None))
-            seed_hex = AESGCM(aes_key).decrypt(
-                bytes.fromhex(payload["iv"]),
-                bytes.fromhex(payload["ct"]),
-                None).decode().strip().lower()
-        except Exception as e:
-            raise ValueError(f"envelope decryption failed: {type(e).__name__}")
-        # Standard mode needs the 64-byte BIP-39 seed (128 hex chars).
-        if len(seed_hex) != 128 or not all(
-                c in "0123456789abcdef" for c in seed_hex):
-            raise ValueError(
-                "envelope did not contain a 128-char standard seed — refusing")
-        return bytes.fromhex(seed_hex)
+        from spellbook import custody
+        seed, info = custody.load_envelope_seed(self.config_dir, self.cfg)
+        for w in info["warnings"]:
+            custody.warn(w)
+        self.custody_info = {k: info[k] for k in
+                             ("key_source", "key_origin", "separation")}
+        if info["key_source"] == "daemon" and info["key_origin"] == "generated":
+            # A seed sealed to a daemon-generated key came from the new
+            # ceremony: it stays backup-pending until the human proves the
+            # words (an adopted legacy key keeps its install's state).
+            custody.require_backup(self.config_dir)
+        return seed
 
     def _chia_master_sk(self, chain):
         """32-byte Chia master secret for `chain` under the configured derivation.
@@ -1214,6 +1241,14 @@ class Daemon:
             raise evm.EvmError(
                 f"{env_key} not in the daemon environment — cannot fetch "
                 "a firm quote, refusing")
+        # S-20: the venue's transaction may only go to the contract pinned
+        # for this venue and chain. Refuse before asking for a quote.
+        pins = getattr(self, "dex_pin_overrides", None) or {}
+        try:
+            dex_mod.pinned_contract(info["chain_id"],
+                                    dex_mod.VENUE_SWAP_TARGET[venue], pins)
+        except dex_mod.DexError as e:
+            raise evm.EvmError(f"venue {venue!r}: {e}")
         sell, buy = params["sell_token"], params["buy_token"]
         amount = params["sell_amount_wei"]
         # Firm quote, fetched at execution time (quotes live ~30s).
@@ -1230,8 +1265,12 @@ class Daemon:
             zero = "0x0000000000000000000000000000000000000000"
             sell_q = zero if sell == dex_mod.NATIVE_SENTINEL else sell
             buy_q = zero if buy == dex_mod.NATIVE_SENTINEL else buy
+            # The Permit2 allowance comes as a transaction, never a permit
+            # to sign: the daemon issues its own exact-amount
+            # Permit2.approve to the pinned router below.
             q = uni.quote(info["chain_id"], sell_q, buy_q, amount, sender,
-                          slippage_pct=params["max_slippage_bps"] / 100)
+                          slippage_pct=params["max_slippage_bps"] / 100,
+                          permit_as_transaction=True)
             quote = uni.swap(q["raw"], info["chain_id"], sell_q, buy_q,
                              amount, sender,
                              slippage_pct=params["max_slippage_bps"] / 100)
@@ -1244,26 +1283,59 @@ class Daemon:
         if dl is not None and time.time() > dl:
             raise evm.EvmError(
                 "swap intent expired while fetching the quote — refusing")
+        # S-20: the venue's transaction is decoded and bound to the intent
+        # (pinned target and spender, selector, sell token/amount,
+        # recipient = this wallet, minimum out) — not the quote's claims.
         plan = dex_mod.validate_swap_intent_against_quote(
-            {"chain_id": info["chain_id"], "sell_token": sell,
-             "buy_token": buy, "sell_amount_wei": amount,
+            {"chain_id": info["chain_id"], "venue": venue, "wallet": sender,
+             "sell_token": sell, "buy_token": buy, "sell_amount_wei": amount,
              "min_buy_amount_wei": params["min_buy_amount_wei"],
-             "max_slippage_bps": params["max_slippage_bps"]},
+             "max_slippage_bps": params["max_slippage_bps"],
+             "pin_overrides": pins},
             quote)
         nonce = rpc.nonce(sender)
         gas_price = _evm_gas_price(rpc)
-        approve_tx = None
+        approve_tx = permit2_tx = None
         if plan["needs_approval"]:
+            # Exact amount, pinned spender, sell token — re-checked here
+            # at the point of signing, never unlimited.
+            dex_mod.check_swap_approval(
+                chain_id=info["chain_id"], venue=venue, token=sell,
+                spender=plan["allowance_target"],
+                amount=plan["approve_amount_wei"], sell_token=sell,
+                sell_amount=amount, pin_overrides=pins)
             approve_tx, nonce = self._evm_ensure_allowance(
                 rpc, priv, info["chain_id"], sender, nonce, sell,
-                plan["allowance_target"], amount, gas_price)
+                plan["allowance_target"], plan["approve_amount_wei"],
+                gas_price)
+        if plan.get("permit2_spender"):
+            # Universal Router token sell: Permit2 stage 2, exact amount,
+            # to the pinned router the decoded tx targets, expiring with
+            # the intent. allowance_target is the pinned Permit2.
+            spender = dex_mod.check_permit2_approval(
+                chain_id=info["chain_id"], token=sell,
+                spender=plan["permit2_spender"],
+                amount=plan["approve_amount_wei"], sell_token=sell,
+                sell_amount=amount, pin_overrides=pins)
+            if spender != plan["to"]:
+                raise dex_mod.DexError(
+                    f"Permit2 spender {spender} is not the swap target "
+                    f"{plan['to']} — refusing")
+            permit2_tx, nonce = self._evm_ensure_permit2_allowance(
+                rpc, priv, info["chain_id"], sender, nonce, sell,
+                plan["allowance_target"], spender,
+                plan["approve_amount_wei"], dl or int(time.time()) + 600,
+                gas_price)
         tx_hash, _, block = self._evm_send_call(
             rpc, priv, info["chain_id"], sender, nonce,
             plan["to"], plan["value_wei"], plan["data"], gas_price, "swap")
         out = {"submitted": True, "tx_hash": tx_hash, "block": block,
-               "from": sender, "buy_amount_wei": plan["buy_amount_wei"]}
+               "from": sender, "buy_amount_wei": plan["buy_amount_wei"],
+               "decoded": plan["decoded"]}
         if approve_tx:
             out["approve_tx_hash"] = approve_tx
+        if permit2_tx:
+            out["permit2_approve_tx_hash"] = permit2_tx
         return out
 
     def _execute_evm_lp_add(self, params: dict) -> dict:
@@ -1286,38 +1358,60 @@ class Daemon:
         if protocol == "v4":
             return self._execute_evm_lp_add_v4(
                 params, info, rpc, priv, sender, call_deadline)
+        # S-21: the router is re-resolved from the pin table at signing.
+        router = self._lp_pin(params["chain"], protocol, params.get("router"),
+                              "router")
         tok_a, tok_b = params["token_a"], params["token_b"]
         amt_a, amt_b = params["amount_a_wei"], params["amount_b_wei"]
-        if protocol == "v2":
-            data = dex_mod.build_v2_add_liquidity_calldata(
-                tok_a, tok_b, amt_a, amt_b,
-                params["amount_a_min_wei"], params["amount_b_min_wei"],
-                sender, call_deadline)
-        else:
-            t0, t1 = (tok_a, tok_b) if tok_a.lower() < tok_b.lower() \
-                else (tok_b, tok_a)
-            a0, a1 = (amt_a, amt_b) if tok_a.lower() < tok_b.lower() \
-                else (amt_b, amt_a)
-            m0, m1 = (params["amount_a_min_wei"], params["amount_b_min_wei"]) \
-                if tok_a.lower() < tok_b.lower() \
-                else (params["amount_b_min_wei"], params["amount_a_min_wei"])
-            data = dex_mod.build_v3_mint_calldata(
-                t0, t1, params["fee"], params["tick_lower"],
-                params["tick_upper"], a0, a1, m0, m1, sender, call_deadline)
+        try:
+            if protocol == "v2":
+                data = dex_mod.build_v2_add_liquidity_calldata(
+                    tok_a, tok_b, amt_a, amt_b,
+                    params["amount_a_min_wei"], params["amount_b_min_wei"],
+                    sender, call_deadline)
+                # Decode what is about to be signed and bind it: the
+                # approved pair, each leg within its cap, LP to the wallet.
+                decoded = dex_mod.decode_v2_add_liquidity_calldata(
+                    data, token_a=tok_a, token_b=tok_b, amount_a_cap=amt_a,
+                    amount_b_cap=amt_b,
+                    amount_a_min=params["amount_a_min_wei"],
+                    amount_b_min=params["amount_b_min_wei"], wallet=sender)
+            else:
+                t0, t1 = (tok_a, tok_b) if tok_a.lower() < tok_b.lower() \
+                    else (tok_b, tok_a)
+                a0, a1 = (amt_a, amt_b) if tok_a.lower() < tok_b.lower() \
+                    else (amt_b, amt_a)
+                m0, m1 = (params["amount_a_min_wei"],
+                          params["amount_b_min_wei"]) \
+                    if tok_a.lower() < tok_b.lower() \
+                    else (params["amount_b_min_wei"],
+                          params["amount_a_min_wei"])
+                data = dex_mod.build_v3_mint_calldata(
+                    t0, t1, params["fee"], params["tick_lower"],
+                    params["tick_upper"], a0, a1, m0, m1, sender,
+                    call_deadline)
+                decoded = dex_mod.decode_v3_mint_calldata(
+                    data, token0=t0, token1=t1, amount0_cap=a0,
+                    amount1_cap=a1, amount0_min=m0, amount1_min=m1,
+                    fee=params["fee"], tick_lower=params["tick_lower"],
+                    tick_upper=params["tick_upper"], wallet=sender)
+        except dex_mod.DexError as e:
+            raise evm.EvmError(str(e))
+        decoded["target"] = router
         nonce = rpc.nonce(sender)
         gas_price = _evm_gas_price(rpc)
         approve_txs = []
         for tok, amt in ((tok_a, amt_a), (tok_b, amt_b)):
             ah, nonce = self._evm_ensure_allowance(
                 rpc, priv, info["chain_id"], sender, nonce, tok,
-                params["router"], amt, gas_price)
+                router, amt, gas_price)
             if ah:
                 approve_txs.append(ah)
         tx_hash, _, block = self._evm_send_call(
             rpc, priv, info["chain_id"], sender, nonce,
-            params["router"], 0, data, gas_price, "lp_add")
+            router, 0, data, gas_price, "lp_add")
         out = {"submitted": True, "tx_hash": tx_hash, "block": block,
-               "from": sender}
+               "from": sender, "decoded": decoded}
         if approve_txs:
             out["approve_tx_hashes"] = approve_txs
         return out
@@ -1333,12 +1427,29 @@ class Daemon:
         reads prove the address is a PositionManager and the pool is
         initialized — read-only, fail closed.
         """
-        posm = params["position_manager"]
-        permit2 = params["permit2"]
+        # S-21: PositionManager and Permit2 come from the pin table at
+        # signing; the queued values must still match it.
+        posm = self._lp_pin(params["chain"], "v4",
+                            params.get("position_manager"), "position_manager")
+        permit2 = self._lp_pin(params["chain"], "permit2",
+                               params.get("permit2"), "permit2")
         c0, c1 = params["token_a"], params["token_b"]  # sorted at validation
         native = c0.lower() == dex_mod.V4_NATIVE_CURRENCY
+        pins = getattr(self, "dex_pin_overrides", None) or {}
         pool_manager = dex_mod.decode_address_return(rpc.eth_call(
             posm, dex_mod.build_posm_pool_manager_calldata(), sender))
+        # The built-in PoolManager pin belongs with the built-in
+        # PositionManager; an operator-replaced PositionManager is checked
+        # only against an operator-pinned PoolManager.
+        over = pins.get(info["chain_id"], {})
+        pinned_pm = dex_mod.pinned_contracts(info["chain_id"], pins).get(
+            dex_mod.PIN_V4_POOL_MANAGER) \
+            if (dex_mod.PIN_V4_POOL_MANAGER in over
+                or dex_mod.PIN_V4_POSITION_MANAGER not in over) else None
+        if pinned_pm and pool_manager.lower() != pinned_pm:
+            raise evm.EvmError(
+                f"PositionManager reports PoolManager {pool_manager}, not the "
+                f"pinned {pinned_pm} — refusing")
         pool_id = dex_mod.v4_pool_id(c0, c1, params["fee"],
                                      params["tick_spacing"], params["hooks"],
                                      allow_native=native)
@@ -1350,7 +1461,9 @@ class Daemon:
         except evm.EvmError:
             # Robinhood Chain's modified PoolManager reverts on getSlot0 —
             # fall back to the read-only StateView lens for this chain.
-            sv = dex_mod.V4_STATE_VIEW_ADDRESSES.get(info["chain_id"])
+            sv = dex_mod.pinned_contracts(info["chain_id"], pins).get(
+                dex_mod.PIN_V4_STATE_VIEW) or \
+                dex_mod.V4_STATE_VIEW_ADDRESSES.get(info["chain_id"])
             if not sv:
                 raise
             sqrt_price = dex_mod.decode_slot0_sqrt_price_x96(rpc.eth_call(
@@ -1386,12 +1499,23 @@ class Daemon:
         # The native max doubles as the tx value. Keep it tight for native
         # legs: any unspent native stays in the PositionManager.
         value_wei = params["amount_a_wei"] if native else 0
+        # S-21: decode what is about to be signed and bind it — both legs
+        # within their approved caps (native as tx value), the pool's
+        # currencies, and the position NFT to this wallet.
+        try:
+            decoded = dex_mod.decode_v4_lp_add_calldata(
+                data, value_wei=value_wei, currency0=c0, currency1=c1,
+                amount0_cap=params["amount_a_wei"],
+                amount1_cap=params["amount_b_wei"], wallet=sender)
+        except dex_mod.DexError as e:
+            raise evm.EvmError(str(e))
+        decoded.update({"target": posm, "permit2": permit2})
         tx_hash, _, block = self._evm_send_call(
             rpc, priv, info["chain_id"], sender, nonce, posm, value_wei,
             data, gas_price, "lp_add_v4")
         out = {"submitted": True, "tx_hash": tx_hash, "block": block,
                "from": sender, "pool_manager": pool_manager,
-               "pool_id": pool_id}
+               "pool_id": pool_id, "decoded": decoded}
         if approve_txs:
             out["approve_tx_hashes"] = approve_txs
         return out
@@ -1469,37 +1593,71 @@ class Daemon:
                 tok_a, tok_b, params["liquidity"],
                 params["amount_a_min_wei"], params["amount_b_min_wei"],
                 sender, call_deadline)
+            router = self._lp_pin(params["chain"], "v2",
+                                  params.get("router"), "router")
+            decoded = self._lp_decode(
+                dex_mod.decode_v2_remove_liquidity_calldata, data,
+                token_a=tok_a, token_b=tok_b, liquidity=params["liquidity"],
+                amount_a_min=params["amount_a_min_wei"],
+                amount_b_min=params["amount_b_min_wei"], wallet=sender)
             ah, nonce = self._evm_ensure_allowance(
                 rpc, priv, info["chain_id"], sender, nonce, pair,
-                params["router"], params["liquidity"], gas_price)
+                router, params["liquidity"], gas_price)
             if ah:
                 approve_txs.append(ah)
-            to, what = params["router"], "lp_remove_v2"
+            to, what = router, "lp_remove_v2"
         elif protocol == "v3":
-            self._evm_assert_position_owner(rpc, params["router"],
+            npm = self._lp_pin(params["chain"], "v3", params.get("router"),
+                               "router")
+            self._evm_assert_position_owner(rpc, npm,
                                             params["token_id"], sender)
             data = dex_mod.build_v3_remove_and_collect_calldata(
                 params["token_id"], params["liquidity"],
                 params["amount_a_min_wei"], params["amount_b_min_wei"],
                 sender, call_deadline)
-            to, what = params["router"], "lp_remove_v3"
+            decoded = self._lp_decode(
+                dex_mod.decode_v3_remove_calldata, data,
+                token_id=params["token_id"], liquidity=params["liquidity"],
+                amount0_min=params["amount_a_min_wei"],
+                amount1_min=params["amount_b_min_wei"], wallet=sender)
+            to, what = npm, "lp_remove_v3"
         else:  # v4
-            self._evm_assert_position_owner(rpc, params["position_manager"],
+            posm = self._lp_pin(params["chain"], "v4",
+                                params.get("position_manager"),
+                                "position_manager")
+            self._evm_assert_position_owner(rpc, posm,
                                             params["token_id"], sender)
             data = dex_mod.build_v4_lp_remove_calldata(
                 params["token_id"], params["liquidity"],
                 params["amount_a_min_wei"], params["amount_b_min_wei"],
                 tok_a, tok_b, sender, call_deadline,
-                burn_nft=params["burn_nft"])
-            to, what = params["position_manager"], "lp_remove_v4"
+                burn_nft=params["burn_nft"],
+                allow_native=tok_a.lower() == dex_mod.V4_NATIVE_CURRENCY)
+            decoded = self._lp_decode(
+                dex_mod.decode_v4_lp_take_calldata, data,
+                token_id=params["token_id"], liquidity=params["liquidity"],
+                amount0_min=params["amount_a_min_wei"],
+                amount1_min=params["amount_b_min_wei"], currency0=tok_a,
+                currency1=tok_b, wallet=sender, burn_nft=params["burn_nft"])
+            to, what = posm, "lp_remove_v4"
         tx_hash, _, block = self._evm_send_call(
             rpc, priv, info["chain_id"], sender, nonce, to, 0, data,
             gas_price, what)
+        decoded["target"] = to
         out = {"submitted": True, "tx_hash": tx_hash, "block": block,
-               "from": sender}
+               "from": sender, "decoded": decoded}
         if approve_txs:
             out["approve_tx_hashes"] = approve_txs
         return out
+
+    @staticmethod
+    def _lp_decode(decoder, data: str, **bounds) -> dict:
+        """Decode the LP calldata about to be signed and bind it to the
+        approved bounds (S-21); a mismatch refuses before signing."""
+        try:
+            return decoder(data, **bounds)
+        except dex_mod.DexError as e:
+            raise evm.EvmError(str(e))
 
     def _execute_evm_lp_claim(self, params: dict) -> dict:
         """Execute an approved dex_lp_claim intent.
@@ -1516,13 +1674,21 @@ class Daemon:
         nonce = rpc.nonce(sender)
         gas_price = _evm_gas_price(rpc)
         if protocol == "v3":
-            self._evm_assert_position_owner(rpc, params["router"],
+            npm = self._lp_pin(params["chain"], "v3", params.get("router"),
+                               "router")
+            self._evm_assert_position_owner(rpc, npm,
                                             params["token_id"], sender)
             data = dex_mod.build_v3_collect_calldata(params["token_id"],
                                                      sender)
-            to, what = params["router"], "lp_claim_v3"
+            decoded = self._lp_decode(
+                dex_mod.decode_v3_collect_calldata, data,
+                token_id=params["token_id"], wallet=sender)
+            to, what = npm, "lp_claim_v3"
         else:  # v4
-            self._evm_assert_position_owner(rpc, params["position_manager"],
+            posm = self._lp_pin(params["chain"], "v4",
+                                params.get("position_manager"),
+                                "position_manager")
+            self._evm_assert_position_owner(rpc, posm,
                                             params["token_id"], sender)
             call_deadline = dl or int(time.time()) + 600
             if call_deadline <= time.time() + 60:
@@ -1530,13 +1696,21 @@ class Daemon:
                     "LP deadline too close — calldata would revert on-chain")
             data = dex_mod.build_v4_lp_claim_calldata(
                 params["token_id"], params["token_a"], params["token_b"],
-                sender, call_deadline)
-            to, what = params["position_manager"], "lp_claim_v4"
+                sender, call_deadline,
+                allow_native=params["token_a"].lower()
+                == dex_mod.V4_NATIVE_CURRENCY)
+            decoded = self._lp_decode(
+                dex_mod.decode_v4_lp_take_calldata, data,
+                token_id=params["token_id"], liquidity=0, amount0_min=0,
+                amount1_min=0, currency0=params["token_a"],
+                currency1=params["token_b"], wallet=sender)
+            to, what = posm, "lp_claim_v4"
         tx_hash, _, block = self._evm_send_call(
             rpc, priv, info["chain_id"], sender, nonce, to, 0, data,
             gas_price, what)
+        decoded["target"] = to
         return {"submitted": True, "tx_hash": tx_hash, "block": block,
-                "from": sender}
+                "from": sender, "decoded": decoded}
 
     # ------------------------------------------------------------ contract execution
     def _execute_contract_deploy(self, params: dict) -> dict:
@@ -4031,6 +4205,13 @@ class Daemon:
             raise evm.EvmError(
                 f"venue {venue!r} needs {env_key} in the daemon environment "
                 "(it has no server-side key). matcha and cast need no key.")
+        # S-20: a venue whose swap contract is not pinned for this chain
+        # can never pass the execution-time decode — refuse it now.
+        try:
+            dex_mod.pinned_contract(chain_id, dex_mod.VENUE_SWAP_TARGET[venue],
+                                    self.dex_pin_overrides)
+        except dex_mod.DexError as e:
+            raise evm.EvmError(f"venue {venue!r}: {e}")
         sell = p.get("sell_token", "")
         buy = p.get("buy_token", "")
         for tok, what in ((sell, "sell_token"), (buy, "buy_token")):
@@ -4086,10 +4267,12 @@ class Daemon:
         if protocol == "v4":
             return self._validate_dex_lp_add_v4(
                 p, chain, tok_a, tok_b, fee, tl, tu, dl)
-        # v2/v3: router path, v4-only fields refused
-        router = p.get("router", "")
-        if not evm.is_address(router):
-            raise evm.EvmError(f"bad router address: {router!r}")
+        # v2/v3: router path, v4-only fields refused. The router is the
+        # pinned one for the chain (S-21); a supplied one must match it.
+        router = self._lp_pin(chain, protocol, p.get("router"), "router")
+        if dex_mod._is_native_token(tok_a) or dex_mod._is_native_token(tok_b):
+            raise evm.EvmError(f"{protocol} LP legs are ERC-20s only — wrap "
+                               "native first, or use v4 (native currency0)")
         for k in ("position_manager", "permit2", "tick_spacing", "hooks",
                   "liquidity"):
             if p.get(k) is not None:
@@ -4132,12 +4315,11 @@ class Daemon:
         liquidity to mint, computed off-chain by the agent. Approvals go
         through Permit2 in two exact-amount stages.
         """
-        posm = p.get("position_manager", "")
-        if not evm.is_address(posm):
-            raise evm.EvmError(f"bad position_manager address: {posm!r}")
-        permit2 = p.get("permit2", "")
-        if not evm.is_address(permit2):
-            raise evm.EvmError(f"bad permit2 address: {permit2!r}")
+        # S-21: PositionManager and Permit2 are the pinned ones for the
+        # chain; supplied values must match them (or be omitted).
+        posm = self._lp_pin(chain, "v4", p.get("position_manager"),
+                            "position_manager")
+        permit2 = self._lp_pin(chain, "permit2", p.get("permit2"), "permit2")
         if p.get("router") is not None:
             raise evm.EvmError("router is v2/v3-only — v4 uses "
                                "position_manager")
@@ -4204,24 +4386,19 @@ class Daemon:
     def rt_dex_swap(self, p: dict, muse_id: str) -> dict:
         """Queue/approve/deny/execute path for a bounded swap intent."""
         intent = self._validate_dex_swap(p)
-        asset = ("native" if intent["sell_token"] == dex_mod.NATIVE_SENTINEL
-                 else intent["sell_token"].lower())
-        entries = [(intent["chain"], asset, intent["sell_amount_wei"])]
+        # One key for policy and velocity (S-21): dex_asset_key.
+        entries = [(intent["chain"], dex_mod.dex_asset_key(
+            intent["sell_token"]), intent["sell_amount_wei"])]
         return self._run_fund_intent(intent, muse_id, entries, "dex_swap")
 
     def rt_dex_lp_add(self, p: dict, muse_id: str) -> dict:
         """Queue/approve/deny/execute path for a bounded LP-add intent."""
         intent = self._validate_dex_lp_add(p)
-
-        def _asset(t: str) -> str:
-            # Match the dex_swap convention: the zero address is the
-            # chain's native currency for policy keys.
-            return ("native" if t.lower() == dex_mod.V4_NATIVE_CURRENCY
-                    else t.lower())
-
-        entries = [(intent["chain"], _asset(intent["token_a"]),
+        # Both legs, native included, under the same keys velocity
+        # records them by (S-21): the zero address is "native".
+        entries = [(intent["chain"], dex_mod.dex_asset_key(intent["token_a"]),
                     intent["amount_a_wei"]),
-                   (intent["chain"], _asset(intent["token_b"]),
+                   (intent["chain"], dex_mod.dex_asset_key(intent["token_b"]),
                     intent["amount_b_wei"])]
         return self._run_fund_intent(intent, muse_id, entries, "dex_lp_add")
 
@@ -4273,10 +4450,8 @@ class Daemon:
                "deadline_sec": dl,
                "chain_id": evm.CHAINS[chain]["chain_id"]}
         if protocol == "v4":
-            posm = p.get("position_manager", "")
-            if not evm.is_address(posm):
-                raise evm.EvmError(
-                    f"bad position_manager address: {posm!r}")
+            posm = self._lp_pin(chain, "v4", p.get("position_manager"),
+                                "position_manager")
             if p.get("router") is not None:
                 raise evm.EvmError("router is v2/v3-only — v4 uses "
                                    "position_manager")
@@ -4286,9 +4461,7 @@ class Daemon:
                 raise evm.EvmError("v4 remove needs the position token_id")
             out["position_manager"] = posm
         else:
-            router = p.get("router", "")
-            if not evm.is_address(router):
-                raise evm.EvmError(f"bad router address: {router!r}")
+            router = self._lp_pin(chain, protocol, p.get("router"), "router")
             if p.get("position_manager") is not None:
                 raise evm.EvmError("position_manager is v4-only")
             out["router"] = router
@@ -4359,22 +4532,40 @@ class Daemon:
                "purpose": p.get("purpose", ""), "deadline_sec": dl,
                "chain_id": evm.CHAINS[chain]["chain_id"]}
         if protocol == "v4":
-            posm = p.get("position_manager", "")
-            if not evm.is_address(posm):
-                raise evm.EvmError(
-                    f"bad position_manager address: {posm!r}")
+            posm = self._lp_pin(chain, "v4", p.get("position_manager"),
+                                "position_manager")
             if p.get("router") is not None:
                 raise evm.EvmError("router is v3-only — v4 uses "
                                    "position_manager")
             out["position_manager"] = posm
         else:
-            router = p.get("router", "")
-            if not evm.is_address(router):
-                raise evm.EvmError(f"bad router address: {router!r}")
+            router = self._lp_pin(chain, protocol, p.get("router"), "router")
             if p.get("position_manager") is not None:
                 raise evm.EvmError("position_manager is v4-only")
             out["router"] = router
         return out
+
+    #: Which pinned role an LP protocol's contract is (S-21).
+    _LP_PIN_ROLES = {"v2": dex_mod.PIN_V2_ROUTER,
+                     "v3": dex_mod.PIN_V3_POSITION_MANAGER,
+                     "v4": dex_mod.PIN_V4_POSITION_MANAGER,
+                     "permit2": dex_mod.PIN_PERMIT2}
+
+    def _lp_pin(self, chain: str, kind: str, supplied=None,
+                what: str = "") -> str:
+        """The pinned LP contract (router / position manager / Permit2)
+        for this chain (S-21). Never taken from the agent's params: a
+        supplied address must equal the pin, and an unpinned chain is
+        refused."""
+        if supplied not in (None, "") and not evm.is_address(supplied):
+            raise evm.EvmError(f"bad {what or kind} address: {supplied!r}")
+        try:
+            return dex_mod.resolve_pinned(
+                evm.CHAINS[chain]["chain_id"], self._LP_PIN_ROLES[kind],
+                supplied, getattr(self, "dex_pin_overrides", None) or {},
+                what)
+        except dex_mod.DexError as e:
+            raise evm.EvmError(str(e))
 
     def rt_dex_lp_remove(self, p: dict, muse_id: str) -> dict:
         """Queue path for an LP-remove intent. Removing realizes value and
@@ -4391,6 +4582,82 @@ class Daemon:
         return self._run_fund_intent(intent, muse_id, [], "dex_lp_claim",
                                      force_queue=True)
 
+    def _dex_wallet_address(self, chain):
+        """This wallet's address on an EVM chain, or None when no seed is
+        loaded (display only — never used to sign)."""
+        try:
+            return self._evm_key(chain)[1].lower()
+        except Exception:
+            return None
+
+    def _dex_swap_checks(self, p: dict) -> dict:
+        """The decode-before-signing bounds for a queued swap, for the
+        human: the pinned contract the venue's tx must target (and, for a
+        token sell, approve), the required recipient, the exact sell and
+        minimum buy."""
+        out = {"target": None, "target_role": None, "target_source": None,
+               "spender": None, "recipient": self._dex_wallet_address(
+                   p.get("chain")),
+               "sell_token": p.get("sell_token"),
+               "sell_amount_wei": p.get("sell_amount_wei"),
+               "buy_token": p.get("buy_token"),
+               "min_buy_amount_wei": p.get("min_buy_amount_wei"),
+               "refused": None}
+        try:
+            venue = dex_mod.normalize_venue(p.get("venue"))
+            cid = evm.CHAINS[p["chain"]]["chain_id"]
+            role = dex_mod.VENUE_SWAP_TARGET[venue]
+            addr = dex_mod.pinned_contract(cid, role, self.dex_pin_overrides)
+        except (dex_mod.DexError, KeyError) as e:
+            out["refused"] = str(e)
+            return out
+        accepted = dex_mod.pinned_set(cid, role, self.dex_pin_overrides)
+        out.update({"target": addr, "target_role": role,
+                    "target_source": dex_mod.pin_source(
+                        cid, role, self.dex_pin_overrides),
+                    "accepted_targets": accepted,
+                    "selectors": [dex_mod.SELECTOR_NAMES[s] for s in
+                                  dex_mod.SWAP_SELECTORS[role]]})
+        if not dex_mod._is_native_token(p.get("sell_token") or ""):
+            spender_role = dex_mod.VENUE_APPROVAL_SPENDER[venue]
+            try:
+                out["spender"] = dex_mod.pinned_contract(
+                    cid, spender_role, self.dex_pin_overrides)
+            except dex_mod.DexError as e:
+                out["refused"] = str(e)
+            if spender_role == dex_mod.PIN_PERMIT2:
+                # Permit2 stage 2 goes to the router the tx targets: one
+                # of the accepted routers, exact amount.
+                out["permit2_spender"] = sorted(accepted)
+        return out
+
+    def _dex_lp_checks(self, p: dict) -> dict:
+        """What an LP add is bound to before signing, for the human: the
+        pinned contracts (with their source), the position recipient, and
+        each leg's cap under the policy key it counts against."""
+        out = {"contracts": {}, "recipient": self._dex_wallet_address(
+                   p.get("chain")),
+               "legs": [{"token": p.get(t), "policy_key":
+                         dex_mod.dex_asset_key(p.get(t) or ""),
+                         "max_wei": p.get(a)}
+                        for t, a in (("token_a", "amount_a_wei"),
+                                     ("token_b", "amount_b_wei"))],
+               "refused": None}
+        kinds = (("v4", "permit2") if p.get("protocol") == "v4"
+                 else (p.get("protocol"),))
+        try:
+            cid = evm.CHAINS[p["chain"]]["chain_id"]
+            for kind in kinds:
+                role = self._LP_PIN_ROLES[kind]
+                out["contracts"][role] = {
+                    "address": dex_mod.pinned_contract(
+                        cid, role, self.dex_pin_overrides),
+                    "source": dex_mod.pin_source(cid, role,
+                                                 self.dex_pin_overrides)}
+        except (dex_mod.DexError, KeyError) as e:
+            out["refused"] = str(e)
+        return out
+
     def rt_dex_venues(self, p: dict, muse_id: str) -> dict:
         """Read-only: the user's recommended swap venues (SPEC §10 v2).
 
@@ -4401,8 +4668,25 @@ class Daemon:
         in spellbook.json (default: matcha + uniswap) and takes effect
         on daemon restart.
         """
+        pinned = {}
+        for cid in sorted(set(dex_mod.PINNED_CONTRACTS)
+                          | set(self.dex_pin_overrides)):
+            pinned[str(cid)] = {
+                role: {"address": addr,
+                       "source": dex_mod.pin_source(cid, role,
+                                                    self.dex_pin_overrides),
+                       # Every address accepted for the role (official
+                       # alternates, e.g. Universal Router versions).
+                       "accepted": dex_mod.pinned_set(
+                           cid, role, self.dex_pin_overrides)}
+                for role, addr in sorted(dex_mod.pinned_contracts(
+                    cid, self.dex_pin_overrides).items())}
         return {
             "recommended_venues": list(self.dex_recommended_venues),
+            # S-20/S-21: the only contracts swaps and LP calls may target.
+            # A venue or LP protocol whose contract is not pinned for a
+            # chain is refused there.
+            "pinned_contracts": pinned,
             "known_venues": {
                 v: {"env_key": dex_mod.VENUE_ENV_KEYS[v],
                     "key_required": v not in dex_mod.VENUES_KEY_OPTIONAL,
@@ -4729,14 +5013,18 @@ class Daemon:
         if intent in ("offer_cancel", "message_sign"):
             return []
         if intent == "dex_swap":
-            asset = params.get("sell_token", "")
-            a = "native" if asset == dex_mod.NATIVE_SENTINEL else asset.lower()
-            return [(chain, a, params["sell_amount_wei"])]
+            # Same key policy used (S-21): either native representation
+            # is "native", whatever its case.
+            return [(chain, dex_mod.dex_asset_key(params.get("sell_token", "")),
+                     params["sell_amount_wei"])]
         if intent == "dex_lp_add":
             # v2/v3: exact desired amounts; v4: hard max spends. Either
-            # way the approved bounds are what counts toward velocity.
-            return [(chain, params["token_a"].lower(), params["amount_a_wei"]),
-                    (chain, params["token_b"].lower(), params["amount_b_wei"])]
+            # way the approved bounds are what counts toward velocity,
+            # keyed exactly as policy keyed them (native leg = "native").
+            return [(chain, dex_mod.dex_asset_key(params["token_a"]),
+                     params["amount_a_wei"]),
+                    (chain, dex_mod.dex_asset_key(params["token_b"]),
+                     params["amount_b_wei"])]
         if intent in ("dex_lp_remove", "dex_lp_claim"):
             # These receive value rather than spend it; the human approval
             # is the control, so nothing counts toward velocity.
@@ -4886,6 +5174,10 @@ class Daemon:
                 out["approve_tx_hashes"] = ex["approve_tx_hashes"]
             if ex.get("buy_amount_wei") is not None:
                 out["buy_amount_wei"] = ex["buy_amount_wei"]
+            # What was decoded from the signed DEX call (target, selector,
+            # tokens, amounts, recipient) — for the human and the audit.
+            if ex.get("decoded"):
+                out["decoded"] = ex["decoded"]
             return out
         self.ledger.append(muse_id, canon, ex.get("offer_id"), "approved")
         out = {"ok": True, "decision": "approved", "note": ex.get("note", "")}
@@ -6045,6 +6337,11 @@ class Daemon:
                     "max_slippage_bps": p.get("max_slippage_bps"),
                     "deadline_sec": p.get("deadline_sec"),
                     "destination": None, "asset": "dex_swap", "amount": None,
+                    # S-20: what the venue's transaction is decoded against
+                    # before anything is signed. The calldata itself only
+                    # exists at execution; the decoded call is returned
+                    # with the result.
+                    "swap_checks": self._dex_swap_checks(p),
                 })
             elif intent == "dex_lp_add":
                 entry.update({
@@ -6067,6 +6364,9 @@ class Daemon:
                     "tick_upper": p.get("tick_upper"),
                     "deadline_sec": p.get("deadline_sec"),
                     "destination": None, "asset": "dex_lp_add", "amount": None,
+                    # S-21: the pinned contracts, the position recipient
+                    # and each leg under the policy key it is capped by.
+                    "lp_checks": self._dex_lp_checks(p),
                 })
             elif intent == "dex_lp_remove":
                 entry.update({
@@ -6284,6 +6584,17 @@ class Daemon:
                "std_seed_loaded": self.std_seed is not None,
                "key_derivation": self.key_derivation,
                "unresolved_executions": self.unresolved_executions()}
+        # Public custody facts only (S-16): the backup state, where the
+        # ceremony key lives, and the daemon's ceremony PUBLIC key the
+        # hosted ceremony pages encrypt to (S-17).
+        from spellbook import custody
+        backup = self.backup_status()
+        if backup["state"] == "pending":
+            backup["action"] = custody.pending_message(self.config_dir)
+        out["backup"] = backup
+        out["custody"] = dict(getattr(self, "custody_info", None) or {})
+        out["custody"]["ceremony_public_key"] = custody.public_key_info(
+            self.config_dir)
         # Live balance lookups are OPT-IN (p["balances"]): each one is a
         # network round-trip that can run past the client's 10s timeout.
         # Plain `spellbook status` stays fast; the dashboard reads balances

@@ -142,8 +142,9 @@ For any other agent, paste them into its system prompt:
 
 > At the start of every session and after context compaction, check
 > `spellbook_seed_status` (or `spellbook-seed status`). If it is not
-> `unlocked`, start `spellbook_seed_viewer` (or `spellbook-seed serve`),
-> give your human the link, and wait until it is. You request and your
+> `unlocked`, call `spellbook_seed_viewer` (or `spellbook-ceremony url
+> seal`), give your human the hosted link, relay the envelope they return
+> to the daemon user, and wait until it is. You request and your
 > human approves. Never ask for their approve token, seal password or
 > recovery words. Once per session, check `spellbook_version` (or
 > `spellbook upgrade --check`). If an upgrade is available, follow its

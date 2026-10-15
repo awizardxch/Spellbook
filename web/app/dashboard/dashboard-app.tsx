@@ -1540,9 +1540,9 @@ export default function DashboardApp({
 /**
  * Security panel — static guidance only. This site runs on Vercel, not on
  * the agent's machine, so it can never read, reveal or unlock a seed. Seal
- * and unlock happen on the agent's VM (spellbook-seed serve, a one-time
- * local page); key reveal is `python3 -m spellbook.recovery backup` at the
- * VM's terminal. docs/SEALED_SEED.md.
+ * and unlock use the static ceremony pages (/ceremony/seal.html: crypto in
+ * the browser, no network, encrypted to the daemon's public key; review
+ * S-17/S-18); the daemon user opens the envelope. docs/SEALED_SEED.md.
  */
 function SecurityPanel() {
   return (
@@ -1551,19 +1551,20 @@ function SecurityPanel() {
         <h2>Security &amp; Backup</h2>
         <p className="dash-note">
           Your keys control your funds. Keep the paper backup (both sets of 24
-          words) offline, two copies, two places. This site never asks for
-          your recovery words or your seal password — anything that does is
-          not Spellbook.
+          words) offline, two copies, two places. This dashboard never asks
+          for your recovery words or your seal password. Only the ceremony
+          pages under <code>/ceremony/</code> do, and they encrypt in your
+          browser and send nothing anywhere.
         </p>
 
         <div className="dash-security-status">
           <h3>Seed lock (survives VM wipes)</h3>
           <p className="dash-note">
             Seal your agent&apos;s seed with a password you choose, so a wiped
-            or restarted VM gets the same wallet back. Sealing and unlocking
-            happen on your agent&apos;s own machine: your agent runs{" "}
-            <code>spellbook-seed serve</code> and sends you a one-time link;
-            enter your password there. Never on this site, never in chat.
+            or restarted VM gets the same wallet back. Your agent sends you a
+            link to the seal page (<code>/ceremony/seal.html</code>); check
+            the daemon key fingerprint, enter your password there, and give
+            your agent the encrypted envelope it prints. Never in chat.
           </p>
           <p className="dash-note">
             Your agent checks the lock at the start of every session with{" "}

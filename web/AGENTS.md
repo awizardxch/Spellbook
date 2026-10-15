@@ -8,6 +8,8 @@ never signs, never approves, never broadcasts.
 
 - **Read-only.** The dashboard has no transaction path. Approvals happen
   through the daemon's queue (`request_spend` → `queue_approve`), never here.
+  `queue_approve` is the human's call, made with the approve token on the
+  human's own device; an agent never holds or uses the approve token.
 - **No key material.** Never send seeds, mnemonics, private keys, or
   passwords to any dashboard endpoint. The relay and the site both reject
   requests containing them.

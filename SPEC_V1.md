@@ -523,10 +523,12 @@ mTLS cert, or submit transactions.
   permit2?, token_a, token_b, amount_a_wei, amount_b_wei,
   amount_a_min_wei?, amount_b_min_wei?, fee?, tick_lower?, tick_upper?,
   tick_spacing?, hooks?, liquidity?, purpose?, deadline_sec?}` → bounded
-  LP-add intent (v2/v3/v4, §10). v2/v3 name a `router` (v2 router or v3
-  NonfungiblePositionManager); v4 names `position_manager` + `permit2`,
-  where `amount_a/b_wei` are the hard max spends and `liquidity` is the
-  position liquidity to mint.
+  LP-add intent (v2/v3/v4, §10). The v2 router, v3
+  NonfungiblePositionManager, v4 `position_manager` and `permit2` come
+  from the pinned contract table (S-21): omit them, or pass exactly the
+  pinned address — anything else, or a chain with no pin, is refused.
+  For v4, `amount_a/b_wei` are the hard max spends and `liquidity` is
+  the position liquidity to mint.
 - `POST /v1/dex_lp_remove {intent, chain, protocol, router?,
   position_manager?, pair?, token_a, token_b, token_id?, liquidity,
   amount_a_min_wei?, amount_b_min_wei?, burn_nft?, purpose?,
@@ -695,9 +697,75 @@ tooling (approve token), showing
   calldata itself at execution time. Rules:
   - No opaque calldata ever reaches the signer: swap calldata comes from
     the venue's firm quote (fetched at execution, ~30s lifetime) and is
-    validated field-by-field against the approved bounds
-    (`dex.validate_swap_intent_against_quote`); LP calldata is built
-    locally from the approved bounds via whitelisted builders only.
+    **decoded** and bound to the approved bounds before signing
+    (`dex.validate_swap_intent_against_quote` → `dex.decode_swap_tx`;
+    the quote's own sell/buy/amount fields are the venue's claims, not
+    evidence); LP calldata is built locally from the approved bounds via
+    whitelisted builders only.
+  - **Pinned contracts (S-20, added 2026-10-15).** Swap targets,
+    spenders and LP contracts come only from the in-code table
+    `dex.PINNED_CONTRACTS` (per chain id and role); a chain/role with no
+    pin is refused at request time and again at execution. Built in
+    (2026-10-15), Robinhood Chain 4663 and Base 8453, each copied from
+    an official list and labeled with its source:
+
+    | Role | 4663 Robinhood Chain | 8453 Base | Source |
+    |---|---|---|---|
+    | `allowance_holder` (0x, matcha/cast) | `0x0000000000001fF3684f28c67538d4D072C22734` | same | 0x-settler README, "AllowanceHolder addresses" (Cancun chains) |
+    | `universal_router` | `0x06AfBA43Fd06227fA663b0DAecF536f6EaA6bf99`; also #v2.1.2 `0x204FAca1764B154221e35c0d20aBb3c525710498` | `0x6fF5693b99212Da76ad316178A184AB56D299b43` (v2.0); also #v2.1.2 `0xd6145b2D3F379919E8CdEda7B97e37c4b2Ca9c40`, #v2.1.1 `0xFdf682F51FE81Aa4898F0AE2163d8A55c127fbC7`, #v2.1 `0xF3A4F4094BD2c6C06cA2F61789d8727B8d1e7259` | Uniswap deployments.json |
+    | `permit2` | `0x000000000022D473030F116dDEE9F6B43aC78BA3` | same | Uniswap deployments.json |
+    | `v4_position_manager` | `0x58daec3116aae6D93017bAAea7749052E8a04fA7` | `0x7C5f5A4bBd8fD63184577525326123B519429bDc` | Uniswap deployments.json |
+    | `v4_pool_manager` | `0x8366a39CC670B4001A1121B8F6A443A643e40951` | `0x498581fF718922c3f8e6A244956aF099B2652b2b` | Uniswap deployments.json |
+    | `v4_state_view` | `0xF3334192D15450CdD385c8B70e03f9A6bD9E673b` | `0xA3c0c9b65baD0b08107Aa264b0f3dB444b867A71` | Uniswap deployments.json |
+    | `v3_position_manager` | `0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3` | `0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1` | Uniswap deployments.json |
+    | `v3_swap_router` (reference only) | `0xCaf681a66D020601342297493863E78C959E5cb2` | `0x2626664c2603336E57B271c5C0b26F421741e481` | Uniswap deployments.json |
+    | `v2_router` | `0x89e5DB8B5aA49aA85AC63f691524311AEB649eba` | `0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24` | Uniswap deployments.json |
+
+    "Uniswap deployments.json" is https://developers.uniswap.org/deployments.json
+    as generated 2026-09-22 from github.com/Uniswap/contracts at
+    a677c0d4b5fb6e3357cf6d0f0315bcb135a1e1ee; the records used are
+    committed in `tests/fixtures/uniswap_deployments_4663_8453.json` and
+    `tests/test_dex_pins.py` checks every pin against them. A role may
+    accept several official addresses (`dex.PINNED_ALTERNATES`: the
+    Universal Router versions the Trading API may return); Base's
+    UniversalRouter v1.2 is not accepted. Every other chain is refused.
+    The 0x Settler (the AllowanceHolder's inner target) rotates and is
+    not pinned; the decode requires only that it is none of the tokens,
+    the wallet or the holder. Closing that gap means pinning
+    `ownerOf(2)` (feature 2, taker-submitted) on the Settler registry
+    `0x00000000000004533Fe15556B1E086BB1A72cEae` (`dex.SETTLER_REGISTRY`),
+    which needs an eth_call the daemon does not make yet.
+    The operator may add or replace pins with
+    `dex.pinned_contracts: {"<chain id>": {"<role>": "0x…"}}` in
+    spellbook.json; each override is logged at startup and labeled as
+    such in `dex_venues` and the queue.
+  - **What a swap must decode to (S-20).** Refused unless: `to` is the
+    pinned target for the venue (AllowanceHolder for matcha/cast,
+    Universal Router for uniswap); the selector is a known entry point
+    of it (`AllowanceHolder.exec`, `UniversalRouter.execute`); the
+    decoded sell token and amount equal the intent's (an `exec` grant
+    of anything else, or of more, is refused); the recipient is the
+    wallet; the decoded minimum out (0x Settler's slippage struct, or
+    the Universal Router's swap/sweep/unwrap minimums) is at least the
+    intent's; `value` is 0 for a token sell and exactly the sell amount
+    for a native sell. Universal Router commands other than
+    V2/V3_SWAP_EXACT_IN, WRAP_ETH, UNWRAP_WETH, SWEEP and V4_SWAP are
+    refused. A V4_SWAP must be exact-input swaps (SWAP_EXACT_IN_SINGLE
+    or SWAP_EXACT_IN) of the sell token into the buy token, then one
+    SETTLE/SETTLE_ALL of the sell token (from the wallet, or native from
+    the tx value) and one TAKE/TAKE_ALL of the whole buy amount to the
+    wallet; its params must be the canonical encoding of the
+    v4-periphery structs, so a different layout is refused rather than
+    misread. Calldata that does not decode is refused, naming venue and
+    selector. The ERC-20 approve the daemon issues is re-checked at
+    signing: pinned spender, sell token, at most the sell amount. A
+    Uniswap token sell pulls through Permit2: the sell token is approved
+    to the pinned Permit2, then `Permit2.approve(token, router, amount,
+    expiry = intent deadline)` to the pinned router the decoded tx
+    targets, both exact-amount. The quote asks for the permit as a
+    transaction (`generatePermitAsTransaction`); the daemon never signs
+    an EIP-712 permit for a swap, and a router call carrying
+    PERMIT2_PERMIT is refused.
   - **Venue recommendations (not a gate):** the user keeps a
     recommended-venue list, `dex.recommended_venues` in spellbook.json
     (default: matcha + uniswap; "0x" is accepted as an alias for
@@ -712,13 +780,17 @@ tooling (approve token), showing
     time with a clear reason — that is a capability fact, not a policy
     choice.
   - Exact-amount ERC-20 approvals only (allowance checked on-chain
-    first; no unlimited approvals). The spender comes from the quote,
-    never hardcoded.
+    first; no unlimited approvals). The spender is the pinned contract;
+    a quote naming any other spender is refused.
   - One approval = one execution attempt: the approve (+swap/LP) is the
     single execution of the intent. Unknown-fate broadcasts are never
     retried (existing §10 unknown-fate rule).
   - The human's queue view shows the decoded bounds (sell/buy/min/slippage
-    or LP range/amounts/router) — never just a hash.
+    or LP range/amounts/router) — never just a hash. A queued swap also
+    shows `swap_checks`: the pinned target and spender, the accepted
+    selectors and the required recipient; the decoded call itself
+    (target, selector, tokens, amounts, recipient) is returned with the
+    execution result as `decoded`, since the calldata only exists then.
   - **LP remove/claim (implemented 2026-09-25):** `dex_lp_remove` and
     `dex_lp_claim` are force-queued — they always need human approval
     and never auto-execute, even with an empty velocity footprint.
@@ -731,9 +803,30 @@ tooling (approve token), showing
     that the pool is initialized (`getSlot0` non-zero), and funds through
     two exact-amount Permit2 stages (token → Permit2, then Permit2 →
     PositionManager with expiry = the intent deadline — never unlimited).
-    v4 is hookless-pools-only and refuses native currency (wrap to WETH
-    first) in this release; v2 claims are refused outright because v2
+    v4 is hookless-pools-only; v2 claims are refused outright because v2
     fees are embedded in the LP token — the remove is the claim.
+  - **LP contracts and caps (S-21, added 2026-10-15).** The v2 router,
+    v3 NonfungiblePositionManager, v4 PositionManager and Permit2 for
+    add, remove and claim come from the pinned table, re-resolved at
+    execution; an agent-supplied address is accepted only if it is the
+    pin. Each leg is keyed one way for policy and velocity
+    (`dex.dex_asset_key`: the zero address and 0x's 0xEeee… are
+    `native`), so a v4 native leg counts against the native caps. Before
+    signing, the v4 `modifyLiquidities` call is decoded: actions exactly
+    `[MINT_POSITION, SETTLE_PAIR]`, the intent's currencies, a hookless
+    pool, each `amountMax` within its approved cap, the native `value`
+    within the native cap, and the position NFT owned by the wallet.
+    Every other LP call is decoded before signing too: v2 `addLiquidity`
+    and v3 `mint` (the intent's tokens, fee and ticks, each desired
+    amount within its cap, minimums at least the approved ones, LP
+    tokens/NFT to the wallet); v2 `removeLiquidity` (exact LP amount,
+    minimums, proceeds to the wallet); v3 `multicall([decreaseLiquidity,
+    collect])` and `collect` (the approved position, exact liquidity,
+    collected tokens to the wallet); v4 `[DECREASE_LIQUIDITY, TAKE_PAIR]`
+    (+ `BURN_POSITION` only when approved) with TAKE_PAIR to the wallet.
+    v2/v3 legs are ERC-20s only (a native leg is refused: wrap first or
+    use v4). A v4 add also requires the PositionManager's `poolManager()`
+    to be the pinned PoolManager.
     Protocol semantics come from the official Uniswap docs (v3
     NonfungiblePositionManager, v4 PositionManager / Actions guides);
     the spec above describes only what Spellbook adds: strict schemas,
@@ -1313,7 +1406,10 @@ own installs without risking their identity. Design, implemented on
    one strict `X.Y.Z` tag, refuses downgrades and `--from-dir` (unsigned),
    and execs the pinned installer copy — so the agent can only ever install
    maintainer-signed releases (SHA-256 + release-key GPG verified pre-install),
-   moving strictly forward. The release-key fingerprint
+   moving strictly forward. The key alone is not enough (review S-22): the
+   wrapper also requires the signed tag on the canonical `main`, the tarball
+   hash published on `main`, no entry in `releases/YANKED`, and a 24 h delay
+   window (docs/RELEASE_KEY.md, "Release acceptance"). The release-key fingerprint
    (`SPELLBOOK_RELEASE_KEY_FPR`) is still unconfigured: release installation
    fails closed until Speechless pins it (open decision, carried).
 4. **Doctor.** `spellbook doctor` (request-token side, via the daemon's

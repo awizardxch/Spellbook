@@ -13,9 +13,10 @@ Code: `src/spellbook/sealed.py`. CLI: `spellbook-seed`. Tests:
 install / first run            VM wipe                       next session
 ───────────────────            ───────                       ────────────
 seed.key (+ std_seed.key)      seed files gone               spellbook-seed status → locked (exit 3)
-        │                      seed.sealed survives          spellbook-seed serve  → one-time link
-spellbook-seed serve           (~/workspace persists)        human: link → password → Unlock
-human: link → password → Seal                                seed files rewritten (0600), same wallet
+        │                      seed.sealed survives          spellbook-ceremony url seal → hosted link
+spellbook-ceremony url seal    (~/workspace persists)        human: link → password → envelope
+human: link → password → envelope                            daemon user: spellbook-ceremony apply
+daemon user: spellbook-ceremony apply                        seed files rewritten (0600), same wallet
         │                                                    daemon starts
 ~/workspace/.spellbook/seed.sealed
 ```
@@ -25,7 +26,9 @@ human: link → password → Seal                                seed files rewr
 | Command | Who | What |
 |---|---|---|
 | `spellbook-seed status [--json]` | agent, every session | Shows the public state and needs no password. Exit codes: 0 unlocked, 3 locked, 4 unsealed, 5 mismatch, 6 empty, 7 no_access (a system install owned by the daemon's user: run as that user) |
-| `spellbook-seed serve [--port 8787]` | agent starts it, human uses it | One-time local page. It shows **Seal** when unsealed and **Unlock** when locked, and exits after one success or 5 wrong passwords |
+| `spellbook-ceremony url seal` | agent | Hosted seal/unlock link with the daemon's PUBLIC key in the fragment (see below) |
+| `spellbook-ceremony apply FILE` | daemon user or root | Opens the envelope the hosted page printed, then seals or unlocks. Refuses the agent's OS user |
+| `spellbook-seed serve [--port 8787]` | the HUMAN, as the daemon user or root | One-time local page. It shows **Seal** when unsealed and **Unlock** when locked, and exits after one success or 5 wrong passwords. Refuses the agent's OS user (S-18) |
 | `spellbook-seed seal [--replace]` | human at a terminal | TTY password prompt, entered twice. `--replace` changes the password, but only for the **same** wallet |
 | `spellbook-seed unlock` | human at a terminal | TTY password prompt |
 
@@ -34,7 +37,34 @@ environment variables `SPELLBOOK_CONFIG_DIR` and `SPELLBOOK_SEALED_PATH`
 set the same things. `--password-stdin` exists for a human's own
 pipeline. An agent must never use it.
 
-## Reaching the viewer page
+## Seal and unlock through the hosted page (the agent's route)
+
+Review 2026-10-15 S-17/S-18: the agent never starts, serves or reads a page
+the human types a password into. The page is hosted,
+`https://spellbook.awizard.dev/ceremony/seal.html`, and runs only in the
+human's browser (no network, pinned by `ceremony/asset-index.json`):
+
+1. The agent gets the link: `spellbook-ceremony url seal` (or the MCP tool
+   `spellbook_seed_viewer`). It carries only the daemon's ceremony PUBLIC
+   key, in the URL fragment, read from the root-owned copy the installer
+   publishes (`/usr/local/share/spellbook/ceremony.pub.pem`).
+2. The human compares the **Spellbook daemon key fingerprint** the page
+   shows with the one the daemon printed for them (installer log, their
+   own terminal `spellbook export` screen, `sudo spellbook ceremony-key`),
+   types the password, and pastes the agent an encrypted envelope.
+3. The agent saves the envelope to a file; the daemon user opens it:
+   `sudo -u spellbook spellbook-ceremony apply FILE`. It refuses the
+   agent's OS user, enforces the password strength rule the page shows,
+   and seals or unlocks. The agent cannot open the envelope.
+
+The relay step needs the daemon user or root. There is deliberately no
+daemon route for it: a request-token route that installs an envelope
+would let the agent seal its own seed to the public key. On a single-user
+agent VM (the daemon runs as the agent's own user) there is no custody
+separation for software to enforce: anything running as that user can
+read the seed files while they are unlocked (review S-16, S-18).
+
+## Reaching the local viewer page (human-started)
 
 `serve` binds `127.0.0.1` by default. The human reaches it by one of:
 - a browser on the VM itself
@@ -105,6 +135,8 @@ In the agent's startup instructions (or a session-start hook), add:
 spellbook-seed status || echo "Spellbook seed not unlocked — see docs/SEALED_SEED.md"
 ```
 
-On `locked`/`unsealed`, the agent runs `spellbook-seed serve`, sends the
-link to its human, and waits for the page to report success before it
-starts `spellbookd`.
+On `locked`/`unsealed`, the agent gets the hosted seal link
+(`spellbook-ceremony url seal`), sends it to its human, relays the
+envelope they return to the daemon user (`spellbook-ceremony apply`), and
+waits for `spellbook-seed status` to report `unlocked` before it starts
+`spellbookd`.

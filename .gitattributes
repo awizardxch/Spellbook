@@ -1,0 +1,11 @@
+# Shell scripts run on Linux: keep them LF in every checkout (a CRLF
+# checkout breaks `sh scripts/spellbook-upgrade` and install.sh).
+*.sh text eol=lf
+scripts/spellbook-upgrade text eol=lf
+# Ceremony assets are served byte-for-byte and pinned by hash in the asset
+# index (src/spellbook/asset_index.py): never let a checkout rewrite them.
+# The repo-side ceremony directory ships to installs (its helpers run on
+# Linux, its index mirrors the published one): LF too.
+web/public/ceremony/** text eol=lf
+web/public/asset-index.json text eol=lf
+ceremony/** text eol=lf

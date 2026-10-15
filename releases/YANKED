@@ -1,0 +1,7 @@
+# Yanked Spellbook releases and revoked release keys (review S-22).
+#
+# spellbook-upgrade reads this file from the canonical main branch and
+# refuses any release whose tag, or whose signing key fingerprint, is the
+# first word of a line here. One entry per line: "<X.Y.Z> <reason>" or
+# "<40-hex fingerprint> <reason>". Lines starting with # are comments.
+# Yank inside the delay window (24 h by default) to stop installs.

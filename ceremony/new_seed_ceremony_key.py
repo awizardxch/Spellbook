@@ -1,80 +1,79 @@
 #!/usr/bin/env python3
 """
-Rotate the ceremony keypair used by seed-to-addresses.html envelopes.
+Print the hosted ceremony links for the DAEMON's ceremony PUBLIC key.
+This script never makes, reads or touches a private key (review S-16), and
+it stamps no HTML (review S-17): the ceremony pages are hosted at
+https://spellbook.awizard.dev/ceremony/ and read the public key from the
+link's #fragment; the old ceremony/*.html files are pointers to them.
 
-- Generates a fresh RSA-2048 keypair.
-- Stores the private key at ~/workspace/.spellbook/seed-derive/private.pem
-  (mode 600, outside the repo — never commit it).
-- Stamps the public key into the DELIVERED HTML copies so the page can
-  seal envelopes only this agent can open.
+The key that decrypts the human's envelopes belongs to the spellbook
+daemon user. It is created inside the daemon's own 0700 dir by
 
-The repo copy (ceremony/seed-to-addresses.html) keeps the
-__SEED_PUB_B64__ placeholder and is never stamped.
+    sudo spellbook ceremony-key --prefix /opt/spellbook
 
-Run this at the start of each reseed ceremony, then hand the delivered
-page to the human.
+(install.sh runs this as the daemon user and publishes the public half,
+root-owned, at /usr/local/share/spellbook/ceremony.pub.pem). The same
+public key is in `spellbook status` (custody.ceremony_public_key).
+
+Usage (safe for the agent: public material only):
+    python3 new_seed_ceremony_key.py                       # the published key
+    python3 new_seed_ceremony_key.py --public-key-file PUB # PEM or base64 SPKI
+    python3 new_seed_ceremony_key.py --stdin               # key on stdin
+
+It prints the key fingerprint and the seal / restore links. The human
+compares the fingerprint the page shows with the one the DAEMON printed
+for them (installer log, terminal `spellbook export`, `spellbook
+ceremony-key` in their own root shell), never only the one the agent
+quotes. `spellbook-ceremony url seal|restore|backup` does the same.
+
+Earlier versions generated an RSA key here and kept private.pem in the
+agent's workspace. Any such key must be moved to the daemon with
+`sudo spellbook ceremony-adopt --prefix /opt/spellbook`, which overwrites
+and unlinks the agent's copy.
 """
+import argparse
 import os
-import re
-import base64
-import stat
+import sys
 
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives import serialization
-
-KEY_DIR = os.path.expanduser("~/workspace/.spellbook/seed-derive")
-PRIVATE_PEM = os.path.join(KEY_DIR, "private.pem")
-# Delivered copies the human actually opens (same file may appear twice).
-DELIVERED = [
-    os.path.expanduser("~/workspace/your_files/ceremony/seed-to-addresses.html"),
-]
-
-STAMP_RE = re.compile(r'const SEED_PUB_B64 = "[^"]*";')
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "..", "src"))
 
 
-def main():
-    os.makedirs(KEY_DIR, mode=0o700, exist_ok=True)
-    os.chmod(KEY_DIR, 0o700)
-
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    priv = key.private_bytes(serialization.Encoding.PEM,
-                             serialization.PrivateFormat.PKCS8,
-                             serialization.NoEncryption())
-    # Created 0600 (review S-05): the key never exists with loose modes,
-    # even for the instant between write and chmod.
-    fd = os.open(PRIVATE_PEM, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as f:
-        f.write(priv)
-    os.chmod(PRIVATE_PEM, 0o600)
-
-    pub_der = key.public_key().public_bytes(
-        serialization.Encoding.DER,
-        serialization.PublicFormat.SubjectPublicKeyInfo)
-    pub_b64 = base64.b64encode(pub_der).decode()
-    with open(os.path.join(KEY_DIR, "public_b64.txt"), "w") as f:
-        f.write(pub_b64)
-    os.chmod(os.path.join(KEY_DIR, "public_b64.txt"), 0o600)
-
-    import hashlib
-    fp = hashlib.sha256(pub_der).hexdigest()[:32]
-    print(f"new key fingerprint: {fp}...")
-
-    for path in DELIVERED:
-        if not os.path.exists(path):
-            print(f"SKIP (missing): {path}")
-            continue
-        with open(path) as f:
-            html = f.read()
-        new_html, n = STAMP_RE.subn(
-            f'const SEED_PUB_B64 = "{pub_b64}";', html)
-        if n == 0:
-            print(f"SKIP (no stamp point): {path}")
-            continue
-        with open(path, "w") as f:
-            f.write(new_html)
-        print(f"stamped: {path}")
-
-    print("Done. Private key stays at", PRIVATE_PEM)
+def main(argv=None):
+    from spellbook import ceremony
+    ap = argparse.ArgumentParser(description=__doc__.strip().split("\n")[0])
+    src = ap.add_mutually_exclusive_group()
+    src.add_argument("--public-key-file")
+    src.add_argument("--stdin", action="store_true")
+    ap.add_argument("--origin", default=ceremony.HOSTED_ORIGIN)
+    a = ap.parse_args(argv)
+    try:
+        if a.stdin:
+            text = sys.stdin.read()
+        else:
+            path = a.public_key_file or ceremony.find_public_key()
+            if not path:
+                raise ceremony.CeremonyError(
+                    "no published ceremony public key; pass --public-key-file")
+            with open(path) as f:
+                text = f.read()
+        if "PRIVATE KEY" in text:
+            raise ceremony.CeremonyError("that is a PRIVATE key — only the "
+                                         "public half is ever handled here")
+        text = "".join(text.split()) if not text.lstrip().startswith("-----") \
+            else text
+        if text.startswith("public_key_b64:"):
+            text = text.split(":", 1)[1]
+        der = ceremony.public_der(text)
+    except (ceremony.CeremonyError, OSError) as e:
+        raise SystemExit(f"refused: {e}")
+    fp = ceremony.grouped(ceremony.key_fingerprint(der))
+    print("Spellbook daemon key fingerprint (the human compares it on the page):")
+    print("  " + fp)
+    for page, op in (("seal", "seal"), ("seal", "unlock"), ("restore", "restore")):
+        print(f"{op + ' page:':<14} "
+              + ceremony.hosted_url(page, pub_der=der, op=op, origin=a.origin))
+    print(f"{'backup page:':<14} " + ceremony.hosted_url("backup", origin=a.origin))
 
 
 if __name__ == "__main__":

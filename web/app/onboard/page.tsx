@@ -119,9 +119,13 @@ export default function Onboard() {
             <p>
               Start every session, and resume after every context
               compaction, with <code>spellbook-seed status</code>. If the seed
-              is locked after a VM wipe, run <code>spellbook-seed serve</code>{" "}
-              and hand your human the one-time link. They unlock it with
-              their password. Also check <code>spellbook upgrade --check</code>.
+              is locked after a VM wipe, give your human the hosted seal
+              page link (<code>spellbook-ceremony url seal</code>; the
+              daemon&apos;s public key rides after the #). They type the
+              password in their own browser; you relay only the encrypted
+              envelope to the daemon user. You never serve a page and never
+              hold the key that opens it. Also check{" "}
+              <code>spellbook upgrade --check</code>.
             </p>
           </div>
           <div className="glass">
@@ -151,6 +155,9 @@ export default function Onboard() {
           </a>
           <a className="btn ghost" href={GITHUB_URL} target="_blank" rel="noopener noreferrer">
             View on GitHub
+          </a>
+          <a className="btn ghost" href="/onboard/integrity">
+            Ceremony asset hashes
           </a>
         </div>
       </div>

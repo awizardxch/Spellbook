@@ -11,7 +11,22 @@ TAKER = "0xc63fd4d246967347e9e9db12f748103c093ce463"
 TOKEN = "0x21BEd5462749227F1b83f654DaeB6E44D5ea1Cd6"
 WETH = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
 HOLDER = "0x0000000000001fF3684f28c67538d4D072C22734"
-CALLDATA = "0x2213bc0b" + "00" * 64
+SETTLER = "0x7777777777777777777777777777777777777777"
+
+
+def _calldata(sell=dex.NATIVE_SENTINEL, buy=TOKEN, amount=1000, min_out=4950):
+    """AllowanceHolder.exec(settler, sell, amount, settler,
+    Settler.execute((taker, buy, min_out), ...)), encoded with eth_abi."""
+    from eth_abi import encode
+    inner = bytes.fromhex("1fff991f") + encode(
+        ["(address,address,uint256)", "bytes[]", "bytes32"],
+        [(TAKER, buy.lower(), min_out), [bytes([1])], bytes(32)])
+    return "0x2213bc0b" + encode(
+        ["address", "address", "uint256", "address", "bytes"],
+        [SETTLER, sell.lower(), amount, SETTLER, inner]).hex()
+
+
+CALLDATA = _calldata()
 
 
 def _quote_payload(sell=dex.NATIVE_SENTINEL, buy=TOKEN, **over):
@@ -21,7 +36,8 @@ def _quote_payload(sell=dex.NATIVE_SENTINEL, buy=TOKEN, **over):
         "sellAmount": "1000", "buyAmount": "5000", "minBuyAmount": "4950",
         "allowanceTarget": None if sell == dex.NATIVE_SENTINEL else HOLDER,
         "approval": None,
-        "transaction": {"chainId": 4663, "to": HOLDER, "data": CALLDATA,
+        "transaction": {"chainId": 4663, "to": HOLDER,
+                        "data": _calldata(sell, buy),
                         "value": "1000" if sell == dex.NATIVE_SENTINEL else "0",
                         "gas": "210000", "gasPrice": "1000"},
     }
@@ -92,10 +108,10 @@ def test_token_sell_uses_allowance_target_even_when_no_approval_needed(calls):
     q = CastClient().quote(4663, TOKEN, dex.NATIVE_SENTINEL, 1000, TAKER)
     assert q["allowance_target"] == HOLDER
     plan = dex.validate_swap_intent_against_quote(
-        {"chain_id": 4663, "sell_token": TOKEN, "buy_token": dex.NATIVE_SENTINEL,
+        {"chain_id": 4663, "venue": "cast", "wallet": TAKER, "sell_token": TOKEN, "buy_token": dex.NATIVE_SENTINEL,
          "sell_amount_wei": 1000, "min_buy_amount_wei": 4900,
          "max_slippage_bps": 100}, q)
-    assert plan["needs_approval"] and plan["allowance_target"] == HOLDER
+    assert plan["needs_approval"] and plan["allowance_target"] == HOLDER.lower()
 
 
 def test_token_sell_falls_back_to_approval_spender(calls):
@@ -110,7 +126,7 @@ def test_token_sell_without_spender_fails_validation(calls):
     q = CastClient().quote(4663, TOKEN, WETH, 1000, TAKER)
     with pytest.raises(DexError, match="allowance_target"):
         dex.validate_swap_intent_against_quote(
-            {"chain_id": 4663, "sell_token": TOKEN, "buy_token": WETH,
+            {"chain_id": 4663, "venue": "cast", "wallet": TAKER, "sell_token": TOKEN, "buy_token": WETH,
              "sell_amount_wei": 1000, "min_buy_amount_wei": 1,
              "max_slippage_bps": 100}, q)
 
@@ -138,7 +154,7 @@ def test_quote_sell_amount_is_casts_echo(calls):
     q = CastClient().quote(4663, dex.NATIVE_SENTINEL, TOKEN, 1000, TAKER)
     with pytest.raises(DexError, match="exact amount"):
         dex.validate_swap_intent_against_quote(
-            {"chain_id": 4663, "sell_token": dex.NATIVE_SENTINEL,
+            {"chain_id": 4663, "venue": "cast", "wallet": TAKER, "sell_token": dex.NATIVE_SENTINEL,
              "buy_token": TOKEN, "sell_amount_wei": 1000,
              "min_buy_amount_wei": 1, "max_slippage_bps": 100}, q)
 
@@ -291,4 +307,12 @@ def test_uniswap_swap_without_key_is_refused_at_request_time(tmp_path, monkeypat
     for venue in ("matcha", "cast"):  # keyless venues pass
         assert d._validate_dex_swap({**base, "venue": venue})["venue"] == venue
     monkeypatch.setenv("UNISWAP_API_KEY", "k")
+    # The Universal Router is pinned for 4663 (uniswap deployments.json),
+    # so a keyed Uniswap swap is accepted at request time.
+    assert d._validate_dex_swap({**base, "venue": "uniswap"})["venue"] == "uniswap"
+    # On a chain with no pinned router it is refused.
+    with pytest.raises(evm.EvmError, match="no pinned universal_router"):
+        d._validate_dex_swap({**base, "venue": "uniswap", "chain": "evm-1"})
+    d = _daemon(tmp_path, {"recommended_venues": ["uniswap"], "pinned_contracts":
+                           {"4663": {"universal_router": "0x" + "6" * 40}}})
     assert d._validate_dex_swap({**base, "venue": "uniswap"})["venue"] == "uniswap"

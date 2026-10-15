@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'none'; form-action 'none'; base-uri 'none'">
+<title>Spellbook restore</title>
+<link rel="stylesheet" href="/ceremony/ceremony.css" integrity="sha384-WNsHLN+O2nzkXkIM+JeDphAgFyPztWrawwG4fo4LCk/Kbsr/RoXCyoiMfi07VhsM" crossorigin="anonymous">
+<script src="/ceremony/bip39.js" integrity="sha384-0qxqvj/gC7RUgEuIChe4epjlWjKcZDvN1e0VOxRZuCGf5WyjqO5sBcBSqVoItwih" crossorigin="anonymous" defer></script>
+<script src="/ceremony/common.js" integrity="sha384-IrrVPr8wTyyGxSBBT6VOjYqGvb3a2VURC0VSpjjCwJM7m9XpRj/upkyYNBmA+G00" crossorigin="anonymous" defer></script>
+<script src="/ceremony/restore.js" integrity="sha384-vgYoxxFDOaRHGUqTl/hLGg+94f93Q0w0ESCZrkyaZgyzFRibYflZwaLVe+e6SYbY" crossorigin="anonymous" defer></script>
+</head>
+<body>
+<main>
+<h1>Spellbook restore from paper</h1>
+<p class="sub">Type your paper words here. They are checked and encrypted in this browser to your <b>daemon's</b> public key; only the encrypted envelope goes to your agent, who cannot read it.</p>
+
+<div class="warnbox"><strong>Never type recovery words into chat.</strong> This page makes no network requests (its Content-Security-Policy forbids them). Published hashes: <code>/onboard/integrity</code>.</div>
+
+<div class="step">
+<span class="stepnum">1</span>
+<h2>Check the key</h2>
+<p class="note">Spellbook daemon key fingerprint in your link:</p>
+<div class="fp" id="keyfp">reading the link...</div>
+<label for="fpIn">Spellbook daemon key fingerprint, as your daemon printed it for you: on your own terminal's <code>spellbook export</code> screen, in the installer log, or from <code>sudo spellbook ceremony-key</code> in your own root shell. Never only the one your agent quotes in chat. The first 16 characters are enough:</label>
+<input type="text" id="fpIn" autocomplete="off" spellcheck="false">
+<div class="note" id="fpStatus"></div>
+<label class="inline"><input type="checkbox" id="noFp"> I have no fingerprint to compare. I accept that my agent could have put its own key in this link.</label>
+</div>
+
+<div class="step">
+<span class="stepnum">2</span>
+<h2>What are you restoring?</h2>
+<label class="inline"><input type="radio" name="mode" id="modeFull" value="full" checked> A full install (both word sets)</label>
+<label class="inline"><input type="radio" name="mode" id="modeSeed" value="seed"> The standard wallet only, as a passwordless sealed seed</label>
+
+<div id="fullBox">
+<label for="set1">SET 1: standard recovery words (24; the set that imports into Sage and MetaMask)</label>
+<textarea id="set1" autocomplete="off" spellcheck="false" placeholder="24 words"></textarea>
+<label for="set2">SET 2: Spellbook daemon seed words (24)</label>
+<textarea id="set2" autocomplete="off" spellcheck="false" placeholder="24 words"></textarea>
+<p class="note">Next, the daemon user runs <code>spellbook-ceremony restore</code>, which writes the key file for <code>install.sh --restore</code>. Then seal with a new password on the seal page.</p>
+</div>
+<div id="seedBox" hidden>
+<label for="seedIn">SET 1 standard recovery words (24), or the 128-hex BIP-39 seed</label>
+<textarea id="seedIn" autocomplete="off" spellcheck="false"></textarea>
+<p class="note">Makes a <code>SPELLBOOK-SEED-ENC2</code> envelope; the daemon opens it at start with its own private key (<code>sealed_envelope_path</code>).</p>
+</div>
+<div class="err" id="inErr"></div>
+<button type="button" id="encBtn">Check words and encrypt</button>
+</div>
+
+<div class="step" id="outStep" hidden>
+<span class="stepnum">3</span>
+<h2>Give the envelope to your agent</h2>
+<div class="doc" id="envOut"></div>
+<button type="button" class="ghost" id="copyEnv">Copy envelope</button>
+<div class="ok" id="envOk"></div>
+</div>
+
+<footer>Runs in your browser only · RSA-OAEP-SHA256 + AES-256-GCM · <a href="/onboard/integrity">asset hashes</a></footer>
+</main>
+</body>
+</html>

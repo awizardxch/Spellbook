@@ -121,7 +121,11 @@ The rules that keep this safe:
 
 - `upgrade` only ever installs maintainer-signed releases (SHA-256 + GPG
   release-key signature, verified before anything is replaced), and only
-  moves forward — downgrades are the human's call.
+  moves forward — downgrades are the human's call. The root wrapper also
+  checks the canonical repo itself: the signed tag must be on `main`,
+  its tarball hash published there, not yanked, and past a 24 h delay
+  window (`docs/RELEASE_KEY.md`). `NOT YET` (exit 75) means wait; a
+  refusal means do not install. Report either; never work around them.
 - `doctor --repair` fixes **code** (package, VERSION, Sage, daemon). It
   never regenerates keys, never mints tokens, never hand-edits config, never
   reconstructs the ledger — state problems fail closed with guidance for
@@ -149,9 +153,11 @@ truth for where *this* install keeps things. Never guess paths.
 - `spellbook.sock` — the daemon's Unix socket. The CLI finds it via
   `SPELLBOOK_SOCKET`.
 - `request.token` / `approve.token` — client auth. Request queues
-  intents; approve authorizes exactly one execution attempt. The CLI
-  reads them via `SPELLBOOK_REQUEST_TOKEN` / the approve-token path —
-  neither ever goes through the dashboard, which is read-only.
+  intents; approve authorizes exactly one execution attempt. Your CLI
+  reads the request token via `SPELLBOOK_REQUEST_TOKEN`. The approve
+  token is the human's: only the human's own tooling, on their device,
+  reads it. You never hold, read or use it. Neither token ever goes
+  through the dashboard, which is read-only.
 - `queue.json`, `ledger.jsonl`, `policy.json`, `velocity.jsonl` —
   daemon state. Read them freely; never hand-edit them.
 
@@ -294,15 +300,45 @@ other chain.
 `spellbook export`: on the human's own terminal (`sudo spellbook export`
 — words on `/dev/tty`, a pause, a screen clear, then 3 SET 1 words asked
 back; it refuses pipes and the agent's OS user), or, when the human can
-only reach you, encrypted to the seal ceremony's reveal key
-(`sudo spellbook export --reveal-key <public key>` prints only an
-envelope the human's page decrypts). You relay ciphertext and never see a
-word. No raw private keys are shown either way.
+only reach you, encrypted to a reveal key the human makes on the hosted
+backup page (`https://spellbook.awizard.dev/ceremony/backup.html`; you
+relay its public half, `sudo spellbook export --reveal-key <public key>`
+prints only an envelope, and that browser tab alone decrypts it). You
+relay ciphertext and never see a word. No raw private keys are shown
+either way.
 On a fresh install run from a real terminal the installer runs the
 terminal export itself at the end. Installs made before this change saved
 the whole backup to `$PREFIX/paper-backup.txt`; an upgrade warns while it
 exists — your human moves it off the machine and shreds it, you never
 read it.
+
+**Backup is forced (review S-16).** A fresh or restored install, and any
+seed loaded through the daemon's ceremony key, starts **BACKUP PENDING**:
+`spellbook status` shows `"backup": {"state": "pending"}`, read-only
+routes work, and every fund-moving route answers `backup pending: ...`
+naming the command your human runs. The terminal export confirms it
+itself once the typed-back words match the live seed. Through the
+reveal-key envelope, the decrypted backup ends with a one-time
+**BACKUP CONFIRMATION CODE**; when your human gives it to you, pipe it to
+`sudo spellbook backup-confirm --prefix <dir>` (stdin, never argv). The
+record is `<prefix>/backup.json`, written only by those commands; no
+daemon route and no token can set it. Installs made before this change
+show `"state": "legacy"` and keep working, with a warning at every daemon
+start until the human confirms.
+
+**One ceremony key, the daemon's.** The key that opens every ceremony
+envelope (seal, unlock, restore, and the passwordless
+`SPELLBOOK-SEED-ENC2` sealed seed) is the daemon's own
+(`<prefix>/ceremony/private.pem`, daemon user, 0600 in a 0700 dir); you
+never hold it. You get only its PUBLIC key: the installer publishes a
+root-owned copy at `/usr/local/share/spellbook/ceremony.pub.pem`, which
+`spellbook-ceremony url seal|restore` and `spellbook_seed_viewer` read
+(also `spellbook status` → `custody.ceremony_public_key`). The pages are
+hosted; you hand your human the link and relay the envelope they return
+to the daemon user (`sudo -u spellbook spellbook-ceremony apply|restore`).
+Your human checks the Spellbook daemon key fingerprint on the page
+against the one the daemon printed for them, never only the one you
+quote. See `ceremony/README.md`.
 
 - **SET 1 — STANDARD RECOVERY (primary: the daemon's live keys).**
   A second, independent 24-word BIP-39 mnemonic whose keys derive the
@@ -326,22 +362,33 @@ brings them back without anyone re-typing words — see
 [SEALED_SEED.md](SEALED_SEED.md).
 
 **Assume your human can only reach you, the agent** — no terminal, no
-SSH, no machine access. Every step below goes through you: you run the
-commands, you hand them links, they click.
+SSH, no machine access. You hand them links and relay what they paste
+back; you never run or serve a page they type a secret into (review
+2026-10-15, S-17/S-18).
 
-**Seal at install — required, not optional.** Right after the paper
-backup is confirmed, seal the seed before you call the install done:
+**The hosted ceremony.** The pages your human types a password or words
+into are served from the Spellbook site and run only in their browser
+(CSP `connect-src 'none'`, every script pinned by hash at
+`https://spellbook.awizard.dev/onboard/integrity`). The link you give
+them carries the daemon's **public** key after the `#`; the page
+encrypts to it and prints an envelope (`SPELLBOOK-CEREMONY1.`). You
+relay that envelope to the daemon user, who alone holds the private key:
 
 ```bash
-spellbook-seed serve   # prints a one-time link; exits after one success
+spellbook-ceremony url seal        # the link (public key in the fragment) + fingerprint
+spellbook-ceremony inspect env.txt # the envelope's kind and key fingerprint; decrypts nothing
+sudo -u spellbook spellbook-ceremony apply env.txt   # the daemon user opens it
 ```
 
-Get that link to your human in a browser. `serve` binds `127.0.0.1`, so
-arrange the path via your platform: an SSH tunnel, a port-forward /
-preview URL, or a TLS tunnel (e.g.
-`cloudflared tunnel --url http://127.0.0.1:8787`). The page is plain
-HTTP — the path to your human must be TLS, and the URL's one-time token
-is the only auth. They set the password on that page; the sealed file is
+From an MCP client: `spellbook_seed_viewer` returns the same link
+(`page`: `seal`, `restore` or `backup`), `spellbook_ceremony_inspect`
+reads an envelope's header. Tell your human to compare the fingerprint
+the page shows with the one their daemon printed for them: you relay
+the key, so that check is what stops a swapped one.
+
+**Seal at install — required, not optional.** Right after the paper
+backup is confirmed, give your human the seal link and relay the
+envelope they return; the daemon user applies it and the sealed file is
 written. **Never** ask for the password in chat, never pass it on a
 command line — you must never see it.
 
@@ -352,10 +399,14 @@ run:
 spellbook-seed status   # exit 0 unlocked · 3 locked · 4 unsealed · 5 mismatch · 6 empty · 7 no_access
 ```
 
-- `locked` → run `spellbook-seed serve`, give your human the one-time
-  link it prints, and wait. They enter the password on that page; the
-  seed files come back and the daemon can start.
-- `unsealed` → same command; the page offers **Seal** to your human.
+- `locked` → give your human the seal link (`spellbook-ceremony url
+  seal`, op `unlock`), relay the envelope they return to the daemon user
+  (`spellbook-ceremony apply`), and wait. The seed files come back and
+  the daemon can start.
+- `unsealed` → same, op `seal`: your human chooses the password.
+- `empty` after a wipe with no seal → `spellbook-ceremony url restore`;
+  the daemon user turns the envelope into the `install.sh --restore`
+  file with `spellbook-ceremony restore --out`.
 - **Never** ask for the password in chat, never pass it on a command
   line, and never re-install over a `locked` wallet (a new install mints
   a new wallet and strands the old one).
@@ -722,6 +773,59 @@ the chain: the 46630 testnet is not served by either venue, so asking
 for a matcha swap on Robinhood Chain testnet is refused immediately
 with "does not serve" (a capability fact, not a policy choice).
 
+### What the daemon checks before signing a swap
+
+The venue's transaction is decoded and compared with your intent; the
+quote's own numbers are not trusted. Contracts come from a pinned,
+in-code table per chain (`spellbook dex-venues` lists it under
+`pinned_contracts`, with each address's source). Two chains are
+pinned, from official lists:
+
+| Chain | Swap venues | LP |
+|---|---|---|
+| Robinhood Chain (4663) | matcha, cast (0x AllowanceHolder); uniswap (Universal Router, two versions) | v2, v3, v4 |
+| Base (8453) | matcha, cast (0x AllowanceHolder); uniswap (Universal Router v2.0, v2.1, v2.1.1, v2.1.2) | v2, v3, v4 |
+
+Sources: the 0x AllowanceHolder `0x0000000000001fF3684f28c67538d4D072C22734`
+from the 0x-settler README ("AllowanceHolder addresses", Cancun
+chains); every Uniswap contract (Universal Router, Permit2, v4
+PositionManager/PoolManager/StateView, v3 NonfungiblePositionManager,
+v2 Router02) from Uniswap's deployment feed,
+https://developers.uniswap.org/deployments.json (generated 2026-09-22,
+github.com/Uniswap/contracts a677c0d). SPEC_V1.md §10 has the full
+address table. **Refused:**
+
+- any chain/venue whose swap contract is not pinned (every chain but
+  4663 and 8453), refused at request time;
+- a `to` or spender other than the pinned contract (for uniswap: a
+  router version not in the feed, e.g. Base's v1.2 router);
+- a selector that is not a known swap entry point, or calldata that
+  does not decode (the error names the venue and selector);
+- a decoded sell token or amount different from the intent (an `exec`
+  allowance larger than the sell, including unlimited);
+- a recipient other than this wallet, or a decoded minimum out below
+  `min_buy_amount_wei`;
+- nonzero `value` on an ERC-20 sell, or a native sell whose `value` is
+  not exactly the sell amount;
+- Universal Router commands other than V2/V3_SWAP_EXACT_IN, V4_SWAP,
+  WRAP_ETH, UNWRAP_WETH and SWEEP (fees, transfers, exact-output swaps,
+  and permits are refused). A V4_SWAP must be exact-input swaps of your
+  sell token into your buy token, one settle of the sell token and one
+  take of the buy token to this wallet.
+
+The daemon's own approve is the exact sell amount to the pinned spender:
+the AllowanceHolder for matcha/cast; for a uniswap token sell, Permit2,
+followed by an exact-amount `Permit2.approve` to the router the decoded
+transaction targets, expiring with the intent. The daemon asks the
+Trading API for the permit as a transaction and never signs an EIP-712
+permit for a swap. The 0x Settler behind the AllowanceHolder rotates and
+is not pinned (it must be none of the tokens, the wallet or the holder).
+A queued swap shows `swap_checks` (pinned target, spender, recipient);
+the execution result carries `decoded` (target, selector, tokens,
+amounts, recipient). The operator can pin more contracts in
+spellbook.json (`dex.pinned_contracts`); each override is logged at
+daemon start and labeled in the queue.
+
 ### Direct pool calldata (no API key)
 
 ```python
@@ -827,20 +931,41 @@ holds a single asset.
      `burn-nft` retires the NFT on full exits). `dex-lp-claim` → a
      **zero-liquidity** `DECREASE_LIQUIDITY` (the documented fee-credit
      path) + `TAKE_PAIR`.
-   - **Robinhood Chain Permit2:** The canonical Permit2 address differs
-     by chain. On Robinhood Chain (4663) use
-     `0x000000000022D473030F116dDEE9F6B43aC78BA3`, **not** the Ethereum
-     mainnet `0x000000000022D473030F64655049CB8E2943346F`. Using the wrong
-     address results in no-op approval transactions (status=1 but no code
-     at the address) followed by `INCREASE_LIQUIDITY`/`MINT_POSITION`
-     reverts when the PositionManager cannot pull tokens via Permit2.
+   - **LP contracts are pinned.** Omit `router`, `position-manager` and
+     `permit2`: the daemon uses its pinned table (`spellbook dex-venues`
+     → `pinned_contracts`), copied from Uniswap's deployment feed. On
+     Robinhood Chain (4663): v2 Router02
+     `0x89e5DB8B5aA49aA85AC63f691524311AEB649eba`, v3
+     NonfungiblePositionManager
+     `0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3`, v4 PositionManager
+     `0x58daec3116aae6D93017bAAea7749052E8a04fA7`. On Base (8453): v2
+     Router02 `0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24`, v3
+     NonfungiblePositionManager
+     `0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1`, v4 PositionManager
+     `0x7C5f5A4bBd8fD63184577525326123B519429bDc`. Permit2 is
+     `0x000000000022D473030F116dDEE9F6B43aC78BA3` on both. Passing any
+     other address is refused, and so is any LP intent on another
+     chain. v2/v3 legs are ERC-20s only (wrap native first, or use v4).
+   - **Every LP call is decoded before signing:** v2 `addLiquidity` /
+     `removeLiquidity`, v3 `mint` / `multicall(decreaseLiquidity,
+     collect)` / `collect`, and v4 `modifyLiquidities` must name the
+     intent's tokens and position, stay within each leg's cap and
+     minimums, and pay the LP tokens, NFT or proceeds to this wallet. A
+     v4 add also requires the PositionManager's PoolManager to be the
+     pinned one.
+   - **Native legs count as native.** In a v4 add the native leg
+     (`0x000…0`) is checked and recorded under `native`, the same key as
+     a plain native transfer, so it uses the native auto-approve and
+     velocity caps. Before signing, the daemon decodes its own mint call
+     and refuses unless both legs are within their caps and the position
+     NFT goes to this wallet.
    - **Spellbook's guardrails on top:** remove/claim always queue for
      human approval (never auto-execute, never count toward velocity —
      they receive value, not spend it). Execution pre-flights are
      read-only and fail closed: the wallet must own the position NFT
      (`ownerOf`), the v2 pair contract's `token0`/`token1` must match
-     the intent before any approval, v4 is **hookless pools only** and
-     refuses native currency (wrap to WETH first), approvals are always
+     the intent before any approval, v4 is **hookless pools only** (a
+     native leg must be currency0 and settles as tx value), approvals are always
      exact amounts (never unlimited), and one approval = one execution
      attempt with no retries. Never accept or forward opaque calldata —
      the daemon builds every call from the approved bounds.
@@ -858,13 +983,17 @@ operational shape; Speechless decided it explicitly:
 
 - **No dashboard approvals.** The dashboard is read-only by design —
   it cannot approve, sign, or broadcast, and no approve button will be
-  added. The model is **agentic swaps with human delegation**:
-  the agent prepares (indicative quote → bounded queue intent), the
-  human approves **in chat**, and the agent conveys that approval via
-  the approve-token path as the human's delegate. The chat message is
-  the authorization — the agent never approves its own action. Note the
-  conveyance in the intent's purpose (e.g. `chat-approved 2026-09-24`)
-  so the ledger shows whose decision it was.
+  added. The model is **agentic swaps, human approval**: the agent
+  prepares (indicative quote → bounded queue intent) and shows the
+  human the decoded intent; the human approves it **themselves**, with
+  the approve token on their own device (`spellbook approve <queue_id>`
+  or `HumanClient`, see `docs/HUMAN_GUIDE.md` §3). The agent never
+  holds, reads or uses the approve token, and never calls
+  `queue_approve` or `mint_sign_ref`. A chat message is never an
+  approval the agent can pass on: chat is not authenticated, so an
+  approval the agent could convey is one an injected agent could forge
+  (review S-19). Signed approval refs (f-01) are minted only with the
+  approve token, on the human's side.
 - **The production seed never leaves the local daemon.**
   Cloud/deployed agents do not need it and do not receive it. The
   quote relay (the operator's, by default — no key on the agent side;
@@ -873,8 +1002,8 @@ operational shape; Speechless decided it explicitly:
   seed in a website-login vault or a cloud deployment.
 - **Mainnet config:** `evm-4663` enabled with its mainnet RPC,
   `mainnet_submit_enabled: true`, relay env vars on the daemon.
-- **Flow:** indicative quote → queue bounded intent → human chat
-  approval → delegate conveys → one execution attempt → receipt
+- **Flow:** indicative quote → queue bounded intent → the human
+  approves on their own device → one execution attempt → receipt
   verification → daemon shutdown (on-demand only; never idle).
 - **Unknown fate is never retried.** A broadcast whose receipt never
   arrives is reconciled read-only from chain state. A failure *before*

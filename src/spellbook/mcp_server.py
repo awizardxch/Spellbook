@@ -28,14 +28,19 @@ INSTRUCTIONS = """\
 Spellbook is this agent's self-custodied wallet. Rules:
 1. At the start of every session (and after context compaction) call
    spellbook_seed_status. If it is not 'unlocked', call spellbook_seed_viewer
-   and give your human the link; wait until status reports 'unlocked'.
+   and give your human the hosted link (it carries only the daemon's public
+   key). They return an encrypted envelope: relay it to the daemon user as
+   the tool says; you cannot and must not open it. Wait until status
+   reports 'unlocked'. You never start or serve a page for your human.
 2. You REQUEST; your human APPROVES from their own tools. You cannot approve,
    and you must never ask your human for their approve token, seal password,
    or recovery words — not in chat, not anywhere.
 3. Show queued spends (spellbook_queue) to your human as decoded intent.
 4. Amounts are base units (wei / mojos / lamports) as digit strings.
 5. Once per session, call spellbook_version; if an upgrade is available,
-   read its upgrade_notes and upgrade (signed releases only)."""
+   read its upgrade_notes and upgrade (signed releases only). The root
+   wrapper may answer NOT YET (delay window) or REFUSED (not on main,
+   yanked, bad key): report it and retry next session; never work around it."""
 
 
 def _result(msg_id, result):

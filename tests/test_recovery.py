@@ -79,5 +79,5 @@ def test_daemon_names_a_locked_seed(tmp_path, monkeypatch):
     missing = str(tmp_path / "gone" / "seed.key")
     _refuse_if_locked(missing, None)  # no seal: the plain loader error applies
     sp.write_text("{}")
-    with pytest.raises(FileNotFoundError, match="spellbook-seed serve"):
+    with pytest.raises(FileNotFoundError, match="hosted seal page"):
         _refuse_if_locked(missing, None)
