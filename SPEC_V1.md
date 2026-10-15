@@ -523,10 +523,12 @@ mTLS cert, or submit transactions.
   permit2?, token_a, token_b, amount_a_wei, amount_b_wei,
   amount_a_min_wei?, amount_b_min_wei?, fee?, tick_lower?, tick_upper?,
   tick_spacing?, hooks?, liquidity?, purpose?, deadline_sec?}` → bounded
-  LP-add intent (v2/v3/v4, §10). v2/v3 name a `router` (v2 router or v3
-  NonfungiblePositionManager); v4 names `position_manager` + `permit2`,
-  where `amount_a/b_wei` are the hard max spends and `liquidity` is the
-  position liquidity to mint.
+  LP-add intent (v2/v3/v4, §10). The v2 router, v3
+  NonfungiblePositionManager, v4 `position_manager` and `permit2` come
+  from the pinned contract table (S-21): omit them, or pass exactly the
+  pinned address — anything else, or a chain with no pin, is refused.
+  For v4, `amount_a/b_wei` are the hard max spends and `liquidity` is
+  the position liquidity to mint.
 - `POST /v1/dex_lp_remove {intent, chain, protocol, router?,
   position_manager?, pair?, token_a, token_b, token_id?, liquidity,
   amount_a_min_wei?, amount_b_min_wei?, burn_nft?, purpose?,
@@ -762,9 +764,19 @@ tooling (approve token), showing
     that the pool is initialized (`getSlot0` non-zero), and funds through
     two exact-amount Permit2 stages (token → Permit2, then Permit2 →
     PositionManager with expiry = the intent deadline — never unlimited).
-    v4 is hookless-pools-only and refuses native currency (wrap to WETH
-    first) in this release; v2 claims are refused outright because v2
+    v4 is hookless-pools-only; v2 claims are refused outright because v2
     fees are embedded in the LP token — the remove is the claim.
+  - **LP contracts and caps (S-21, added 2026-10-15).** The v2 router,
+    v3 NonfungiblePositionManager, v4 PositionManager and Permit2 for
+    add, remove and claim come from the pinned table, re-resolved at
+    execution; an agent-supplied address is accepted only if it is the
+    pin. Each leg is keyed one way for policy and velocity
+    (`dex.dex_asset_key`: the zero address and 0x's 0xEeee… are
+    `native`), so a v4 native leg counts against the native caps. Before
+    signing, the v4 `modifyLiquidities` call is decoded: actions exactly
+    `[MINT_POSITION, SETTLE_PAIR]`, the intent's currencies, a hookless
+    pool, each `amountMax` within its approved cap, the native `value`
+    within the native cap, and the position NFT owned by the wallet.
     Protocol semantics come from the official Uniswap docs (v3
     NonfungiblePositionManager, v4 PositionManager / Actions guides);
     the spec above describes only what Spellbook adds: strict schemas,

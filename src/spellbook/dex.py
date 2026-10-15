@@ -1838,6 +1838,13 @@ def resolve_pinned(chain_id: int, role: str, supplied,
     return addr
 
 
+def dex_asset_key(token: str) -> str:
+    """The one policy/velocity key for a DEX leg: either venue's native
+    representation is "native" (the key plain transfers use); a token is
+    its lowercased address. Shared by policy and velocity (S-21)."""
+    return "native" if _is_native_token(token) else (token or "").lower()
+
+
 # ---------------------------------------------------------------------------
 # Calldata decoding (S-20, S-21) — the transaction that will be signed is
 # decoded and compared with the intent; a quote's own claims are not
@@ -2174,13 +2181,71 @@ def check_swap_approval(*, chain_id: int, venue: str, token: str,
                        f"{sell_amount} — only exact approvals, refusing")
 
 
+def decode_v4_lp_add_calldata(data_hex: str, *, value_wei: int,
+                              currency0: str, currency1: str,
+                              amount0_cap: int, amount1_cap: int,
+                              wallet: str) -> dict:
+    """Decode a v4 modifyLiquidities([MINT_POSITION, SETTLE_PAIR]) call and
+    bind it: the pool currencies are the intent's, each leg's max spend is
+    within its approved cap (the native leg's included, as tx value), the
+    pool is hookless, and the position NFT goes to the wallet."""
+    sel, args = _split_selector(data_hex, "v4 LP add")
+    if sel != V4_MODIFY_LIQUIDITIES_SELECTOR:
+        raise DexError(f"v4 LP add: selector 0x{sel} is not "
+                       "modifyLiquidities — refusing")
+    unlock, deadline = _abi_decode(["bytes", "uint256"], args,
+                                   "modifyLiquidities")
+    actions, params = _abi_decode(["bytes", "bytes[]"], unlock,
+                                  "modifyLiquidities unlockData")
+    actions = bytes.fromhex(actions[2:])
+    want = bytes([V4_ACTIONS["MINT_POSITION"], V4_ACTIONS["SETTLE_PAIR"]])
+    if actions != want or len(params) != 2:
+        raise DexError(f"v4 LP add: actions 0x{actions.hex()} are not "
+                       "[MINT_POSITION, SETTLE_PAIR] — refusing")
+    (c0, c1, fee, tick_spacing, hooks, tl, tu, liquidity, a0max, a1max,
+     owner, _hook_data) = _abi_decode(
+        ["address", "address", "uint24", "int24", "address", "int24",
+         "int24", "uint256", "uint128", "uint128", "address", "bytes"],
+        params[0], "MINT_POSITION params")
+    s0, s1 = _abi_decode(["address", "address"], params[1],
+                         "SETTLE_PAIR params")
+    if (c0, c1) != (currency0.lower(), currency1.lower()) \
+            or (s0, s1) != (c0, c1):
+        raise DexError("v4 LP add: pool currencies differ from the approved "
+                       "tokens — refusing")
+    if int(hooks, 16) != 0:
+        raise DexError("v4 LP add: hooked pool — refusing")
+    if owner != wallet.lower():
+        raise DexError(f"v4 LP add: position recipient {owner} is not this "
+                       f"wallet ({wallet.lower()}) — refusing")
+    if a0max > amount0_cap or a1max > amount1_cap:
+        raise DexError("v4 LP add: max spend exceeds the approved cap — "
+                       "refusing")
+    native = c0 == V4_NATIVE_CURRENCY
+    if native:
+        if value_wei > amount0_cap or value_wei < a0max:
+            raise DexError(f"v4 LP add: native value {value_wei} outside the "
+                           f"approved cap {amount0_cap} — refusing")
+    elif value_wei != 0:
+        raise DexError("v4 LP add: nonzero value without a native leg — "
+                       "refusing")
+    return {"selector": "0x" + sel,
+            "selector_name": SELECTOR_NAMES[sel],
+            "actions": ["MINT_POSITION", "SETTLE_PAIR"],
+            "currency0": c0, "currency1": c1,
+            "amount0_max_wei": a0max, "amount1_max_wei": a1max,
+            "value_wei": value_wei, "recipient": owner,
+            "liquidity": liquidity, "fee": fee, "tick_spacing": tick_spacing,
+            "tick_lower": tl, "tick_upper": tu, "deadline": deadline}
+
+
 __all__ += [
     "PIN_ALLOWANCE_HOLDER", "PIN_UNIVERSAL_ROUTER", "PIN_V4_POSITION_MANAGER",
     "PIN_PERMIT2", "PIN_V2_ROUTER", "PIN_V3_POSITION_MANAGER", "PIN_ROLES",
     "PINNED_CONTRACTS", "PINNED_SOURCES", "VENUE_SWAP_TARGET",
     "parse_pin_overrides", "pinned_contracts", "pinned_contract",
-    "pin_source", "resolve_pinned",
-    "decode_swap_tx", "check_swap_approval",
+    "pin_source", "resolve_pinned", "dex_asset_key",
+    "decode_swap_tx", "check_swap_approval", "decode_v4_lp_add_calldata",
     "validate_swap_intent_against_quote",
 ]
 

@@ -973,6 +973,12 @@ PERMIT2 = "0x4444444444444444444444444444444444444444"
 PAIR = "0x5555555555555555555555555555555555555555"
 NPM = "0x6666666666666666666666666666666666666666"
 HOOKLESS = "0x0000000000000000000000000000000000000000"
+V2_ROUTER = "0x8888888888888888888888888888888888888888"
+#: S-21: LP contracts come from the pin table only. These tests run on a
+#: test chain (8453) whose contracts the operator has pinned explicitly.
+LP_PINS = {"pinned_contracts": {"8453": {
+    "v4_position_manager": POSM, "permit2": PERMIT2,
+    "v3_position_manager": NPM, "v2_router": V2_ROUTER}}}
 
 
 def _v4_add_params(**over):
@@ -1006,7 +1012,7 @@ def _claim_params(**over):
 
 def test_validate_lp_add_v4_happy(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     intent = d._validate_dex_lp_add(_v4_add_params())
     assert intent["protocol"] == "v4"
     assert intent["position_manager"] == POSM
@@ -1016,14 +1022,14 @@ def test_validate_lp_add_v4_happy(tmp_path, monkeypatch):
 
 def test_validate_lp_add_v4_rejects_router(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     with pytest.raises(Exception, match="v2/v3-only"):
         d._validate_dex_lp_add(_v4_add_params(router=NPM))
 
 
 def test_validate_lp_add_v4_rejects_hooked_pool(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     with pytest.raises(Exception, match="hook"):
         d._validate_dex_lp_add(_v4_add_params(
             hooks="0x7777777777777777777777777777777777777777"))
@@ -1031,28 +1037,28 @@ def test_validate_lp_add_v4_rejects_hooked_pool(tmp_path, monkeypatch):
 
 def test_validate_lp_add_v4_rejects_misaligned_ticks(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     with pytest.raises(Exception, match="align"):
         d._validate_dex_lp_add(_v4_add_params(tick_lower=-601))
 
 
 def test_validate_lp_add_v4_rejects_min_fields(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     with pytest.raises(Exception, match="v2/v3-only"):
         d._validate_dex_lp_add(_v4_add_params(amount_a_min_wei=5))
 
 
 def test_validate_lp_add_v4_rejects_bad_fee(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     with pytest.raises(Exception, match="uint24"):
         d._validate_dex_lp_add(_v4_add_params(fee=2**24))
 
 
 def test_validate_lp_add_v4_native_rules(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     # Native as token_a is now supported; its max spend may be zero.
     ok = d._validate_dex_lp_add(
         _v4_add_params(token_a=HOOKLESS, amount_a_wei=0))
@@ -1075,14 +1081,14 @@ def test_validate_lp_add_v4_native_rules(tmp_path, monkeypatch):
 
 def test_validate_lp_add_v4_rejects_unknown_field(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     with pytest.raises(Exception, match="schema violation"):
         d._validate_dex_lp_add(_v4_add_params(evil_calldata="0xdead"))
 
 
 def test_validate_lp_remove_v2_happy(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     intent = d._validate_dex_lp_remove(
         _remove_params(protocol="v2", router="0x8888888888888888888888888888888888888888",
                        pair=PAIR, token_id=None))
@@ -1092,7 +1098,7 @@ def test_validate_lp_remove_v2_happy(tmp_path, monkeypatch):
 
 def test_validate_lp_remove_v2_requires_pair(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     with pytest.raises(Exception, match="pair"):
         d._validate_dex_lp_remove(
             _remove_params(protocol="v2",
@@ -1102,14 +1108,14 @@ def test_validate_lp_remove_v2_requires_pair(tmp_path, monkeypatch):
 
 def test_validate_lp_remove_v3_requires_token_id(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     with pytest.raises(Exception, match="token_id"):
         d._validate_dex_lp_remove(_remove_params(token_id=None))
 
 
 def test_validate_lp_remove_v4_happy(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     intent = d._validate_dex_lp_remove(
         _remove_params(protocol="v4", position_manager=POSM, router=None,
                        burn_nft=True))
@@ -1119,21 +1125,21 @@ def test_validate_lp_remove_v4_happy(tmp_path, monkeypatch):
 
 def test_validate_lp_remove_rejects_burn_on_v3(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     with pytest.raises(Exception, match="v4-only"):
         d._validate_dex_lp_remove(_remove_params(burn_nft=True))
 
 
 def test_validate_lp_remove_rejects_unknown_field(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     with pytest.raises(Exception, match="schema violation"):
         d._validate_dex_lp_remove(_remove_params(opaque="0x1234"))
 
 
 def test_validate_lp_claim_v3_happy(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     intent = d._validate_dex_lp_claim(_claim_params())
     assert intent["protocol"] == "v3"
     assert intent["token_id"] == 7
@@ -1141,14 +1147,14 @@ def test_validate_lp_claim_v3_happy(tmp_path, monkeypatch):
 
 def test_validate_lp_claim_rejects_v2(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     with pytest.raises(Exception, match="dex_lp_remove"):
         d._validate_dex_lp_claim(_claim_params(protocol="v2"))
 
 
 def test_validate_lp_claim_v4_happy(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     intent = d._validate_dex_lp_claim(
         _claim_params(protocol="v4", position_manager=POSM, router=None))
     assert intent["position_manager"] == POSM
@@ -1156,14 +1162,14 @@ def test_validate_lp_claim_v4_happy(tmp_path, monkeypatch):
 
 def test_velocity_entries_remove_claim_empty(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     assert d._velocity_entries(_remove_params()) == []
     assert d._velocity_entries(_claim_params()) == []
 
 
 def test_velocity_entries_lp_add_v4_uses_max_spends(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     entries = d._velocity_entries(_v4_add_params())
     assert entries == [("evm-8453", A.lower(), 10**18),
                        ("evm-8453", B.lower(), 2 * 10**18)]
@@ -1171,14 +1177,14 @@ def test_velocity_entries_lp_add_v4_uses_max_spends(tmp_path, monkeypatch):
 
 def test_rt_lp_remove_always_queues(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     out = d.rt_dex_lp_remove(_remove_params(), "muse-test")
     assert out["decision"] == "queued"
 
 
 def test_rt_lp_claim_always_queues(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     out = d.rt_dex_lp_claim(_claim_params(), "muse-test")
     assert out["decision"] == "queued"
 

@@ -856,20 +856,27 @@ holds a single asset.
      `burn-nft` retires the NFT on full exits). `dex-lp-claim` → a
      **zero-liquidity** `DECREASE_LIQUIDITY` (the documented fee-credit
      path) + `TAKE_PAIR`.
-   - **Robinhood Chain Permit2:** The canonical Permit2 address differs
-     by chain. On Robinhood Chain (4663) use
-     `0x000000000022D473030F116dDEE9F6B43aC78BA3`, **not** the Ethereum
-     mainnet `0x000000000022D473030F64655049CB8E2943346F`. Using the wrong
-     address results in no-op approval transactions (status=1 but no code
-     at the address) followed by `INCREASE_LIQUIDITY`/`MINT_POSITION`
-     reverts when the PositionManager cannot pull tokens via Permit2.
+   - **LP contracts are pinned.** Omit `router`, `position-manager` and
+     `permit2`: the daemon uses its pinned table (`spellbook dex-venues`
+     → `pinned_contracts`). On Robinhood Chain (4663) that is the v4
+     PositionManager `0x58daec3116aae6d93017baaea7749052e8a04fa7` and
+     Permit2 `0x000000000022D473030F116dDEE9F6B43aC78BA3`. Passing any
+     other address is refused, and so is any LP intent on a chain or
+     protocol with no pin — today that is every v2/v3 LP intent and every
+     chain but 4663, until the operator pins more.
+   - **Native legs count as native.** In a v4 add the native leg
+     (`0x000…0`) is checked and recorded under `native`, the same key as
+     a plain native transfer, so it uses the native auto-approve and
+     velocity caps. Before signing, the daemon decodes its own mint call
+     and refuses unless both legs are within their caps and the position
+     NFT goes to this wallet.
    - **Spellbook's guardrails on top:** remove/claim always queue for
      human approval (never auto-execute, never count toward velocity —
      they receive value, not spend it). Execution pre-flights are
      read-only and fail closed: the wallet must own the position NFT
      (`ownerOf`), the v2 pair contract's `token0`/`token1` must match
-     the intent before any approval, v4 is **hookless pools only** and
-     refuses native currency (wrap to WETH first), approvals are always
+     the intent before any approval, v4 is **hookless pools only** (a
+     native leg must be currency0 and settles as tx value), approvals are always
      exact amounts (never unlimited), and one approval = one execution
      attempt with no retries. Never accept or forward opaque calldata —
      the daemon builds every call from the approved bounds.
