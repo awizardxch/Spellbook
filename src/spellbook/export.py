@@ -14,10 +14,12 @@ one of two ways:
             stdin and stdout, and refuses the agent's OS user (the UIDs the
             config allows on the request token).
 
-  envelope  (`spellbook export --reveal-key <b64 SPKI>`) — for the seal
-            ceremony (ceremony/seal-password-encryptor.html, Steps 1-2),
-            where the human can only reach the agent. The human's page makes
-            an RSA reveal key and hands the agent the PUBLIC half; this
+  envelope  (`spellbook export --reveal-key <b64 SPKI>`) — for the hosted
+            backup page (https://spellbook.awizard.dev/ceremony/backup.html,
+            web/public/ceremony/backup.js; review S-17), where the human can
+            only reach the agent. The page makes a non-extractable RSA
+            reveal key in the human's browser and hands the agent the
+            PUBLIC half; this
             command encrypts the backup to it and prints only the envelope
             the page decrypts. The agent relays ciphertext and never sees a
             word. It must run with read access to the seed files (root or
@@ -160,8 +162,8 @@ def paper_backup_text(kdf_seed: bytes | None, std_entropy: bytes | None,
             "SET 1 — STANDARD RECOVERY: not shown. This install has no",
             "std_entropy.key (it predates it, or was restored), and BIP-39",
             "words cannot be re-derived from std_seed.key. Only the paper",
-            "copy made at install holds them. Seal the seed (spellbook-seed",
-            "serve) so a wipe never depends on them.",
+            "copy made at install holds them. Seal the seed (the hosted",
+            "seal page) so a wipe never depends on them.",
         ]
     elif live_std_seed is not None:
         # Passwordless ceremony: the human typed these words into the page;
@@ -237,7 +239,7 @@ def _load_reveal_key(reveal_key_b64: str):
 def seal_to_reveal_key(text: str, reveal_key_b64: str) -> str:
     """Encrypt `text` for the ceremony page's reveal key.
 
-    Format (ceremony/seal-password-encryptor.html, Step 2): base64 of JSON
+    Format (web/public/ceremony/backup.js, step 2): base64 of JSON
     {k: b64 RSA-OAEP-SHA256(aes_key), n: b64 12-byte nonce,
      c: b64 AES-256-GCM(ciphertext || 16-byte tag)} — what WebCrypto's
     RSA-OAEP (SHA-256, MGF1-SHA-256) and AES-GCM decrypt.

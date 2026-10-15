@@ -43,8 +43,13 @@ Two things, both delivered to you at install, out-of-band:
    not against anything your agent pastes into chat.
 4. Confirm `spellbook doctor` is green before your agent does anything
    else.
-5. Seal the seed: your agent runs `spellbook-seed serve` and gives you a
-   link. Open it and choose your seal password.
+5. Seal the seed: your agent gives you a link to the hosted seal page
+   (`https://spellbook.awizard.dev/ceremony/seal.html#k=...`). Open it in
+   your own browser, check that the Spellbook daemon key fingerprint it
+   shows matches the one your installer or your own `spellbook export`
+   screen printed, choose your seal password, and paste the encrypted
+   envelope back to your agent. The daemon user opens it; your agent
+   cannot.
 
 ## 3. The approval loop (your daily job)
 
@@ -245,8 +250,9 @@ login UID at install.
   its own decision.
 - Never type your seal password or your recovery words into chat, the
   hosted dashboard, or anything your agent relays. The seal password goes
-  only into the `spellbook-seed serve` page (the one-time link from your
-  agent's own machine) or your own terminal.
+  only into the hosted seal page (`/ceremony/seal.html`, which runs only in
+  your browser and makes no network requests) after the fingerprint check,
+  or into your own terminal.
 
 ## 10. If something looks wrong
 

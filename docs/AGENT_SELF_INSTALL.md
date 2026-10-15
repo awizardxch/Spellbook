@@ -54,15 +54,20 @@ block at the end. It is a protocol, not a suggestion:
 - **Your human's:** the paper backup (two 24-word sets). You never see
   the words. Your human runs `sudo spellbook export` on their own
   terminal, or, when they can only reach you, opens
-  `/opt/spellbook/share/ceremony/seal-password-encryptor.html`, makes a
-  reveal key (Step 1) and pastes you its PUBLIC half; you run
+  `https://spellbook.awizard.dev/ceremony/backup.html`, makes a reveal key
+  (step 1) and pastes you its PUBLIC half; you run
   `sudo spellbook export --reveal-key <public key>` and paste back the
-  envelope it prints; they decrypt it on the page (Step 2) and write both
-  sets on paper. Confirm receipt.
-- **Then seal the seed (required).** Run `spellbook-seed serve`, get the
-  one-time link to your human's browser (TLS tunnel / port-forward — see
-  §6b), and wait. They set the seal password on that page; you never see
-  it. Do not call the install done with the seed unsealed.
+  envelope it prints; they decrypt it on the page (step 2) and write the
+  words on paper. The page then shows a BACKUP CONFIRMATION CODE; pipe it
+  to `sudo spellbook backup-confirm` (stdin, never argv). Until then the
+  wallet refuses to move funds.
+- **Then seal the seed (required).** Run `spellbook-ceremony url seal`
+  (or the `spellbook_seed_viewer` tool) and give your human the hosted
+  link. They check the Spellbook daemon key fingerprint against the one
+  the installer logged, set the seal password in their own browser and
+  paste you an envelope; save it to a file and have the daemon user open
+  it: `sudo -u spellbook spellbook-ceremony apply <file>`. You never see
+  the password. Do not call the install done with the seed unsealed.
 
 **5. Verify before you finish.**
 

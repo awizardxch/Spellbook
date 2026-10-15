@@ -25,8 +25,8 @@ spellbook-seed status
 | State | Exit | Meaning | Do |
 |---|---|---|---|
 | `unlocked` | 0 | seed present, matches the seal | nothing |
-| `locked` | 3 | seal present, seed missing (after a wipe) | `spellbook-seed serve` → human unlocks |
-| `unsealed` | 4 | seed present, no seal | `spellbook-seed serve` → human seals |
+| `locked` | 3 | seal present, seed missing (after a wipe) | hosted seal link → human unlocks → daemon user applies |
+| `unsealed` | 4 | seed present, no seal | hosted seal link → human seals → daemon user applies |
 | `mismatch` | 5 | seed on disk ≠ sealed seed | stop; tell the human |
 | `empty` | 6 | no seed, no seal | fresh install, or paper restore |
 | `no_access` | 7 | system install owned by the daemon's OS user | human runs it as that user (`sudo -u spellbook …`) |
@@ -36,28 +36,37 @@ Full design: [SEALED_SEED.md](SEALED_SEED.md).
 ## 2. Seal the seed (once)
 
 ```bash
-spellbook-seed serve
+spellbook-ceremony url seal                              # agent: hosted link, public key only
+sudo -u spellbook spellbook-ceremony apply envelope.txt  # daemon user: opens what the page printed
 ```
 
-It prints a one-time link (`http://127.0.0.1:8787/<token>/`). The human
-opens it, picks a password (12+ characters), and the seed files are
-encrypted into `~/workspace/.spellbook/seed.sealed` (scrypt + AES-256-GCM).
-A human at the VM's terminal can instead run `spellbook-seed seal`.
+The link opens `https://spellbook.awizard.dev/ceremony/seal.html` with the
+daemon's ceremony PUBLIC key in the fragment. The human checks the
+Spellbook daemon key fingerprint against the one the daemon printed for
+them, picks a password (the page and `apply` share a strength rule), and
+returns an encrypted envelope. The daemon user opens it and the seed files
+are encrypted into `~/workspace/.spellbook/seed.sealed` (scrypt +
+AES-256-GCM). A human at the VM's terminal can instead run `spellbook-seed
+seal` as the daemon user.
 
 ## 3. After a wipe: unlock
 
 ```bash
-spellbook-seed status   # -> locked
-spellbook-seed serve    # human opens the link, enters the password
-spellbook-seed status   # -> unlocked; start the daemon
+spellbook-seed status                                    # -> locked
+spellbook-ceremony url seal                              # human opens the link, enters the password
+sudo -u spellbook spellbook-ceremony apply envelope.txt  # daemon user unlocks
+spellbook-seed status                                    # -> unlocked; start the daemon
 ```
 
 Unlock writes the seed files back exactly as they were (0600). It never
 overwrites a different seed, and a wrong password writes nothing. The
-viewer stops after 5 wrong passwords.
+local viewer a human may start instead (`spellbook-seed` serve, as the
+daemon user; it refuses the agent's OS user) stops after 5 wrong
+passwords.
 
 **The agent never handles the password**: not in chat, not in argv, not in
-env. Only the human types it, into the viewer page or the terminal.
+env, and it cannot open the envelope. Only the human types it, into the
+hosted page or their own terminal.
 
 ## 4. Paper backup
 
@@ -86,7 +95,7 @@ python3 -m spellbook.recovery restore --standard  # SET 1 -> std_seed.key
 ```
 
 Standard installs need both. Neither command overwrites an existing
-file. Afterwards, seal again (`spellbook-seed serve`).
+file. Afterwards, seal again (the hosted seal page, as above).
 
 ## Where the files are
 

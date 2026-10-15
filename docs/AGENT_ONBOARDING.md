@@ -326,13 +326,19 @@ daemon route and no token can set it. Installs made before this change
 show `"state": "legacy"` and keep working, with a warning at every daemon
 start until the human confirms.
 
-**Passwordless sealed seed.** The key that opens the
-`SPELLBOOK-SEED-ENC2` envelope is the daemon's own
-(`<prefix>/ceremony/private.pem`, daemon user, 0600); you never hold it.
-You get only its PUBLIC key (`spellbook status` →
-`custody.ceremony_public_key`) and stamp it into
-`ceremony/seed-to-addresses.html` with `ceremony/new_seed_ceremony_key.py`.
-See `ceremony/README.md`.
+**One ceremony key, the daemon's.** The key that opens every ceremony
+envelope (seal, unlock, restore, and the passwordless
+`SPELLBOOK-SEED-ENC2` sealed seed) is the daemon's own
+(`<prefix>/ceremony/private.pem`, daemon user, 0600 in a 0700 dir); you
+never hold it. You get only its PUBLIC key: the installer publishes a
+root-owned copy at `/usr/local/share/spellbook/ceremony.pub.pem`, which
+`spellbook-ceremony url seal|restore` and `spellbook_seed_viewer` read
+(also `spellbook status` → `custody.ceremony_public_key`). The pages are
+hosted; you hand your human the link and relay the envelope they return
+to the daemon user (`sudo -u spellbook spellbook-ceremony apply|restore`).
+Your human checks the Spellbook daemon key fingerprint on the page
+against the one the daemon printed for them, never only the one you
+quote. See `ceremony/README.md`.
 
 - **SET 1 — STANDARD RECOVERY (primary: the daemon's live keys).**
   A second, independent 24-word BIP-39 mnemonic whose keys derive the

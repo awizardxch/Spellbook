@@ -5,6 +5,7 @@
 (function () {
   var SB = window.SB, $ = SB.$;
   var priv = null;
+  var CODE_RE = /BACKUP CONFIRMATION CODE:\s*([A-Z0-9]{4}(?:-[A-Z0-9]{4}){3})/;
 
   $("genBtn").addEventListener("click", async function () {
     $("genErr").textContent = "";
@@ -37,13 +38,26 @@
       var aes = await crypto.subtle.importKey("raw", aesRaw, "AES-GCM", false, ["decrypt"]);
       new Uint8Array(aesRaw).fill(0);
       var pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: SB.b64ToBytes(env.n) }, aes, SB.b64ToBytes(env.c));
-      $("docOut").textContent = new TextDecoder().decode(pt);
+      var doc = new TextDecoder().decode(pt);
       new Uint8Array(pt).fill(0);
+      $("docOut").textContent = doc;
       $("envIn").value = "";
       SB.show($("docBox"), true);
+      /* S-16: the backup ends with a one-time code the daemon needs back
+       * (spellbook backup-confirm) before it moves funds. */
+      var m = CODE_RE.exec(doc);
+      $("codeOut").textContent = m ? m[1] : "";
+      $("codeOk").textContent = "";
+      SB.show($("codeStep"), !!m);
     } catch (e) {
       err.textContent = "Could not decrypt. Paste the whole envelope, and keep this tab open from step 1.";
     }
+  });
+
+  $("copyCode").addEventListener("click", async function () {
+    var ok = await SB.copy($("codeOut").textContent);
+    $("codeOk").textContent = ok ? "Copied. Send it to your agent once the words are on paper."
+      : "Copy was blocked; select the code and copy by hand.";
   });
 
   $("clearBtn").addEventListener("click", function () {

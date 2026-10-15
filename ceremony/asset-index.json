@@ -75,10 +75,10 @@
  ],
  "assets": [
   {
-   "bytes": 2253,
+   "bytes": 2924,
    "path": "/ceremony/backup.js",
-   "sha256": "dcdd0290c96b4fd722530213d87f63cea3b5ac1d0c9a3efd8258b285a308d245",
-   "sri": "sha384-oTJcHvMelvnj+YSjGhCreM6Cwdcroc0xU1k/EsH6HG+yJBaphhyyJyWAGFPVDlg1"
+   "sha256": "908526943e460098c9ddc2f27f8ded9ba6ccd9f677bf35328f07d1e94405c9dd",
+   "sri": "sha384-/4tzpDbhMuq+WHB/RUNx1ZHDfNnxH2h9ReQ8AAVd8xaMpXJ/j0dF787becZxp8sR"
   },
   {
    "bytes": 17353,
@@ -117,18 +117,18 @@
  "origin": "https://spellbook.awizard.dev",
  "pages": [
   {
-   "bytes": 2894,
+   "bytes": 4094,
    "loads": [
     "/ceremony/ceremony.css",
     "/ceremony/common.js",
     "/ceremony/backup.js"
    ],
    "path": "/ceremony/backup.html",
-   "sha256": "92e4d7ac23ab541679ab7093afe5bbd69eb31e1ee9780ba8591d143a3eb73ca1",
-   "sri": "sha384-Kiv6gcZr7CwamSeSbvKo/41nlEiSxPMm0r+3tABgP0YlXwa6wN+/uC3qyVdrVqmN"
+   "sha256": "ef2139a0a4f2b3f0025f19a71c31eb134bff2cfa3c1cbcb26e192e272f2d1c05",
+   "sri": "sha384-NIVnqjJSDlKjEsfedjVb9HviDwimcsdfOyGQq3Bm2lhKNBsyLU+1hyafQ+7D78zr"
   },
   {
-   "bytes": 3997,
+   "bytes": 4240,
    "loads": [
     "/ceremony/ceremony.css",
     "/ceremony/bip39.js",
@@ -136,11 +136,11 @@
     "/ceremony/restore.js"
    ],
    "path": "/ceremony/restore.html",
-   "sha256": "d64b9c410308c9206a25273dcc6999a7722e2890c22358de4530b495981a5db8",
-   "sri": "sha384-MDwpd1x0hq6B35GXpi0m+xtkMGjdTZvH39xg/XFc4kI6imDtLLplkEwDhnS3rVtE"
+   "sha256": "7d97e394bc1ec90470c7005e1c94704ff1b6bd09053d67954e8c38a39a25b67b",
+   "sri": "sha384-rpF2x9MvURWkWKg1TwnKC1EXd17KUtAe36Q4Fh0d+LjbK89YkHQgzlQHKE949ACO"
   },
   {
-   "bytes": 4232,
+   "bytes": 4399,
    "loads": [
     "/ceremony/ceremony.css",
     "/ceremony/bip39.js",
@@ -148,8 +148,8 @@
     "/ceremony/seal.js"
    ],
    "path": "/ceremony/seal.html",
-   "sha256": "53c17933b65295629ac88a06b47490989954421d636700c72f968b8c26075516",
-   "sri": "sha384-lsW8UVmZMFYcTEvyWJok/DAbi2xTwTxXcdab+frSEoaEVPHrkOuO02AuMQMnLjeu"
+   "sha256": "7e841338708d3575ce1b68b645dc997e3d67d58c91122de5541168790b6c26c1",
+   "sri": "sha384-efvU1z9Ecrnx0GLthkXdIyHX5On0ElAZpFV8F3EeTfGTAp1anDBMxXYklhRKbVGf"
   }
  ],
  "version": 1

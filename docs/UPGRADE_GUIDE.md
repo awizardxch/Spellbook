@@ -56,11 +56,12 @@ your main digital recovery path.
 ## Step 4: Seal the seed
 
 ```bash
-spellbook-seed serve
+spellbook-ceremony url seal                              # the hosted link (public key only)
+sudo -u spellbook spellbook-ceremony apply envelope.txt  # after the page prints the envelope
 ```
 
-The human opens the printed link and chooses a password of 12 or more
-characters. Keep that password in a password manager.
+The human opens the link, checks the Spellbook daemon key fingerprint, and
+chooses a password that passes the page's strength check. Keep that password in a password manager.
 `spellbook-seed status` should now report `unlocked`.
 
 ## Step 5: Add the per-session check

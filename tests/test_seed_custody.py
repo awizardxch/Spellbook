@@ -139,24 +139,34 @@ def test_ceremony_key_refuses_when_the_daemon_user_is_the_agent(tmp_path, home):
     assert not os.path.exists(os.path.join(p, "ceremony", "private.pem"))
 
 
-def test_ceremony_script_stamps_the_public_key_and_mints_no_private_key(tmp_path, home):
+def test_ceremony_script_prints_links_and_mints_no_private_key(tmp_path, home):
+    """S-16 + S-17: the helper only reads the PUBLIC key and prints the
+    hosted links and fingerprint; it never makes a private key and stamps
+    no HTML (the hosted pages read the key from the URL fragment)."""
     from Crypto.PublicKey import RSA
-    pub = base64.b64encode(RSA.generate(2048).publickey().export_key(format="DER")).decode()
+    from spellbook import ceremony
+    der = RSA.generate(2048).publickey().export_key(format="DER")
+    pub = base64.b64encode(der).decode()
     page = tmp_path / "page.html"
     page.write_text('<script>const SEED_PUB_B64 = "__SEED_PUB_B64__";</script>')
-    r = subprocess.run([sys.executable, os.path.join(ROOT, "ceremony", "new_seed_ceremony_key.py"),
-                        "--stdin", str(page)], input=pub, capture_output=True, text=True,
+    script = os.path.join(ROOT, "ceremony", "new_seed_ceremony_key.py")
+    r = subprocess.run([sys.executable, script, "--stdin"], input=pub,
+                       capture_output=True, text=True,
                        env={**os.environ, "HOME": home})
     assert r.returncode == 0, r.stderr
-    assert pub in page.read_text()
+    assert ceremony.grouped(ceremony.key_fingerprint(der)) in r.stdout
+    assert ceremony.hosted_url("seal", pub_der=der, op="seal") in r.stdout
+    assert ceremony.hosted_url("restore", pub_der=der, op="restore") in r.stdout
+    assert "PRIVATE" not in r.stdout
+    assert "__SEED_PUB_B64__" in page.read_text()  # nothing stamped
     for dirpath, _, files in os.walk(home):
         assert "private.pem" not in files, dirpath
-    # A private key is refused, not stamped.
-    priv = base64.b64encode(RSA.generate(2048).export_key(format="DER")).decode()
-    r = subprocess.run([sys.executable, os.path.join(ROOT, "ceremony", "new_seed_ceremony_key.py"),
-                        "--stdin", str(page)], input=priv, capture_output=True, text=True,
+    # A private key is refused, never echoed.
+    priv = RSA.generate(2048).export_key(format="PEM").decode()
+    r = subprocess.run([sys.executable, script, "--stdin"], input=priv,
+                       capture_output=True, text=True,
                        env={**os.environ, "HOME": home})
-    assert r.returncode != 0 and priv not in page.read_text()
+    assert r.returncode != 0 and "BEGIN" not in r.stdout + r.stderr
 
 
 def test_adopt_moves_the_agent_copy_and_overwrites_it(tmp_path, home):

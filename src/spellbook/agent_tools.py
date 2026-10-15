@@ -125,10 +125,15 @@ def _seed_viewer(args):
             "tell_your_human": (
                 "Open this page in your own browser, press 'Make reveal key' "
                 "and paste me the public key it shows. Keep the tab open: I "
-                "will send back an envelope only that tab can decrypt."),
+                "will send back an envelope only that tab can decrypt. When "
+                "the words are on paper, send me the BACKUP CONFIRMATION "
+                "CODE the page shows: until then the wallet cannot move "
+                "funds."),
             "then": ("run `sudo spellbook export --reveal-key <their public "
                      "key>` and paste them the envelope it prints. It is "
-                     "ciphertext to you."),
+                     "ciphertext to you. When they send the confirmation "
+                     "code, pipe it on stdin (never argv) to `sudo spellbook "
+                     "backup-confirm`."),
         })
         return out
     if page == "seal" and st["state"] not in ("locked", "unsealed"):
@@ -139,9 +144,12 @@ def _seed_viewer(args):
     pub = ceremony.find_public_key()
     if not pub:
         raise ToolError(
-            "no ceremony public key is published (SPELLBOOK_CEREMONY_PUB or "
-            "ceremony_pub_path in spellbook.json). The daemon user makes the "
-            "key pair and publishes only the public half; ask your human.")
+            "no ceremony public key is published (SPELLBOOK_CEREMONY_PUB, "
+            "ceremony_pub_path in spellbook.json, or the installer's "
+            "root-owned copy at /usr/local/share/spellbook/ceremony.pub.pem). "
+            "The daemon user makes the key pair (`sudo spellbook "
+            "ceremony-key`) and only the public half is published; ask your "
+            "human.")
     try:
         with open(pub, "rb") as f:
             der = ceremony.public_der(f.read())
@@ -158,8 +166,11 @@ def _seed_viewer(args):
         "tell_your_human": (
             f"Open this link in your own browser and {what}. It runs only "
             "in your browser and encrypts to your daemon's key. First compare "
-            "the fingerprint the page shows with the one your daemon printed "
-            "for you (not only the one I quote). Then paste me the envelope "
+            "the Spellbook daemon key fingerprint the page shows with the one "
+            "your daemon printed for you (the installer log, your terminal "
+            "`spellbook export` screen, or `sudo spellbook ceremony-key` in "
+            "your own shell), not only the one I quote. Then paste me the "
+            "envelope "
             "it makes. Never paste the password or words into this chat."),
         "then": _relay(op) + (" Then call spellbook_seed_status until it "
                               "reports 'unlocked'." if op != "restore" else ""),

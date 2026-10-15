@@ -8,7 +8,7 @@
 <title>Spellbook paper backup</title>
 <link rel="stylesheet" href="/ceremony/ceremony.css" integrity="sha384-WNsHLN+O2nzkXkIM+JeDphAgFyPztWrawwG4fo4LCk/Kbsr/RoXCyoiMfi07VhsM" crossorigin="anonymous">
 <script src="/ceremony/common.js" integrity="sha384-IrrVPr8wTyyGxSBBT6VOjYqGvb3a2VURC0VSpjjCwJM7m9XpRj/upkyYNBmA+G00" crossorigin="anonymous" defer></script>
-<script src="/ceremony/backup.js" integrity="sha384-oTJcHvMelvnj+YSjGhCreM6Cwdcroc0xU1k/EsH6HG+yJBaphhyyJyWAGFPVDlg1" crossorigin="anonymous" defer></script>
+<script src="/ceremony/backup.js" integrity="sha384-/4tzpDbhMuq+WHB/RUNx1ZHDfNnxH2h9ReQ8AAVd8xaMpXJ/j0dF787becZxp8sR" crossorigin="anonymous" defer></script>
 </head>
 <body>
 <main>
@@ -26,7 +26,7 @@
 <textarea id="pubOut" readonly></textarea>
 <button type="button" class="ghost" id="copyPub">Copy public key</button>
 <div class="ok" id="pubOk"></div>
-<div class="who"><strong>Your agent runs</strong> <code>sudo spellbook export --reveal-key &lt;this public key&gt;</code>. That prints only an envelope, encrypted to this key, which your agent pastes back to you.</div>
+<div class="who"><strong>Your agent runs</strong> <code>sudo spellbook export --reveal-key &lt;this public key&gt;</code>. That prints only an envelope, encrypted to this key, which your agent pastes back to you. This envelope carries no daemon key fingerprint: the one to trust is on your own terminal (<code>spellbook export</code>, or <code>sudo spellbook ceremony-key</code>), because your agent knows this public key and could write an envelope of its own.</div>
 </div>
 <div class="err" id="genErr"></div>
 </div>
@@ -38,10 +38,21 @@
 <button type="button" id="openBtn">Decrypt here</button>
 <div class="err" id="openErr"></div>
 <div id="docBox" hidden>
-<p class="ok">Write <b>both</b> word sets and the addresses on paper, offline, in two copies kept in two places. Then clear the screen.</p>
+<p class="ok">Write every word set shown and the addresses on paper, offline, in two copies kept in two places. Then clear the screen.</p>
+<p class="note">An install that keeps only your passwordless sealed seed shows the SET 1 addresses and no words: the words are the ones you typed on the restore page, and your paper copy must derive these addresses.</p>
 <div class="doc" id="docOut"></div>
 <button type="button" class="ghost" id="clearBtn">Clear from screen</button>
 </div>
+</div>
+
+<div class="step" id="codeStep" hidden>
+<span class="stepnum">3</span>
+<h2>Confirm the backup</h2>
+<p class="note">Until your daemon gets this one-time code back, the wallet refuses every fund-moving request (reads still work). Send the code only after the words are on paper.</p>
+<div class="fp" id="codeOut"></div>
+<button type="button" class="ghost" id="copyCode">Copy code</button>
+<div class="ok" id="codeOk"></div>
+<div class="who"><strong>Hand it back.</strong> Paste the code to your agent, who pipes it on stdin to <code>sudo spellbook backup-confirm</code>, or run that command yourself and type it at the prompt. The code only confirms your backup: it cannot open or move the wallet. One use, valid 7 days.</div>
 </div>
 
 <footer>Runs in your browser only · RSA-OAEP-SHA256 + AES-256-GCM · <a href="/onboard/integrity">asset hashes</a></footer>

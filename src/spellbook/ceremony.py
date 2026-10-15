@@ -112,26 +112,30 @@ def grouped(fp: str) -> str:
 
 
 def find_public_key(config_dir: str | None = None) -> str | None:
-    """Path of the ceremony PUBLIC key the daemon user publishes.
+    """Path of the ceremony PUBLIC key the daemon publishes.
 
     Lookup: $SPELLBOOK_CEREMONY_PUB, then `ceremony_pub_path` in the
-    config's spellbook.json, then <config_dir>/ceremony.pub.pem. Never a
-    private key path; the agent's tools only read this file."""
+    config's spellbook.json, then <config_dir>/ceremony.pub.pem, then the
+    root-owned copy install.sh publishes (custody.PUBLISHED_PUB_PATH,
+    /usr/local/share/spellbook/ceremony.pub.pem). The last one is what an
+    agent finds on a system install, whose 0700 prefix it cannot read.
+    Never a private key path; the agent's tools only read this file."""
+    from spellbook import custody, sealed
     env = os.environ.get("SPELLBOOK_CEREMONY_PUB", "").strip()
     if env:
         return env
-    from spellbook import sealed
-    loc = sealed.locate(config_dir)
-    d = loc["config_dir"]
+    d = sealed.locate(config_dir)["config_dir"]
     try:
         with open(os.path.join(d, "spellbook.json")) as f:
             p = json.load(f).get("ceremony_pub_path")
         if p:
             return os.path.expanduser(p)
-    except (OSError, ValueError):
+    except (OSError, ValueError, AttributeError):
         pass
-    p = os.path.join(d, "ceremony.pub.pem")
-    return p if os.path.exists(p) else None
+    for p in (os.path.join(d, "ceremony.pub.pem"), custody.PUBLISHED_PUB_PATH):
+        if os.path.exists(p):
+            return p
+    return None
 
 
 def hosted_url(page: str, *, pub_der: bytes | None = None,
@@ -199,8 +203,22 @@ def parse_envelope(text: str) -> dict:
     return env
 
 
-def _load_private(key_path: str):
+def _load_private(key_path: str, owner_uid: int | None = None):
+    """The ceremony private key. owner_uid set (the daemon's own key, the
+    default): custody's strict read, no symlinks, file and 0700 dir owned
+    by the daemon user. Unset (an explicit --key): the file must be 0600."""
     from Crypto.PublicKey import RSA
+    if owner_uid is not None:
+        from spellbook import custody
+        try:
+            return custody.read_private_key(key_path, owner_uid)
+        except FileNotFoundError:
+            raise CeremonyError(f"ceremony private key not found at {key_path}")
+        except custody.CustodyError as e:
+            raise CeremonyError(str(e))
+        except OSError as e:
+            raise CeremonyError(f"cannot read the ceremony key at {key_path}: "
+                                f"{e.strerror}")
     try:
         st = os.stat(key_path)
     except OSError:
@@ -218,15 +236,43 @@ def _load_private(key_path: str):
     return key
 
 
-def open_envelope(text: str, key_path: str, kinds=OPS) -> tuple[str, dict]:
-    """Decrypt with the key holder's private key. Returns (kind, payload)."""
+def daemon_key(config_dir: str | None = None) -> tuple[str, int]:
+    """(path, owner uid) of the daemon's own ceremony key (review S-16):
+    <config_dir>/ceremony/private.pem, made by `spellbook ceremony-key`.
+
+    spellbook.json `ceremony_key_path` is never read as this key: on an
+    upgraded install it names a legacy key the old ceremony left in the
+    agent's workspace, which `spellbook ceremony-adopt` moves here (fresh
+    configs set it to this same path, which changes nothing). When the
+    daemon key is missing and a legacy key exists, the error says so."""
+    from spellbook import custody, sealed
+    d = sealed.locate(config_dir)["config_dir"]
+    path = custody.ceremony_key_path(d)
+    if not os.path.lexists(path):
+        try:
+            legacy = custody.legacy_key_path(custody.load_cfg(d))
+        except (OSError, ValueError):
+            legacy = os.path.expanduser(custody.LEGACY_KEY_PATH)
+        hint = (f" A legacy key exists at {legacy}: move it first with "
+                f"`sudo spellbook ceremony-adopt --prefix {d}`."
+                if os.path.lexists(legacy) else
+                f" Create it: `sudo spellbook ceremony-key --prefix {d}`.")
+        raise CeremonyError(f"the daemon's ceremony key {path} does not exist."
+                            + hint)
+    return path, custody.prefix_owner(d)
+
+
+def open_envelope(text: str, key_path: str, kinds=OPS, *,
+                  owner_uid: int | None = None) -> tuple[str, dict]:
+    """Decrypt with the key holder's private key. Returns (kind, payload).
+    owner_uid: load the key strictly as the daemon's own (_load_private)."""
     from Crypto.Cipher import AES, PKCS1_OAEP
     from Crypto.Hash import SHA256
     env = parse_envelope(text)
     if env["kind"] not in kinds:
         raise CeremonyError(f"this is a {env['kind']!r} envelope; expected "
                             + " or ".join(repr(k) for k in kinds))
-    key = _load_private(key_path)
+    key = _load_private(key_path, owner_uid)
     mine = key_fingerprint(key.publickey().export_key(format="DER"))
     if env["kfp"] != mine:
         raise CeremonyError("envelope was made for a different ceremony key "
@@ -305,10 +351,12 @@ def refuse_agent_uid(config_dir: str | None = None) -> None:
 
 
 def apply_password(envelope: str, key_path: str, *, config_dir=None,
-                   sealed_path=None, replace=False, n=None) -> dict:
+                   sealed_path=None, replace=False, n=None,
+                   owner_uid=None) -> dict:
     """Seal or unlock with the password inside a seal/unlock envelope."""
     from spellbook import sealed
-    kind, payload = open_envelope(envelope, key_path, ("seal", "unlock"))
+    kind, payload = open_envelope(envelope, key_path, ("seal", "unlock"),
+                                  owner_uid=owner_uid)
     pw = payload.get("password")
     if not isinstance(pw, str):
         raise CeremonyError("envelope carries no password")
@@ -329,12 +377,14 @@ def apply_password(envelope: str, key_path: str, *, config_dir=None,
     return r
 
 
-def apply_restore(envelope: str, key_path: str, out_path: str) -> dict:
+def apply_restore(envelope: str, key_path: str, out_path: str, *,
+                  owner_uid=None) -> dict:
     """Write the install.sh --restore key file from a restore envelope:
     line 1 seed.key hex (SET 2, daemon KDF entropy), line 2 std_seed.key
     hex (SET 1, standard BIP-39 seed). O_EXCL | O_NOFOLLOW, 0600 (S-27)."""
     from spellbook.seed import entropy_from_mnemonic, mnemonic_to_seed
-    _, payload = open_envelope(envelope, key_path, ("restore",))
+    _, payload = open_envelope(envelope, key_path, ("restore",),
+                               owner_uid=owner_uid)
     try:
         s1, s2 = payload.get("set1_standard"), payload.get("set2_daemon")
         if not isinstance(s1, str) or not isinstance(s2, str):
@@ -397,8 +447,9 @@ def main(argv=None) -> int:
                                        "restore key file from an envelope")
                            + " — daemon user or root only")
         p.add_argument("envelope", help="file holding the envelope, or - for stdin")
-        p.add_argument("--key", help="ceremony PRIVATE key (default: "
-                       "ceremony_key_path in spellbook.json)")
+        p.add_argument("--key", help="ceremony PRIVATE key, an explicit "
+                       "override (default: the daemon's own key, "
+                       "<config dir>/ceremony/private.pem)")
         p.add_argument("--config-dir")
         if name == "apply":
             p.add_argument("--sealed")
@@ -421,7 +472,8 @@ def main(argv=None) -> int:
             else:
                 if a.page in ("seal", "restore") and der is None:
                     raise CeremonyError("no ceremony public key published "
-                                        "(SPELLBOOK_CEREMONY_PUB / ceremony_pub_path)")
+                                        "(SPELLBOOK_CEREMONY_PUB, ceremony_pub_path, "
+                                        "or the installer's copy)")
                 op = a.op or ("restore" if a.page == "restore" else
                               "unlock" if a.page == "seal" else None)
                 print(hosted_url(a.page, pub_der=der if a.page in ("seal", "restore") else None,
@@ -435,26 +487,18 @@ def main(argv=None) -> int:
             print(json.dumps({"kind": env["kind"], "key_fingerprint": env["kfp"]}))
             return 0
         refuse_agent_uid(a.config_dir)
-        key = a.key
+        key, owner = a.key, None
         if not key:
-            from spellbook import sealed
-            d = sealed.locate(a.config_dir)["config_dir"]
-            try:
-                with open(os.path.join(d, "spellbook.json")) as f:
-                    key = json.load(f).get("ceremony_key_path")
-            except (OSError, ValueError):
-                key = None
-            if not key:
-                raise CeremonyError("no --key and no ceremony_key_path in spellbook.json")
-            key = os.path.expanduser(key)
+            key, owner = daemon_key(a.config_dir)
         text = _read_envelope(a.envelope)
         if a.cmd == "apply":
             r = apply_password(text, key, config_dir=a.config_dir,
-                               sealed_path=a.sealed, replace=a.replace)
+                               sealed_path=a.sealed, replace=a.replace,
+                               owner_uid=owner)
             print(json.dumps({k: r[k] for k in r if k != "written"} |
                              {"written": len(r.get("written", []))}, default=str))
         else:
-            r = apply_restore(text, key, a.out)
+            r = apply_restore(text, key, a.out, owner_uid=owner)
             print(f"wrote {r['written']} (0600) — pass it to install.sh --restore, "
                   "which shreds it")
         return 0

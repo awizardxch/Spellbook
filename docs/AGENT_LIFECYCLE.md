@@ -177,8 +177,9 @@ What changed:
   the dashboard's key-reveal routes (they could never reach the VM).
 
 After upgrading:
-1. `spellbook-seed status`. If it says `unsealed`, run `spellbook-seed serve`
-   and give your human the link so they can seal the seed with a password.
+1. `spellbook-seed status`. If it says `unsealed`, run `spellbook-ceremony
+   url seal` and give your human the hosted link so they can seal the seed
+   with a password; the daemon user opens the envelope they return.
    On a system install, where the seed belongs to the daemon's own OS user,
    status says `no_access`. Your human then runs it as that user:
    `sudo -u spellbook /opt/spellbook/venv/bin/spellbook-seed --config-dir /opt/spellbook --sealed <persistent path> serve`.

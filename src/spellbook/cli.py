@@ -34,18 +34,22 @@ Paper backup, no socket, no token (S3; review S-05):
     SET 1 words back. Refuses without a TTY and refuses the agent's OS
     user. Run it as root or the spellbook user: `sudo spellbook export`.
   spellbook export --reveal-key <b64 SPKI> [--prefix /opt/spellbook]
-    the seal ceremony (ceremony/seal-password-encryptor.html Steps 1-2):
-    prints only an envelope encrypted to the human's reveal key. The
-    backup inside carries a one-time confirmation code.
+    the hosted backup page (https://spellbook.awizard.dev/ceremony/backup.html,
+    review S-17) makes the reveal key in the human's browser; this prints
+    only an envelope encrypted to it. The backup inside carries a one-time
+    confirmation code.
   spellbook backup-confirm [--prefix /opt/spellbook]
     reads that code from stdin (never argv) and records the backup as
     confirmed (review S-16). Until then fund-moving routes refuse.
 
 Ceremony key, daemon side (review S-16; root or the daemon user only):
-  spellbook ceremony-key [--prefix /opt/spellbook] [--rotate] [--public-only]
+  spellbook ceremony-key [--prefix /opt/spellbook] [--rotate] [--public-only|--pem]
     creates <prefix>/ceremony/private.pem (0600, 0700 dir) if missing and
-    prints only the PUBLIC key + fingerprint the agent stamps into
-    ceremony/seed-to-addresses.html. --rotate makes old envelopes unreadable.
+    prints only the PUBLIC key + fingerprint. install.sh publishes the
+    public half root-owned at /usr/local/share/spellbook/ceremony.pub.pem,
+    where `spellbook-ceremony url` and the agent's spellbook_seed_viewer
+    find it for the hosted pages' link. --rotate makes old envelopes
+    unreadable.
   spellbook ceremony-adopt [--prefix /opt/spellbook] [--from PATH]
     MOVES a legacy ceremony key out of the agent's workspace into the
     daemon's dir and overwrites + unlinks the original.
@@ -1180,6 +1184,9 @@ def main(argv=None):
                     print(f"public_key_b64: {info['public_key_b64']}")
                     print(f"fingerprint:    {info['fingerprint']}")
                     print("created" if info["created"] else "existing key")
+                    print("The hosted ceremony pages show this fingerprint; "
+                          "the human compares at least its first 16 digits. "
+                          "Agent-safe page link: spellbook-ceremony url seal")
             else:
                 src = a.src or custody.legacy_key_path(custody.load_cfg(a.prefix))
                 if not os.path.lexists(src):

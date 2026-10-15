@@ -550,8 +550,9 @@ def _refuse_if_locked(seed_path: str, std_seed_path: str | None):
     if os.path.exists(sealed.sealed_path()):
         raise FileNotFoundError(
             "seed is sealed and not unlocked (" + ", ".join(missing) +
-            " missing): ask the human to unlock it — `spellbook-seed serve`, "
-            "they open the link and enter their seal password. Never "
+            " missing): ask the human to unlock it on the hosted seal page "
+            "(`spellbook-ceremony url seal`); the daemon user opens the "
+            "envelope they return. Never "
             "re-install over a locked wallet.")
 
 
@@ -6470,8 +6471,8 @@ class Daemon:
                "key_derivation": self.key_derivation,
                "unresolved_executions": self.unresolved_executions()}
         # Public custody facts only (S-16): the backup state, where the
-        # ceremony key lives, and the daemon's ceremony PUBLIC key for the
-        # agent to stamp into the human's page.
+        # ceremony key lives, and the daemon's ceremony PUBLIC key the
+        # hosted ceremony pages encrypt to (S-17).
         from spellbook import custody
         backup = self.backup_status()
         if backup["state"] == "pending":

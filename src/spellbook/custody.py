@@ -1,8 +1,12 @@
 """Daemon-side custody of the ceremony key, and the forced backup (review S-16).
 
-The passwordless ceremony (ceremony/seed-to-addresses.html) seals the
-human's standard seed into a SPELLBOOK-SEED-ENC2 envelope: AES-256-GCM,
-key wrapped with RSA-OAEP-SHA256 to a ceremony public key. The daemon
+The passwordless ceremony (the hosted restore page,
+https://spellbook.awizard.dev/ceremony/restore.html, "passwordless sealed
+seed"; review S-17) seals the human's standard seed into a
+SPELLBOOK-SEED-ENC2 envelope: AES-256-GCM, key wrapped with
+RSA-OAEP-SHA256 to the daemon's ceremony public key. The same key opens
+the hosted seal/unlock/restore envelopes (`spellbook-ceremony apply |
+restore`, spellbook.ceremony). The daemon
 decrypts that envelope at every start, so the wallet survives restarts
 with no password.
 
@@ -14,8 +18,12 @@ live seed whenever it liked. Now:
             root, which hands it to that user) inside the daemon's own
             config dir: <prefix>/ceremony/private.pem, file 0600, directory
             0700. Only the PUBLIC key leaves it — `spellbook ceremony-key`
-            prints it, `spellbook status` reports it — and the agent stamps
-            that public key into the page the human opens. The envelope
+            prints it, `spellbook status` reports it, install.sh publishes
+            a root-owned copy at PUBLISHED_PUB_PATH — and the agent puts
+            it in the hosted page link (URL fragment). The human checks
+            its fingerprint against the one the daemon printed for them
+            (installer log, terminal `spellbook export`, `spellbook
+            ceremony-key` in their own root shell). The envelope
             itself may stay anywhere, including in agent reach: it is
             ciphertext to a key the agent cannot read.
 
@@ -229,6 +237,13 @@ def _check_runner(prefix: str, cfg: dict | None) -> None:
             "the daemon user is the agent's OS user: the agent would hold the "
             "ceremony key (S-16). The passwordless ceremony needs the "
             "install.sh daemon-user split")
+
+
+def check_key_holder(prefix: str) -> None:
+    """Refuse unless running as root or the daemon user that owns `prefix`
+    (and that user is not the agent's): the commands that decrypt a
+    ceremony envelope hold the seed in memory (ceremony/derive_from_envelope.py)."""
+    _check_runner(prefix, load_cfg(prefix))
 
 
 def _public_b64(key) -> tuple[str, str]:

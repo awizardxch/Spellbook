@@ -44,7 +44,8 @@
 #      pauses, clears the screen and asks for 3 SET 1 words back. Without a
 #      terminal the install completes and prints how the backup leaves the
 #      machine later: `sudo spellbook export` for a human at a terminal, or
-#      `spellbook export --reveal-key` for the seal ceremony (ciphertext
+#      `spellbook export --reveal-key` for the hosted backup page
+#      (https://spellbook.awizard.dev/ceremony/backup.html; ciphertext
 #      only). Then next steps (policy opt-in, directory entry §8).
 #
 # What it NEVER does: asks for keys, prints a mnemonic, a private key or a
@@ -272,9 +273,10 @@ usage() {
   echo "                   refuses them, install.sh obeys."
   echo "  --restore FILE   restore from backup: FILE has two lines — seed.key hex"
   echo "                   (64 chars) then std_seed.key hex (128 chars). Uses these"
-  echo "                   instead of generating fresh keys. The agent obtains them"
-  echo "                   by decrypting the human's restore blob from the ceremony"
-  echo "                   HTML page. FILE is shredded after use."
+  echo "                   instead of generating fresh keys. The key holder (root or"
+  echo "                   the daemon user, never the agent) writes it with"
+  echo "                   'spellbook-ceremony restore ENVELOPE --out FILE' from the"
+  echo "                   hosted restore page's envelope. FILE is shredded after use."
   echo "  --expect-sha256 HEX  refuse the <tag> tarball unless its SHA-256 is HEX"
   echo "                   (the upgrade wrapper passes the hash published on main)"
   echo "  --no-sage        install EVM-only (Chia/Sage skipped; SPEC primary deliverable)"
@@ -288,7 +290,7 @@ usage() {
   echo "                   request token file) vs what goes to the human (approve"
   echo "                   token file location; the paper backup, which leaves the"
   echo "                   machine only by 'spellbook export' — on the human's"
-  echo "                   terminal, or encrypted to the seal ceremony's reveal key)."
+  echo "                   terminal, or encrypted to the hosted backup page's reveal key)."
   echo "                   Nothing secret is printed either way."
   exit 2
 }
@@ -702,9 +704,11 @@ if [ "$UPGRADE" = "1" ]; then
   done
   log "key material present (untouched by upgrade)"
 elif [ -n "$RESTORE_FILE" ]; then
-  # Restore from backup: the agent decrypted the human's restore blob (from the
-  # ceremony HTML) and wrote the two hex keys to RESTORE_FILE. Validate and
-  # install them instead of generating fresh keys.
+  # Restore from backup: the key holder (root or the daemon user, never the
+  # agent; review S-17) opened the human's restore envelope from the hosted
+  # restore page with `spellbook-ceremony restore`, which wrote the two hex
+  # keys to RESTORE_FILE. Validate and install them instead of generating
+  # fresh keys.
   [ ! -e "${PREFIX}/seed.key" ] || fail "${PREFIX}/seed.key already exists — this machine looks installed. Refusing to overwrite; uninstall first."
   [ ! -e "${PREFIX}/std_seed.key" ] || fail "${PREFIX}/std_seed.key already exists — this machine looks installed. Refusing to overwrite; uninstall first."
   log "restoring keys from backup ..."
@@ -870,7 +874,10 @@ fi
 # The key that decrypts the human's sealed-seed envelope belongs to the
 # daemon user: <prefix>/ceremony/private.pem, 0600 in a 0700 dir, made
 # here AS that user. Only its PUBLIC half ever leaves (`spellbook status`,
-# `spellbook ceremony-key`), for the agent to stamp into the human's page.
+# `spellbook ceremony-key`, the root-owned published copy below), for the
+# agent to put in the hosted ceremony page link (review S-17). The same key
+# opens the hosted pages' seal/unlock/restore envelopes
+# (`sudo -u spellbook spellbook-ceremony apply|restore`).
 # Upgrade first MOVES any key the old agent-run ceremony left in the
 # agent's workspace into that dir (overwrite + unlink the original), so an
 # envelope sealed to it keeps opening at daemon start.
@@ -902,7 +909,9 @@ CEREMONY_FPR="$(runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/spellbook" ceremo
   --prefix "${PREFIX}" | sed -n 's/^fingerprint: *//p')" \
   || fail "ceremony key creation failed (as ${SPELLBOOK_USER})"
 [ -n "$CEREMONY_FPR" ] || fail "ceremony key creation printed no fingerprint (as ${SPELLBOOK_USER})"
-log "daemon ceremony key ready (fingerprint ${CEREMONY_FPR}; public key: spellbook status)"
+log "daemon ceremony key ready. Spellbook daemon key fingerprint (the hosted"
+log "ceremony pages show it; compare at least the first 16 digits there):"
+log "  ${CEREMONY_FPR}"
 # Publish the PUBLIC half where the agent can read it (the prefix is 0700):
 # root-owned, so the agent cannot swap it. spellbook.json ceremony_pub_path
 # points here on fresh installs; upgrades print the env var instead.
@@ -966,15 +975,18 @@ chown root:root "${ROOT_LIB}/VERSION.new.$$"; chmod 0644 "${ROOT_LIB}/VERSION.ne
 mv -f "${ROOT_LIB}/VERSION.new.$$" "${ROOT_LIB}/VERSION"
 # The pre-S-29 locations inside ${PREFIX} are retired.
 rm -f "${PREFIX}/lib/install.sh" "${PREFIX}/install.env"
-# Seal ceremony HTML pages — offline human/agent handoff for fresh installs.
-# The agent embeds a per-ceremony seal public key before handing to the human.
+# Ceremony reference copies (review S-17): the pages a human types into are
+# HOSTED (https://spellbook.awizard.dev/ceremony/); the ceremony/*.html here
+# are pointers to them, and asset-index.json is this release's copy of the
+# published hash index (compare: python -m spellbook.asset_index verify).
 # See ceremony/README.md.
 if [ -d "${STAGE}/ceremony" ]; then
   mkdir -p "${PREFIX}/share/ceremony"
-  cp "${STAGE}/ceremony/"*.html "${STAGE}/ceremony/README.md" "${PREFIX}/share/ceremony/" 2>/dev/null || true
+  cp "${STAGE}/ceremony/"*.html "${STAGE}/ceremony/README.md" \
+     "${STAGE}/ceremony/asset-index.json" "${PREFIX}/share/ceremony/" 2>/dev/null || true
   chown -R root:root "${PREFIX}/share/ceremony"; chmod 0755 "${PREFIX}/share/ceremony"
   chmod 0644 "${PREFIX}"/share/ceremony/*
-  log "installed seal ceremony pages to ${PREFIX}/share/ceremony/"
+  log "installed ceremony pointer pages and asset index to ${PREFIX}/share/ceremony/"
 fi
 # Kept across upgrades when the human set them: the canonical repo and the
 # delay window the wrapper enforces (empty = GitHub main, 24 h).
@@ -1083,9 +1095,9 @@ chmod 0600 "${PREFIX}/drill-status.json"
 #   - on a real terminal (stdin AND stdout TTYs) it writes the words to
 #     /dev/tty, waits for Enter, clears the screen, then asks for 3 SET 1
 #     words back; it refuses pipes and the agent's OS user;
-#   - for the seal ceremony (the human reaches only the agent) it encrypts
-#     the backup to the reveal key the human's page made (--reveal-key) and
-#     prints only that envelope.
+#   - for the hosted backup page (the human reaches only the agent) it
+#     encrypts the backup to the reveal key the human's browser made
+#     (--reveal-key) and prints only that envelope.
 # Non-interactive runs (agent bootstrap, CI, cloud-init, `script`) complete
 # the install and print how the backup leaves the machine later.
 if [ "$UPGRADE" = "1" ]; then
@@ -1160,9 +1172,9 @@ else
   log "the machine one of two ways, nothing secret on any stdout:"
   log "  human at a terminal, own login:"
   log "    sudo ${VENV}/bin/spellbook export --prefix ${PREFIX}"
-  log "  seal ceremony (human reaches only the agent): the human's page"
-  log "  (${PREFIX}/share/ceremony/seal-password-encryptor.html, Step 1) makes"
-  log "  a reveal key; the agent relays its PUBLIC half and the envelope only:"
+  log "  hosted backup page (human reaches only the agent): the human opens"
+  log "  https://spellbook.awizard.dev/ceremony/backup.html, which makes a"
+  log "  reveal key; the agent relays its PUBLIC half and the envelope only:"
   log "    sudo ${VENV}/bin/spellbook export --prefix ${PREFIX} --reveal-key <public key>"
   log "  then, with the one-time code inside that backup (stdin, never argv):"
   log "    sudo ${VENV}/bin/spellbook backup-confirm --prefix ${PREFIX}"
@@ -1172,8 +1184,14 @@ cat <<EOF
 
 SEAL THE SEED (required before the install is called done — survives
 machine wipes, docs/SEALED_SEED.md): a password-locked copy of the seed the
-human can unlock after a wipe from a one-time local page:
-    ${VENV}/bin/spellbook-seed --config-dir ${PREFIX} --sealed <persistent path> serve
+human can unlock after a wipe. The human types the password on the hosted
+seal page, in their own browser; the link (public key only) comes from:
+    ${VENV}/bin/spellbook-ceremony url seal
+and the daemon user opens the envelope the page prints:
+    sudo -u ${SPELLBOOK_USER} ${VENV}/bin/spellbook-ceremony apply <envelope file>
+(A human at this machine may instead run the local viewer as the daemon
+user; it refuses the agent's OS user:
+    sudo -u ${SPELLBOOK_USER} ${VENV}/bin/spellbook-seed --config-dir ${PREFIX} --sealed <persistent path> serve)
 
 NEXT STEPS (all opt-in):
   - policy knobs: approval_threshold, allowlists, velocity caps (default: all off)
@@ -1208,18 +1226,24 @@ HUMAN'S (deliver out-of-band NOW, then never touch again):
   2. Paper backup — you never see the words. Either your human runs
        sudo ${VENV}/bin/spellbook export --prefix ${PREFIX}
      on their own terminal, or (they can only reach you) you hand them
-     ${PREFIX}/share/ceremony/seal-password-encryptor.html: they make a
-     reveal key (Step 1) and paste you its PUBLIC half; you run
+     https://spellbook.awizard.dev/ceremony/backup.html: they make a
+     reveal key (step 1) and paste you its PUBLIC half; you run
        sudo ${VENV}/bin/spellbook export --prefix ${PREFIX} --reveal-key <public key>
      and paste back the envelope it prints; they decrypt it on the page
-     (Step 2) and write both sets down, offline, two copies in two places.
+     (step 2) and write the words down, offline, two copies in two places.
      The decrypted backup ends with a BACKUP CONFIRMATION CODE; when they
      give it to you, pipe it (never argv) to
        sudo ${VENV}/bin/spellbook backup-confirm --prefix ${PREFIX}
      Until then the daemon is BACKUP PENDING: reads work, and every
      fund-moving route refuses (S-16). spellbook status shows the state.
-  3. Then seal the seed (required): spellbook-seed serve, one-time link to
-     your human; they set the password on that page; you never see it.
+  3. Then seal the seed (required): give your human the hosted seal link
+       ${VENV}/bin/spellbook-ceremony url seal
+     (public key only; or the spellbook_seed_viewer tool). They set the
+     password in their own browser after checking the Spellbook daemon key
+     fingerprint against the one this installer logged, and paste you an
+     envelope. Save it to a file; the daemon user opens it:
+       sudo -u ${SPELLBOOK_USER} ${VENV}/bin/spellbook-ceremony apply <file>
+     You never see the password and cannot open the envelope.
 
 VERIFY BEFORE YOU FINISH:
   spellbook doctor    # every check green

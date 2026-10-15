@@ -2,11 +2,17 @@
 """
 Decrypt a SPELLBOOK-SEED-ENC2 envelope and derive ALL Spellbook addresses.
 
-Runs as the spellbook DAEMON user (or root) only (review S-16): the
+The envelope is what the hosted restore page makes in its "passwordless
+sealed seed" mode (https://spellbook.awizard.dev/ceremony/restore.html):
+RSA-OAEP-SHA256 + AES-256-GCM to the daemon's ceremony PUBLIC key.
+
+Runs as the spellbook DAEMON user (or root) only (reviews S-16, S-17): the
 envelope is sealed to the daemon's ceremony key,
 <prefix>/ceremony/private.pem (0600, 0700 dir), which the agent cannot
-read. An agent that wants the addresses asks the daemon instead
-(`spellbook addresses`), which is what the daemon decrypted at start.
+read, and whoever runs this holds the decrypted seed in memory. It refuses
+any other user before reading the envelope. An agent that wants the
+addresses asks the daemon instead (`spellbook addresses`), which is what
+the daemon decrypted at start.
 
 Usage: sudo -u spellbook python3 derive_from_envelope.py [--prefix /opt/spellbook]
   Paste the envelope when prompted, then Enter on an empty line.
@@ -45,6 +51,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--prefix", default="/opt/spellbook")
     args = ap.parse_args()
+    from spellbook import custody
+    try:
+        custody.check_key_holder(args.prefix)
+    except (custody.CustodyError, OSError) as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
     print("Paste the SPELLBOOK-SEED-ENC2 envelope (then Enter on empty line):")
     lines = []
     while True:
