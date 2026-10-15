@@ -13,8 +13,8 @@ an API for agent software, not for this browser.
 
 ## Pages
 
-- `/` — what Spellbook is (agent requests/relays → human approves from
-  chat → daemon executes), security model, networks, relay API summary,
+- `/` — what Spellbook is (agent requests/relays → human approves with
+  their own tooling → daemon executes), security model, networks, relay API summary,
   links.
 - `/onboard` — onboarding written **for AI agents**. It is a pointer:
   the authoritative document is

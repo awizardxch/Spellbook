@@ -153,9 +153,11 @@ truth for where *this* install keeps things. Never guess paths.
 - `spellbook.sock` — the daemon's Unix socket. The CLI finds it via
   `SPELLBOOK_SOCKET`.
 - `request.token` / `approve.token` — client auth. Request queues
-  intents; approve authorizes exactly one execution attempt. The CLI
-  reads them via `SPELLBOOK_REQUEST_TOKEN` / the approve-token path —
-  neither ever goes through the dashboard, which is read-only.
+  intents; approve authorizes exactly one execution attempt. Your CLI
+  reads the request token via `SPELLBOOK_REQUEST_TOKEN`. The approve
+  token is the human's: only the human's own tooling, on their device,
+  reads it. You never hold, read or use it. Neither token ever goes
+  through the dashboard, which is read-only.
 - `queue.json`, `ledger.jsonl`, `policy.json`, `velocity.jsonl` —
   daemon state. Read them freely; never hand-edit them.
 
@@ -862,13 +864,17 @@ operational shape; Speechless decided it explicitly:
 
 - **No dashboard approvals.** The dashboard is read-only by design —
   it cannot approve, sign, or broadcast, and no approve button will be
-  added. The model is **agentic swaps with human delegation**:
-  the agent prepares (indicative quote → bounded queue intent), the
-  human approves **in chat**, and the agent conveys that approval via
-  the approve-token path as the human's delegate. The chat message is
-  the authorization — the agent never approves its own action. Note the
-  conveyance in the intent's purpose (e.g. `chat-approved 2026-09-24`)
-  so the ledger shows whose decision it was.
+  added. The model is **agentic swaps, human approval**: the agent
+  prepares (indicative quote → bounded queue intent) and shows the
+  human the decoded intent; the human approves it **themselves**, with
+  the approve token on their own device (`spellbook approve <queue_id>`
+  or `HumanClient`, see `docs/HUMAN_GUIDE.md` §3). The agent never
+  holds, reads or uses the approve token, and never calls
+  `queue_approve` or `mint_sign_ref`. A chat message is never an
+  approval the agent can pass on: chat is not authenticated, so an
+  approval the agent could convey is one an injected agent could forge
+  (review S-19). Signed approval refs (f-01) are minted only with the
+  approve token, on the human's side.
 - **The production seed never leaves the local daemon.**
   Cloud/deployed agents do not need it and do not receive it. The
   quote relay (the operator's, by default — no key on the agent side;
@@ -877,8 +883,8 @@ operational shape; Speechless decided it explicitly:
   seed in a website-login vault or a cloud deployment.
 - **Mainnet config:** `evm-4663` enabled with its mainnet RPC,
   `mainnet_submit_enabled: true`, relay env vars on the daemon.
-- **Flow:** indicative quote → queue bounded intent → human chat
-  approval → delegate conveys → one execution attempt → receipt
+- **Flow:** indicative quote → queue bounded intent → the human
+  approves on their own device → one execution attempt → receipt
   verification → daemon shutdown (on-demand only; never idle).
 - **Unknown fate is never retried.** A broadcast whose receipt never
   arrives is reconciled read-only from chain state. A failure *before*
