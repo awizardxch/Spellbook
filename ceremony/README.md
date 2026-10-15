@@ -1,103 +1,89 @@
-# Seal Ceremony HTML Pages
+# Seed ceremony
 
-Offline HTML pages for the Spellbook fresh-install seal ceremony. The human
-opens one in a browser; the agent and human pass encrypted blobs back and
-forth in chat. Fully offline — no network calls, keys never leave the page
-except encrypted.
+Review 2026-10-15, S-17 and S-18: the human's ceremony pages are **hosted**,
+and the agent never runs, serves or reads a page the human types a secret
+into. It never holds a key that opens what the human types.
 
-## Pages
+## Who sees what
 
-- **`seal-password-encryptor.html`** — Full ceremony, 3 steps:
-  1. Human generates a reveal key, pastes the public key to the agent.
-     Agent runs `sudo spellbook export --reveal-key <public key>`, which
-     encrypts the recovery document (both 24-word sets and their
-     addresses; no raw private keys) to it and prints only the envelope;
-     the agent sends that back as a copy-paste block and never sees a
-     word (review S-05).
-  2. Human pastes the envelope, decrypts, verifies, writes everything on
-     paper. Agent waits for "backup recorded".
-  3. Human enters a new seal password (writes it on paper first), encrypts,
-     pastes the ciphertext to the agent. Agent seals the keys.
+| Step | Human (own browser) | Agent | Key holder (daemon user) |
+|---|---|---|---|
+| Paper backup | makes a reveal key on `backup.html`, reads the words there | relays the reveal PUBLIC key and the export envelope | `spellbook export --reveal-key` encrypts the backup |
+| Seal | types a new password on `seal.html` | relays the link (daemon PUBLIC key) and the envelope | `spellbook-ceremony apply` decrypts it and seals |
+| Unlock after a wipe | types the password on `seal.html` | same | `spellbook-ceremony apply` decrypts and unlocks |
+| Restore from paper | types SET 1 + SET 2 on `restore.html` | same | `spellbook-ceremony restore --out FILE`, then `install.sh --restore FILE` |
+| Passwordless sealed seed | types SET 1 (or the 128-hex seed) on `restore.html` | same | the daemon opens the `SPELLBOOK-SEED-ENC2` envelope at start |
 
-- **`minimal-encryptor.html`** — Same 3 steps, stripped down. Fallback if the
-  main page misbehaves.
+The agent only ever carries public keys and ciphertext.
 
-## Agent setup (per ceremony)
+## The pages (hosted)
 
-Both pages ship with `__SEAL_PUB_B64__` as a placeholder. Before handing a
-page to the human:
+Served from the Spellbook site, source in `web/public/ceremony/`:
 
-1. Generate a fresh RSA-2048 seal keypair. Keep `private.pem` secret.
-2. Replace `__SEAL_PUB_B64__` with the base64 DER SPKI public key.
-3. The human's encrypted seal password can only be decrypted with `private.pem`.
-4. After the ceremony, shred `private.pem`.
+- `https://spellbook.awizard.dev/ceremony/seal.html#k=<daemon public key>&op=seal|unlock`
+- `https://spellbook.awizard.dev/ceremony/restore.html#k=<daemon public key>&op=restore`
+- `https://spellbook.awizard.dev/ceremony/backup.html` (makes its own reveal key)
 
-## Install location
+The public key rides in the URL **fragment** (after `#`), which browsers
+never send to the server. All crypto runs in the human's browser
+(WebCrypto: RSA-OAEP-SHA256 + AES-256-GCM). The pages carry a CSP with
+`default-src 'none'; connect-src 'none'`, load only same-origin scripts
+and stylesheets pinned by `integrity=` hashes, and have no inline script.
 
-`install.sh` copies this directory to `${PREFIX}/share/ceremony/`
-(e.g. `/opt/spellbook/share/ceremony/`).
+Get a link (agent-safe; public material only):
 
-## Restore from backup
+```bash
+spellbook-ceremony url seal               # or restore / backup
+spellbook-ceremony fingerprint            # what the page shows
+```
 
-If the human has backed-up keys (from a previous install's paper backup):
+The page shows the key's fingerprint. The human compares it with the one
+the key holder printed for them, not only with the one the agent quotes:
+the agent relays the key, so the fingerprint check is what stops a
+swapped key.
 
-1. **Human:** Opens the page, fills in **Step 0** with their SET 1 and SET 2
-   mnemonics (24 words each), encrypts to the agent's seal key, pastes the
-   ciphertext into chat. Skips Steps 1–2, does Step 3 (seal password) next.
-2. **Agent:** Decrypts the restore blob with the seal private key, then runs:
-   ```
-   scripts/restore_from_mnemonics.py "<set1>" "<set2>" /tmp/restore.keys
-   bash install.sh <tag> --restore /tmp/restore.keys --agent-user ... --human-user ...
-   ```
-   `install.sh --restore` validates the two hex keys (64 + 128 chars),
-   installs them as `seed.key` / `std_seed.key` (0600), and shreds the
-   restore file. No fresh keys are generated; no new mnemonic is displayed
-   (the human already has these words on paper).
-3. The agent confirms the derived addresses match the human's backup before
-   sealing with the Step 3 password.
+## Opening an envelope (key holder only)
 
-`--restore` and `--upgrade` are mutually exclusive.
+```bash
+sudo -u spellbook spellbook-ceremony apply envelope.txt            # seal / unlock
+sudo -u spellbook spellbook-ceremony restore envelope.txt --out /root/restore.keys
+```
 
-## Permanent direction
+Both refuse the agent's OS user (the request-token UIDs in
+`spellbook.json`), read the envelope from a file or stdin (never argv),
+check the key file is 0600, and check the envelope was made for this key
+and for this operation (the kind and key fingerprint are bound as AES-GCM
+associated data). `apply` enforces the seal password strength rule the
+page also shows. `restore` maps SET 1 (standard) to `std_seed.key` and
+SET 2 (daemon) to `seed.key`, the paper labels, and creates its output
+with `O_EXCL|O_NOFOLLOW`, 0600.
 
-These pages are a bridge. The permanent implementation belongs inside
-Spellbook itself (likely `spellbook-seed serve`), portable across LLM
-environments with no Muse-specific dependency.
+Envelope format: `src/spellbook/ceremony.py`.
 
-## Passwordless ceremony (current)
+## Asset index
 
-**`seed-to-addresses.html`** — the current ceremony page. No passwords, no
-chat secrets. The human pastes one of:
+`asset-index.json` here is a byte-identical mirror of the published
+`https://spellbook.awizard.dev/asset-index.json`, rendered at
+`/onboard/integrity`. It lists every ceremony page and asset with its
+SHA-256 and SRI hash, the ceremony CSP, and every API route the site
+exposes with its source hash.
 
-- 24 BIP-39 recovery words (standard wallet — the set that imports into
-  Sage/MetaMask), validated with checksum in-page, or
-- 128-hex standard seed, or
-- 64-hex custom (32-byte) seed.
+```bash
+PYTHONPATH=src python -m spellbook.asset_index write    # after changing a page, asset or API route
+PYTHONPATH=src python -m spellbook.asset_index check    # what the tests and the web prebuild run
+PYTHONPATH=src python -m spellbook.asset_index verify --fetch   # compare the live site with this repo
+```
 
-The page derives EVM / Solana / Chia addresses entirely offline and seals
-the seed into a `SPELLBOOK-SEED-ENC2` envelope (AES-256-GCM, key wrapped by
-RSA-OAEP-SHA256 to the ceremony public key). The envelope is the only thing
-that leaves the browser — the seed and words never do.
+## The old pages
 
-The page ships with `__SEED_PUB_B64__` as a placeholder and **refuses to
-seal until stamped**. Before handing it to the human:
+`seal-password-encryptor.html`, `minimal-encryptor.html` and
+`seed-to-addresses.html` are now pointers to the hosted pages. The old
+versions had the agent decrypt the seal password and the restore words.
 
-1. Run `python3 ceremony/new_seed_ceremony_key.py` — generates a fresh
-   RSA-2048 keypair. Keep `private.pem` secret (mode 600, outside the repo).
-2. Replace `__SEED_PUB_B64__` with the base64 DER SPKI public key.
-3. After the ceremony, `private.pem` decrypts envelopes; guard it like a key.
+## Helpers (key holder or human, never the agent)
 
-### Agent tools (for other agents)
-
-These scripts let any agent work with sealed envelopes without ever seeing
-key material:
-
-- **`derive_from_envelope.py`** — paste an envelope, get the EVM/Solana/Chia
-  addresses. Verifies EVM + Solana against known anchors and fails closed
-  on mismatch. The seed is derived in-process and never printed.
-- **`derive_addresses.py`** — derive all addresses from a seed hex directly.
-- **`new_seed_ceremony_key.py`** — mint a fresh ceremony RSA keypair.
-
-The daemon (`src/spellbook/daemon.py`) decrypts the same envelope format on
-startup via `sealed_envelope_path` + `ceremony_key_path` (see PR #105), so
-keys survive restarts without re-entry.
+- `new_seed_ceremony_key.py`: makes the ceremony key pair, writes the
+  public half for the agent's tools, prints the page links.
+- `derive_from_envelope.py`: opens a `SPELLBOOK-SEED-ENC2` envelope and
+  derives the addresses. Whoever runs it holds the seed in memory.
+- `derive_addresses.py`: addresses from seed hex.

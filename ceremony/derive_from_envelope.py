@@ -3,8 +3,16 @@
 Decrypt a SPELLBOOK-SEED-ENC2 envelope and derive ALL Spellbook addresses.
 
 The envelope is hybrid-encrypted (RSA-OAEP-SHA256 + AES-GCM-256) to the
-agent's ceremony keypair. There is deliberately NO password step: nothing
-secret ever appears in chat, logs, argv, or files.
+ceremony keypair (the hosted restore page,
+https://spellbook.awizard.dev/ceremony/restore.html, makes it). There is
+deliberately NO password step: nothing secret ever appears in chat, logs,
+argv, or files.
+
+RUN AS THE KEY HOLDER (the daemon user, or the human on their own
+machine), never as the agent: this process holds the decrypted seed in
+memory, so whoever runs it sees the seed (review S-16 / S-17). The agent
+only relays the envelope. Key: $SPELLBOOK_CEREMONY_KEY, else the default
+below.
 
 Usage: python3 derive_from_envelope.py
   Paste the envelope when prompted, then Enter on an empty line.
@@ -34,8 +42,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-PRIVATE_KEY_PATH = os.path.expanduser(
-    "~/workspace/.spellbook/seed-derive/private.pem")
+PRIVATE_KEY_PATH = os.environ.get("SPELLBOOK_CEREMONY_KEY") or \
+    os.path.expanduser("~/workspace/.spellbook/seed-derive/private.pem")
 
 # Known-good anchors for the CURRENT wallet (SET 1, sealed 2026-09-29).
 # Updated only by re-deriving from the authoritative current seed material.

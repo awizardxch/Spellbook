@@ -33,6 +33,8 @@ spellbookd = "spellbook.daemon:main"
 spellbook = "spellbook.cli:main"
 spellbook-seed = "spellbook.sealed:main"
 spellbook-mcp = "spellbook.mcp_server:main"
+spellbook-ceremony = "spellbook.ceremony:main"
+spellbook-asset-index = "spellbook.asset_index:main"
 
 [project.urls]
 Homepage = "https://github.com/awizardxch/Spellbook"

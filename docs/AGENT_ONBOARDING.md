@@ -294,10 +294,12 @@ other chain.
 `spellbook export`: on the human's own terminal (`sudo spellbook export`
 — words on `/dev/tty`, a pause, a screen clear, then 3 SET 1 words asked
 back; it refuses pipes and the agent's OS user), or, when the human can
-only reach you, encrypted to the seal ceremony's reveal key
-(`sudo spellbook export --reveal-key <public key>` prints only an
-envelope the human's page decrypts). You relay ciphertext and never see a
-word. No raw private keys are shown either way.
+only reach you, encrypted to a reveal key the human makes on the hosted
+backup page (`https://spellbook.awizard.dev/ceremony/backup.html`; you
+relay its public half, `sudo spellbook export --reveal-key <public key>`
+prints only an envelope, and that browser tab alone decrypts it). You
+relay ciphertext and never see a word. No raw private keys are shown
+either way.
 On a fresh install run from a real terminal the installer runs the
 terminal export itself at the end. Installs made before this change saved
 the whole backup to `$PREFIX/paper-backup.txt`; an upgrade warns while it
@@ -326,22 +328,33 @@ brings them back without anyone re-typing words — see
 [SEALED_SEED.md](SEALED_SEED.md).
 
 **Assume your human can only reach you, the agent** — no terminal, no
-SSH, no machine access. Every step below goes through you: you run the
-commands, you hand them links, they click.
+SSH, no machine access. You hand them links and relay what they paste
+back; you never run or serve a page they type a secret into (review
+2026-10-15, S-17/S-18).
 
-**Seal at install — required, not optional.** Right after the paper
-backup is confirmed, seal the seed before you call the install done:
+**The hosted ceremony.** The pages your human types a password or words
+into are served from the Spellbook site and run only in their browser
+(CSP `connect-src 'none'`, every script pinned by hash at
+`https://spellbook.awizard.dev/onboard/integrity`). The link you give
+them carries the daemon's **public** key after the `#`; the page
+encrypts to it and prints an envelope (`SPELLBOOK-CEREMONY1.`). You
+relay that envelope to the daemon user, who alone holds the private key:
 
 ```bash
-spellbook-seed serve   # prints a one-time link; exits after one success
+spellbook-ceremony url seal        # the link (public key in the fragment) + fingerprint
+spellbook-ceremony inspect env.txt # the envelope's kind and key fingerprint; decrypts nothing
+sudo -u spellbook spellbook-ceremony apply env.txt   # the daemon user opens it
 ```
 
-Get that link to your human in a browser. `serve` binds `127.0.0.1`, so
-arrange the path via your platform: an SSH tunnel, a port-forward /
-preview URL, or a TLS tunnel (e.g.
-`cloudflared tunnel --url http://127.0.0.1:8787`). The page is plain
-HTTP — the path to your human must be TLS, and the URL's one-time token
-is the only auth. They set the password on that page; the sealed file is
+From an MCP client: `spellbook_seed_viewer` returns the same link
+(`page`: `seal`, `restore` or `backup`), `spellbook_ceremony_inspect`
+reads an envelope's header. Tell your human to compare the fingerprint
+the page shows with the one their daemon printed for them: you relay
+the key, so that check is what stops a swapped one.
+
+**Seal at install — required, not optional.** Right after the paper
+backup is confirmed, give your human the seal link and relay the
+envelope they return; the daemon user applies it and the sealed file is
 written. **Never** ask for the password in chat, never pass it on a
 command line — you must never see it.
 
@@ -352,10 +365,14 @@ run:
 spellbook-seed status   # exit 0 unlocked · 3 locked · 4 unsealed · 5 mismatch · 6 empty · 7 no_access
 ```
 
-- `locked` → run `spellbook-seed serve`, give your human the one-time
-  link it prints, and wait. They enter the password on that page; the
-  seed files come back and the daemon can start.
-- `unsealed` → same command; the page offers **Seal** to your human.
+- `locked` → give your human the seal link (`spellbook-ceremony url
+  seal`, op `unlock`), relay the envelope they return to the daemon user
+  (`spellbook-ceremony apply`), and wait. The seed files come back and
+  the daemon can start.
+- `unsealed` → same, op `seal`: your human chooses the password.
+- `empty` after a wipe with no seal → `spellbook-ceremony url restore`;
+  the daemon user turns the envelope into the `install.sh --restore`
+  file with `spellbook-ceremony restore --out`.
 - **Never** ask for the password in chat, never pass it on a command
   line, and never re-install over a `locked` wallet (a new install mints
   a new wallet and strands the old one).

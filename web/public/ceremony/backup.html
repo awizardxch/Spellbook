@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'none'; form-action 'none'; base-uri 'none'">
+<title>Spellbook paper backup</title>
+<link rel="stylesheet" href="/ceremony/ceremony.css" integrity="sha384-WNsHLN+O2nzkXkIM+JeDphAgFyPztWrawwG4fo4LCk/Kbsr/RoXCyoiMfi07VhsM" crossorigin="anonymous">
+<script src="/ceremony/common.js" integrity="sha384-IrrVPr8wTyyGxSBBT6VOjYqGvb3a2VURC0VSpjjCwJM7m9XpRj/upkyYNBmA+G00" crossorigin="anonymous" defer></script>
+<script src="/ceremony/backup.js" integrity="sha384-oTJcHvMelvnj+YSjGhCreM6Cwdcroc0xU1k/EsH6HG+yJBaphhyyJyWAGFPVDlg1" crossorigin="anonymous" defer></script>
+</head>
+<body>
+<main>
+<h1>Spellbook paper backup</h1>
+<p class="sub">See your recovery words without your agent ever seeing them. This page makes a one-time reveal key; your agent gets only its public half and hands back an envelope that only this open tab can decrypt.</p>
+
+<div class="warnbox"><strong>Do not reload or close this tab</strong> until the words are on paper. The reveal key lives only in this tab's memory and cannot be exported; reloading destroys it. No network requests are possible from this page.</div>
+
+<div class="step">
+<span class="stepnum">1</span>
+<h2>Make a reveal key</h2>
+<button type="button" id="genBtn">Make reveal key</button>
+<div id="pubBox" hidden>
+<label for="pubOut">Public key: paste this to your agent.</label>
+<textarea id="pubOut" readonly></textarea>
+<button type="button" class="ghost" id="copyPub">Copy public key</button>
+<div class="ok" id="pubOk"></div>
+<div class="who"><strong>Your agent runs</strong> <code>sudo spellbook export --reveal-key &lt;this public key&gt;</code>. That prints only an envelope, encrypted to this key, which your agent pastes back to you.</div>
+</div>
+<div class="err" id="genErr"></div>
+</div>
+
+<div class="step">
+<span class="stepnum">2</span>
+<h2>Open the envelope</h2>
+<textarea id="envIn" autocomplete="off" spellcheck="false" placeholder="Paste the envelope your agent sent"></textarea>
+<button type="button" id="openBtn">Decrypt here</button>
+<div class="err" id="openErr"></div>
+<div id="docBox" hidden>
+<p class="ok">Write <b>both</b> word sets and the addresses on paper, offline, in two copies kept in two places. Then clear the screen.</p>
+<div class="doc" id="docOut"></div>
+<button type="button" class="ghost" id="clearBtn">Clear from screen</button>
+</div>
+</div>
+
+<footer>Runs in your browser only · RSA-OAEP-SHA256 + AES-256-GCM · <a href="/onboard/integrity">asset hashes</a></footer>
+</main>
+</body>
+</html>

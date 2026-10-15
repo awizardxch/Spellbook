@@ -1,0 +1,5 @@
+# Ceremony assets are served byte-for-byte and pinned by hash in the asset
+# index (src/spellbook/asset_index.py): never let a checkout rewrite them.
+web/public/ceremony/** text eol=lf
+web/public/asset-index.json text eol=lf
+ceremony/asset-index.json text eol=lf
