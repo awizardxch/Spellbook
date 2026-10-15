@@ -43,9 +43,10 @@ recommended-venue list via ``dex.recommended_venues`` in spellbook.json
 venue carries a prominent warning on the queued intent, and the human's
 per-transaction approval is what authorizes the venue. Nothing in this
 module signs or broadcasts. Quotes are fetched and normalized here; at
-execution time the daemon fetches the firm quote again and validates it
-field-by-field against the human-approved bounds
-(``validate_swap_intent_against_quote``) before anything is signed. A
+execution time the daemon fetches the firm quote again and DECODES its
+transaction against the human-approved bounds and the pinned contract
+table (``validate_swap_intent_against_quote`` / ``decode_swap_tx``,
+``PINNED_CONTRACTS``) before anything is signed. A
 venue that doesn't serve the intent's chain is refused — that is a
 capability fact, not a policy choice.
 
@@ -1704,6 +1705,551 @@ __all__ = [
 ]
 
 # ---------------------------------------------------------------------------
+# Pinned contracts (S-20, S-21)
+#
+# Every contract the daemon sends a swap or an LP call to, or approves as a
+# spender, comes from this in-code table — never from a venue's answer or
+# an agent's params. A chain/role with no entry is REFUSED: an address is
+# pinned only when the repo itself establishes it, never guessed. The
+# operator may add or replace entries in spellbook.json
+# (dex.pinned_contracts); the daemon logs every override at startup and
+# the queue shows which source each pinned address came from.
+# ---------------------------------------------------------------------------
+
+#: 0x AllowanceHolder: the swap target AND the ERC-20 spender for 0x Swap
+#: API v2 allowance-holder quotes (matcha, and Cast, which serves 0x
+#: allowance-holder quotes).
+PIN_ALLOWANCE_HOLDER = "allowance_holder"
+#: Uniswap Universal Router: the target of Trading API /swap transactions.
+PIN_UNIVERSAL_ROUTER = "universal_router"
+#: Uniswap v4 PositionManager (LP add/remove/claim, and the Permit2 spender).
+PIN_V4_POSITION_MANAGER = "v4_position_manager"
+#: Permit2 (the v4 LP approval path's first-stage spender).
+PIN_PERMIT2 = "permit2"
+#: Uniswap v2(-style) router (v2 LP add/remove spender and target).
+PIN_V2_ROUTER = "v2_router"
+#: Uniswap v3 NonfungiblePositionManager (v3 LP add/remove/claim).
+PIN_V3_POSITION_MANAGER = "v3_position_manager"
+
+PIN_ROLES = (PIN_ALLOWANCE_HOLDER, PIN_UNIVERSAL_ROUTER,
+             PIN_V4_POSITION_MANAGER, PIN_PERMIT2, PIN_V2_ROUTER,
+             PIN_V3_POSITION_MANAGER)
+
+#: chain id -> {role: address (lowercase)}. Only addresses established by
+#: the repo itself (see PINNED_SOURCES). Everything else is refused until
+#: the operator pins it explicitly.
+PINNED_CONTRACTS = {
+    4663: {  # Robinhood Chain mainnet
+        PIN_ALLOWANCE_HOLDER: "0x0000000000001ff3684f28c67538d4d072c22734",
+        PIN_V4_POSITION_MANAGER: "0x58daec3116aae6d93017baaea7749052e8a04fa7",
+        PIN_PERMIT2: "0x000000000022d473030f116ddee9f6b43ac78ba3",
+    },
+}
+
+#: Where each built-in pin comes from (shown in the queue and dex_venues).
+PINNED_SOURCES = {
+    (4663, PIN_ALLOWANCE_HOLDER):
+        "0x AllowanceHolder; the tx.to and spender of Cast's chain-4663 "
+        "allowance-holder quotes (tests/test_dex_cast.py)",
+    (4663, PIN_V4_POSITION_MANAGER):
+        "Uniswap v4 PositionManager on Robinhood Chain "
+        "(web/lib/uniswap-v4.ts, beside the pinned StateView)",
+    (4663, PIN_PERMIT2):
+        "Permit2 on Robinhood Chain (docs/AGENT_ONBOARDING.md)",
+}
+
+OVERRIDE_SOURCE = "operator override (spellbook.json dex.pinned_contracts)"
+
+#: Which pinned role a venue's swap transaction must target.
+VENUE_SWAP_TARGET = {
+    VENUE_MATCHA: PIN_ALLOWANCE_HOLDER,
+    VENUE_CAST: PIN_ALLOWANCE_HOLDER,
+    VENUE_UNISWAP: PIN_UNIVERSAL_ROUTER,
+}
+
+
+def parse_pin_overrides(raw) -> dict:
+    """Validate spellbook.json's dex.pinned_contracts:
+    ``{"<chain id>": {"<role>": "0x<address>"}}``. Returns
+    ``{chain_id: {role: address_lower}}``. Unknown roles, bad chain ids
+    and bad addresses raise DexError (the daemon refuses to start)."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise DexError("dex.pinned_contracts must be an object "
+                       "{chain_id: {role: address}}")
+    out = {}
+    for cid, roles in raw.items():
+        try:
+            chain_id = int(str(cid), 10)
+        except ValueError:
+            raise DexError(f"dex.pinned_contracts: bad chain id {cid!r}")
+        if chain_id <= 0 or not isinstance(roles, dict) or not roles:
+            raise DexError(f"dex.pinned_contracts[{cid!r}] must be a "
+                           "non-empty object {role: address}")
+        for role, addr in roles.items():
+            if role not in PIN_ROLES:
+                raise DexError(f"dex.pinned_contracts: unknown role {role!r} "
+                               f"(known: {', '.join(PIN_ROLES)})")
+            if not _is_address(addr) or int(addr, 16) == 0:
+                raise DexError(f"dex.pinned_contracts[{cid!r}][{role!r}]: "
+                               f"bad address {addr!r}")
+            out.setdefault(chain_id, {})[role] = addr.lower()
+    return out
+
+
+def pinned_contracts(chain_id: int, overrides: dict | None = None) -> dict:
+    """{role: address} pinned for chain_id: the built-in table with any
+    operator overrides applied on top."""
+    pins = dict(PINNED_CONTRACTS.get(chain_id, {}))
+    pins.update((overrides or {}).get(chain_id, {}))
+    return pins
+
+
+def pin_source(chain_id: int, role: str, overrides: dict | None = None) -> str | None:
+    """Where the pinned address for (chain_id, role) came from."""
+    if role in (overrides or {}).get(chain_id, {}):
+        return OVERRIDE_SOURCE
+    return PINNED_SOURCES.get((chain_id, role))
+
+
+def pinned_contract(chain_id: int, role: str,
+                    overrides: dict | None = None) -> str:
+    """The pinned address for (chain_id, role), or DexError: an unpinned
+    contract is refused, never taken from the caller."""
+    addr = pinned_contracts(chain_id, overrides).get(role)
+    if not addr:
+        raise DexError(
+            f"no pinned {role} for chain {chain_id} — refusing (Spellbook "
+            "only sends to contracts it has pinned; the operator can pin "
+            "one in spellbook.json dex.pinned_contracts)")
+    return addr
+
+
+def resolve_pinned(chain_id: int, role: str, supplied,
+                   overrides: dict | None = None, what: str = "") -> str:
+    """The pinned address for (chain_id, role). A caller-supplied address
+    is accepted only when it IS the pinned one; anything else refuses."""
+    addr = pinned_contract(chain_id, role, overrides)
+    if supplied not in (None, "") and str(supplied).lower() != addr:
+        raise DexError(
+            f"{what or role} {supplied!r} is not the pinned {role} for "
+            f"chain {chain_id} ({addr}) — refusing; omit it to use the pin")
+    return addr
+
+
+def dex_asset_key(token: str) -> str:
+    """The one policy/velocity key for a DEX leg: either venue's native
+    representation is "native" (the key plain transfers use); a token is
+    its lowercased address. Shared by policy and velocity (S-21)."""
+    return "native" if _is_native_token(token) else (token or "").lower()
+
+
+# ---------------------------------------------------------------------------
+# Calldata decoding (S-20, S-21) — the transaction that will be signed is
+# decoded and compared with the intent; a quote's own claims are not
+# evidence.
+# ---------------------------------------------------------------------------
+
+#: AllowanceHolder.exec(address operator, address token, uint256 amount,
+#: address payable target, bytes data)
+ALLOWANCE_HOLDER_EXEC_SELECTOR = "2213bc0b"
+#: Settler.execute((address recipient, address buyToken, uint256
+#: minAmountOut) slippage, bytes[] actions, bytes32 zid)
+SETTLER_EXECUTE_SELECTOR = "1fff991f"
+#: UniversalRouter.execute(bytes commands, bytes[] inputs)
+UR_EXECUTE_SELECTOR = "24856bc3"
+#: UniversalRouter.execute(bytes commands, bytes[] inputs, uint256 deadline)
+UR_EXECUTE_DEADLINE_SELECTOR = "3593564c"
+
+SELECTOR_NAMES = {
+    ALLOWANCE_HOLDER_EXEC_SELECTOR:
+        "AllowanceHolder.exec(address,address,uint256,address,bytes)",
+    SETTLER_EXECUTE_SELECTOR:
+        "Settler.execute((address,address,uint256),bytes[],bytes32)",
+    UR_EXECUTE_SELECTOR: "UniversalRouter.execute(bytes,bytes[])",
+    UR_EXECUTE_DEADLINE_SELECTOR:
+        "UniversalRouter.execute(bytes,bytes[],uint256)",
+    V4_MODIFY_LIQUIDITIES_SELECTOR:
+        "PositionManager.modifyLiquidities(bytes,uint256)",
+}
+
+#: The swap entry points accepted per pinned target role.
+SWAP_SELECTORS = {
+    PIN_ALLOWANCE_HOLDER: (ALLOWANCE_HOLDER_EXEC_SELECTOR,),
+    PIN_UNIVERSAL_ROUTER: (UR_EXECUTE_SELECTOR, UR_EXECUTE_DEADLINE_SELECTOR),
+}
+
+#: Universal Router command ids (Commands.sol). Only the ones Spellbook can
+#: bound are accepted; every other command is refused by name or number.
+UR_V3_SWAP_EXACT_IN = 0x00
+UR_SWEEP = 0x04
+UR_V2_SWAP_EXACT_IN = 0x08
+UR_WRAP_ETH = 0x0B
+UR_UNWRAP_WETH = 0x0C
+UR_COMMAND_NAMES = {
+    0x00: "V3_SWAP_EXACT_IN", 0x01: "V3_SWAP_EXACT_OUT",
+    0x02: "PERMIT2_TRANSFER_FROM", 0x03: "PERMIT2_PERMIT_BATCH",
+    0x04: "SWEEP", 0x05: "TRANSFER", 0x06: "PAY_PORTION",
+    0x08: "V2_SWAP_EXACT_IN", 0x09: "V2_SWAP_EXACT_OUT",
+    0x0A: "PERMIT2_PERMIT", 0x0B: "WRAP_ETH", 0x0C: "UNWRAP_WETH",
+    0x0D: "PERMIT2_TRANSFER_FROM_BATCH", 0x0E: "BALANCE_CHECK_ERC20",
+    0x10: "V4_SWAP",
+}
+#: Universal Router recipient sentinels (Constants.sol).
+UR_MSG_SENDER = "0x0000000000000000000000000000000000000001"
+UR_ADDRESS_THIS = "0x0000000000000000000000000000000000000002"
+#: Universal Router "use the router's whole balance" amount sentinel.
+UR_CONTRACT_BALANCE = 1 << 255
+
+
+def _abi_decode(types: list, data_hex: str, what: str) -> list:
+    from spellbook import abi as _abi
+    try:
+        return _abi.decode_abi(types, data_hex)
+    except _abi.AbiError as e:
+        raise DexError(f"{what}: calldata does not decode ({e}) — refusing")
+
+
+def _split_selector(data, what: str) -> tuple[str, str]:
+    if not (isinstance(data, str) and data.startswith("0x")):
+        raise DexError(f"{what}: calldata is not 0x-hex — refusing")
+    h = data[2:].lower()
+    if len(h) < 8 or len(h) % 2 or any(c not in "0123456789abcdef" for c in h):
+        raise DexError(f"{what}: calldata is malformed — refusing")
+    return h[:8], "0x" + h[8:]
+
+
+def _same_token(a: str, b: str) -> bool:
+    if _is_native_token(a) or _is_native_token(b):
+        return _is_native_token(a) and _is_native_token(b)
+    return (a or "").lower() == (b or "").lower()
+
+
+def _decode_settler_execute(data_hex: str, *, wallet: str, buy_token: str,
+                            min_buy: int) -> dict:
+    """Bind a 0x Settler.execute call: the slippage struct's recipient is
+    the wallet, its buy token is the intent's, and its minimum out is at
+    least the intent's minimum. Settler enforces that struct on-chain."""
+    sel, args = _split_selector(data_hex, "0x Settler call")
+    if sel != SETTLER_EXECUTE_SELECTOR:
+        raise DexError(
+            f"matcha/cast: AllowanceHolder target selector 0x{sel} is not "
+            f"{SELECTOR_NAMES[SETTLER_EXECUTE_SELECTOR]} — cannot decode, "
+            "refusing")
+    recipient, s_buy, min_out, _actions, _zid = _abi_decode(
+        ["address", "address", "uint256", "bytes[]", "bytes32"], args,
+        "0x Settler.execute")
+    if recipient != wallet.lower():
+        raise DexError(f"swap recipient {recipient} is not this wallet "
+                       f"({wallet.lower()}) — refusing")
+    if not _same_token(s_buy, buy_token):
+        raise DexError(f"swap buys {s_buy}, approved {buy_token} — refusing")
+    if min_out < min_buy:
+        raise DexError(f"swap minimum out {min_out} < approved minimum "
+                       f"{min_buy} — refusing")
+    return {"recipient": recipient, "buy_token": s_buy,
+            "min_buy_amount_wei": min_out,
+            "inner_selector": "0x" + sel,
+            "inner_selector_name": SELECTOR_NAMES[sel]}
+
+
+def _decode_allowance_holder(data_hex: str, *, target_addr: str, wallet: str,
+                             sell_token: str, sell_amount: int,
+                             buy_token: str, min_buy: int,
+                             tokens: tuple) -> dict:
+    sel, args = _split_selector(data_hex, "swap")
+    operator, token, amount, inner, inner_data = _abi_decode(
+        ["address", "address", "uint256", "address", "bytes"], args,
+        "AllowanceHolder.exec")
+    # The holder lets `operator` pull up to `amount` of `token` from this
+    # wallet during the call: that pair must be exactly the sell leg.
+    if _is_native_token(sell_token):
+        if not _is_native_token(token):
+            raise DexError(f"native sell, but exec grants token {token} — "
+                           "refusing")
+        # A native amount grants nothing (no transferFrom on native); the
+        # tx value, checked separately, is what moves.
+        if amount not in (0, sell_amount):
+            raise DexError(f"exec amount {amount} != approved sell amount "
+                           f"{sell_amount} — refusing")
+    else:
+        if token != sell_token.lower():
+            raise DexError(f"exec sells token {token}, approved "
+                           f"{sell_token.lower()} — refusing")
+        if amount != sell_amount:
+            raise DexError(f"exec amount {amount} != approved sell amount "
+                           f"{sell_amount} — exact amount only, refusing")
+    if operator != inner:
+        raise DexError(f"exec operator {operator} != target {inner} — "
+                       "refusing")
+    if inner in tokens or inner == wallet.lower() or inner == target_addr \
+            or int(inner, 16) == 0:
+        raise DexError(f"exec target {inner} is a token, this wallet or the "
+                       "holder itself — refusing")
+    out = {"sell_token": token, "sell_amount_wei": amount,
+           "operator": operator, "settler": inner}
+    out.update(_decode_settler_execute(inner_data, wallet=wallet,
+                                       buy_token=buy_token, min_buy=min_buy))
+    return out
+
+
+def _v3_path_tokens(path_hex: str) -> tuple[str, str]:
+    raw = bytes.fromhex(path_hex[2:])
+    if len(raw) < 43 or (len(raw) - 20) % 23:
+        raise DexError("Universal Router: malformed v3 path — refusing")
+    return "0x" + raw[:20].hex(), "0x" + raw[-20:].hex()
+
+
+def _decode_universal_router(sel: str, args: str, *, wallet: str,
+                             sell_token: str, sell_amount: int,
+                             buy_token: str, min_buy: int,
+                             value_wei: int) -> dict:
+    types = ["bytes", "bytes[]"]
+    if sel == UR_EXECUTE_DEADLINE_SELECTOR:
+        types.append("uint256")
+    vals = _abi_decode(types, args, "UniversalRouter.execute")
+    commands = bytes.fromhex(vals[0][2:])
+    inputs = vals[1]
+    if len(commands) != len(inputs) or not commands:
+        raise DexError("UniversalRouter: commands/inputs mismatch — refusing")
+    me = wallet.lower()
+    to_wallet = (UR_MSG_SENDER, me)
+    native_sell = _is_native_token(sell_token)
+    native_buy = _is_native_token(buy_token)
+    user_in = 0         # what the swaps pull from the wallet (via Permit2)
+    wrapped = 0         # native wrapped from the tx value
+    delivered = 0       # minimum the wallet is guaranteed to receive
+    steps = []
+    for cmd, inp in zip(commands, inputs):
+        name = UR_COMMAND_NAMES.get(cmd & 0x3F, f"0x{cmd:02x}")
+        if cmd & 0x80:
+            raise DexError(f"UniversalRouter: allow-revert flag on {name} — "
+                           "refusing")
+        if cmd == UR_WRAP_ETH:
+            rcpt, amt = _abi_decode(["address", "uint256"], inp, name)
+            if not native_sell or rcpt != UR_ADDRESS_THIS:
+                raise DexError("UniversalRouter: WRAP_ETH outside a native "
+                               "sell into the router — refusing")
+            wrapped += amt
+        elif cmd in (UR_V3_SWAP_EXACT_IN, UR_V2_SWAP_EXACT_IN):
+            if cmd == UR_V3_SWAP_EXACT_IN:
+                rcpt, a_in, a_min, path, payer_user = _abi_decode(
+                    ["address", "uint256", "uint256", "bytes", "bool"], inp,
+                    name)
+                t_in, t_out = _v3_path_tokens(path)
+            else:
+                rcpt, a_in, a_min, path, payer_user = _abi_decode(
+                    ["address", "uint256", "uint256", "address[]", "bool"],
+                    inp, name)
+                if len(path) < 2:
+                    raise DexError("UniversalRouter: v2 path too short — "
+                                   "refusing")
+                t_in, t_out = path[0], path[-1]
+            if payer_user:
+                if native_sell or t_in != sell_token.lower() \
+                        or a_in == UR_CONTRACT_BALANCE:
+                    raise DexError(f"UniversalRouter: {name} pulls {t_in} "
+                                   "from the wallet outside the approved "
+                                   "sell — refusing")
+                user_in += a_in
+            if rcpt in to_wallet:
+                if native_buy or t_out != buy_token.lower():
+                    raise DexError(f"UniversalRouter: {name} pays {t_out} "
+                                   "to the wallet, approved "
+                                   f"{buy_token} — refusing")
+                delivered += a_min
+            elif rcpt != UR_ADDRESS_THIS:
+                raise DexError(f"UniversalRouter: {name} pays recipient "
+                               f"{rcpt}, not this wallet — refusing")
+        elif cmd == UR_SWEEP:
+            tok, rcpt, amt = _abi_decode(["address", "address", "uint256"],
+                                         inp, name)
+            if rcpt not in to_wallet:
+                raise DexError(f"UniversalRouter: SWEEP pays recipient "
+                               f"{rcpt}, not this wallet — refusing")
+            if native_buy or tok != buy_token.lower():
+                raise DexError(f"UniversalRouter: SWEEP of {tok}, approved "
+                               f"{buy_token} — refusing")
+            delivered += amt
+        elif cmd == UR_UNWRAP_WETH:
+            rcpt, amt = _abi_decode(["address", "uint256"], inp, name)
+            if rcpt not in to_wallet:
+                raise DexError(f"UniversalRouter: UNWRAP_WETH pays recipient "
+                               f"{rcpt}, not this wallet — refusing")
+            if not native_buy:
+                raise DexError("UniversalRouter: UNWRAP_WETH on a token buy "
+                               "— refusing")
+            delivered += amt
+        else:
+            raise DexError(f"UniversalRouter: command {name} cannot be "
+                           "bounded by Spellbook — refusing")
+        steps.append(name)
+    if native_sell:
+        if wrapped != sell_amount or wrapped != value_wei:
+            raise DexError(f"UniversalRouter: wraps {wrapped}, approved sell "
+                           f"{sell_amount} — refusing")
+    elif user_in != sell_amount:
+        raise DexError(f"UniversalRouter: pulls {user_in} from the wallet, "
+                       f"approved sell {sell_amount} — refusing")
+    if delivered < min_buy:
+        raise DexError(f"UniversalRouter: guaranteed out {delivered} < "
+                       f"approved minimum {min_buy} — refusing")
+    return {"commands": steps, "recipient": me,
+            "sell_token": sell_token.lower(),
+            "sell_amount_wei": sell_amount, "buy_token": buy_token.lower(),
+            "min_buy_amount_wei": delivered}
+
+
+def decode_swap_tx(*, venue: str, chain_id: int, tx: dict, wallet: str,
+                   sell_token: str, buy_token: str, sell_amount: int,
+                   min_buy: int, pin_overrides: dict | None = None) -> dict:
+    """Decode the venue's transaction and bind it to the intent.
+
+    Refuses unless: ``to`` is the pinned swap target for this venue and
+    chain; the selector is a known entry point of that target; the decoded
+    sell token/amount equal the intent's; the recipient is the wallet; and
+    the decoded minimum out is at least the intent's minimum. ``value`` is
+    0 for a token sell and exactly the sell amount for a native sell.
+    Calldata that does not decode is refused, naming venue and selector.
+    Returns what was decoded (shown to the human and the ledger).
+    """
+    venue = normalize_venue(venue)
+    role = VENUE_SWAP_TARGET[venue]
+    target_addr = pinned_contract(chain_id, role, pin_overrides)
+    to, data = tx.get("to"), tx.get("data")
+    if not _is_address(to):
+        raise DexError(f"quote tx target is not an address: {to!r}")
+    if to.lower() != target_addr:
+        raise DexError(f"{venue}: swap target {to} is not the pinned {role} "
+                       f"for chain {chain_id} ({target_addr}) — refusing")
+    try:
+        value_wei = int(str(tx.get("value", "0")), 0)
+    except ValueError:
+        raise DexError(f"quote tx value malformed: {tx.get('value')!r}")
+    if value_wei < 0:
+        raise DexError("quote tx value negative")
+    native_sell = _is_native_token(sell_token)
+    if native_sell and value_wei != sell_amount:
+        raise DexError(
+            f"native sell: tx value {value_wei} != sell_amount {sell_amount}")
+    if not native_sell and value_wei != 0:
+        raise DexError(f"token sell: tx value must be 0, got {value_wei}")
+    sel, args = _split_selector(data, f"{venue} swap")
+    if sel not in SWAP_SELECTORS[role]:
+        raise DexError(f"{venue}: selector 0x{sel} is not a known swap entry "
+                       f"point of the {role} — cannot decode, refusing")
+    tokens = tuple(t.lower() for t in (sell_token, buy_token)
+                   if not _is_native_token(t))
+    if role == PIN_ALLOWANCE_HOLDER:
+        decoded = _decode_allowance_holder(
+            data, target_addr=target_addr, wallet=wallet,
+            sell_token=sell_token, sell_amount=sell_amount,
+            buy_token=buy_token, min_buy=min_buy, tokens=tokens)
+    else:
+        decoded = _decode_universal_router(
+            sel, args, wallet=wallet, sell_token=sell_token,
+            sell_amount=sell_amount, buy_token=buy_token, min_buy=min_buy,
+            value_wei=value_wei)
+    decoded.update({"venue": venue, "target": target_addr,
+                    "target_role": role,
+                    "target_source": pin_source(chain_id, role, pin_overrides),
+                    "selector": "0x" + sel,
+                    "selector_name": SELECTOR_NAMES[sel],
+                    "value_wei": value_wei})
+    return decoded
+
+
+def check_swap_approval(*, chain_id: int, venue: str, token: str,
+                        spender: str, amount: int, sell_token: str,
+                        sell_amount: int,
+                        pin_overrides: dict | None = None) -> None:
+    """The ERC-20 approve the daemon issues before a swap: to the pinned
+    spender for this venue, on the sell token, for at most the sell amount
+    (never unlimited). Anything else raises DexError."""
+    role = VENUE_SWAP_TARGET[normalize_venue(venue)]
+    pinned = pinned_contract(chain_id, role, pin_overrides)
+    if not _is_address(spender) or spender.lower() != pinned:
+        raise DexError(f"approve spender {spender!r} is not the pinned {role} "
+                       f"for chain {chain_id} ({pinned}) — refusing")
+    if _is_native_token(token) or token.lower() != sell_token.lower():
+        raise DexError(f"approve on {token}, approved sell {sell_token} — "
+                       "refusing")
+    if isinstance(amount, bool) or not isinstance(amount, int) \
+            or amount <= 0 or amount > sell_amount:
+        raise DexError(f"approve amount {amount!r} exceeds the sell amount "
+                       f"{sell_amount} — only exact approvals, refusing")
+
+
+def decode_v4_lp_add_calldata(data_hex: str, *, value_wei: int,
+                              currency0: str, currency1: str,
+                              amount0_cap: int, amount1_cap: int,
+                              wallet: str) -> dict:
+    """Decode a v4 modifyLiquidities([MINT_POSITION, SETTLE_PAIR]) call and
+    bind it: the pool currencies are the intent's, each leg's max spend is
+    within its approved cap (the native leg's included, as tx value), the
+    pool is hookless, and the position NFT goes to the wallet."""
+    sel, args = _split_selector(data_hex, "v4 LP add")
+    if sel != V4_MODIFY_LIQUIDITIES_SELECTOR:
+        raise DexError(f"v4 LP add: selector 0x{sel} is not "
+                       "modifyLiquidities — refusing")
+    unlock, deadline = _abi_decode(["bytes", "uint256"], args,
+                                   "modifyLiquidities")
+    actions, params = _abi_decode(["bytes", "bytes[]"], unlock,
+                                  "modifyLiquidities unlockData")
+    actions = bytes.fromhex(actions[2:])
+    want = bytes([V4_ACTIONS["MINT_POSITION"], V4_ACTIONS["SETTLE_PAIR"]])
+    if actions != want or len(params) != 2:
+        raise DexError(f"v4 LP add: actions 0x{actions.hex()} are not "
+                       "[MINT_POSITION, SETTLE_PAIR] — refusing")
+    (c0, c1, fee, tick_spacing, hooks, tl, tu, liquidity, a0max, a1max,
+     owner, _hook_data) = _abi_decode(
+        ["address", "address", "uint24", "int24", "address", "int24",
+         "int24", "uint256", "uint128", "uint128", "address", "bytes"],
+        params[0], "MINT_POSITION params")
+    s0, s1 = _abi_decode(["address", "address"], params[1],
+                         "SETTLE_PAIR params")
+    if (c0, c1) != (currency0.lower(), currency1.lower()) \
+            or (s0, s1) != (c0, c1):
+        raise DexError("v4 LP add: pool currencies differ from the approved "
+                       "tokens — refusing")
+    if int(hooks, 16) != 0:
+        raise DexError("v4 LP add: hooked pool — refusing")
+    if owner != wallet.lower():
+        raise DexError(f"v4 LP add: position recipient {owner} is not this "
+                       f"wallet ({wallet.lower()}) — refusing")
+    if a0max > amount0_cap or a1max > amount1_cap:
+        raise DexError("v4 LP add: max spend exceeds the approved cap — "
+                       "refusing")
+    native = c0 == V4_NATIVE_CURRENCY
+    if native:
+        if value_wei > amount0_cap or value_wei < a0max:
+            raise DexError(f"v4 LP add: native value {value_wei} outside the "
+                           f"approved cap {amount0_cap} — refusing")
+    elif value_wei != 0:
+        raise DexError("v4 LP add: nonzero value without a native leg — "
+                       "refusing")
+    return {"selector": "0x" + sel,
+            "selector_name": SELECTOR_NAMES[sel],
+            "actions": ["MINT_POSITION", "SETTLE_PAIR"],
+            "currency0": c0, "currency1": c1,
+            "amount0_max_wei": a0max, "amount1_max_wei": a1max,
+            "value_wei": value_wei, "recipient": owner,
+            "liquidity": liquidity, "fee": fee, "tick_spacing": tick_spacing,
+            "tick_lower": tl, "tick_upper": tu, "deadline": deadline}
+
+
+__all__ += [
+    "PIN_ALLOWANCE_HOLDER", "PIN_UNIVERSAL_ROUTER", "PIN_V4_POSITION_MANAGER",
+    "PIN_PERMIT2", "PIN_V2_ROUTER", "PIN_V3_POSITION_MANAGER", "PIN_ROLES",
+    "PINNED_CONTRACTS", "PINNED_SOURCES", "VENUE_SWAP_TARGET",
+    "parse_pin_overrides", "pinned_contracts", "pinned_contract",
+    "pin_source", "resolve_pinned", "dex_asset_key",
+    "decode_swap_tx", "check_swap_approval", "decode_v4_lp_add_calldata",
+    "validate_swap_intent_against_quote",
+]
+
+# ---------------------------------------------------------------------------
 # Execution-time validation (pure — the daemon calls this on every firm
 # quote before signing anything)
 # ---------------------------------------------------------------------------
@@ -1712,21 +2258,28 @@ __all__ = [
 def validate_swap_intent_against_quote(intent: dict, quote: dict) -> dict:
     """Check a firm venue quote against the approved swap intent bounds.
 
-    The human approved *bounds* (tokens, exact sell amount, minimum buy,
-    max slippage, deadline) — not calldata. The daemon re-fetches the
-    firm quote at execution time and this function enforces that the
-    quote fits inside the approved bounds. Anything off -> DexError ->
-    fail closed, no signature, no broadcast.
+    The human approved *bounds* (venue, tokens, exact sell amount, minimum
+    buy, max slippage, deadline) — not calldata. The daemon re-fetches the
+    firm quote at execution time; this function DECODES the transaction
+    the venue returned (``decode_swap_tx``) and binds it to those bounds:
+    pinned target and spender, known selector, sell token and amount,
+    recipient = the wallet (``intent["wallet"]``), minimum out. The
+    quote's own fields are cross-checked too, but they are the venue's
+    claims, not evidence. Anything off -> DexError -> fail closed, no
+    signature, no broadcast.
 
     Returns a normalized execution plan:
     {"to", "data", "value_wei", "allowance_target" | None,
-     "buy_amount_wei", "needs_approval": bool}
+     "approve_amount_wei", "buy_amount_wei", "needs_approval", "decoded"}
     """
-    for k in ("chain_id", "sell_token", "buy_token", "sell_amount_wei",
-              "min_buy_amount_wei", "max_slippage_bps"):
+    for k in ("chain_id", "venue", "wallet", "sell_token", "buy_token",
+              "sell_amount_wei", "min_buy_amount_wei", "max_slippage_bps"):
         if k not in intent:
             raise DexError(f"swap intent missing {k!r}")
     chain_id = intent["chain_id"]
+    wallet = intent["wallet"]
+    if not _is_address(wallet):
+        raise DexError(f"bad wallet address: {wallet!r}")
     if quote.get("chain_id") != chain_id:
         raise DexError(
             f"quote chain {quote.get('chain_id')} != intent chain {chain_id}")
@@ -1748,40 +2301,37 @@ def validate_swap_intent_against_quote(intent: dict, quote: dict) -> dict:
             f"quote buy_amount {buy_amount} < approved minimum {min_buy} "
             "— market moved past the bound, refusing")
     tx = quote.get("tx") or {}
-    to, data = tx.get("to"), tx.get("data")
-    if not to or not data:
+    if not tx.get("to") or not tx.get("data"):
         raise DexError("firm quote carries no executable transaction")
-    if not _is_address(to):
-        raise DexError(f"quote tx target is not an address: {to!r}")
-    if not (isinstance(data, str) and data.startswith("0x") and len(data) > 10):
-        raise DexError("quote tx data is malformed")
-    try:
-        value_wei = int(str(tx.get("value", "0")), 0)
-    except ValueError:
-        raise DexError(f"quote tx value malformed: {tx.get('value')!r}")
-    if value_wei < 0:
-        raise DexError("quote tx value negative")
+    overrides = intent.get("pin_overrides")
+    decoded = decode_swap_tx(
+        venue=intent["venue"], chain_id=chain_id, tx=tx, wallet=wallet,
+        sell_token=intent["sell_token"], buy_token=intent["buy_token"],
+        sell_amount=sell_amount, min_buy=min_buy, pin_overrides=overrides)
     native_sell = _is_native_token(intent["sell_token"])
-    if native_sell and value_wei != sell_amount:
-        raise DexError(
-            f"native sell: tx value {value_wei} != sell_amount {sell_amount}")
-    if not native_sell and value_wei != 0:
-        raise DexError(
-            f"token sell: tx value must be 0, got {value_wei}")
-    allowance_target = quote.get("allowance_target")
+    allowance_target = None
     needs_approval = False
     if not native_sell:
-        # Token swaps need an ERC-20 approval to the quote's spender —
-        # which must come from the quote, never hardcoded.
-        if not allowance_target or not _is_address(allowance_target):
+        # Token swaps need an ERC-20 approval to the pinned spender. The
+        # venue must name that same spender: a different one is refused.
+        spender = quote.get("allowance_target")
+        if not spender or not _is_address(spender):
             raise DexError(
                 "token swap quote names no valid allowance_target — refusing")
+        check_swap_approval(
+            chain_id=chain_id, venue=intent["venue"],
+            token=intent["sell_token"], spender=spender, amount=sell_amount,
+            sell_token=intent["sell_token"], sell_amount=sell_amount,
+            pin_overrides=overrides)
+        allowance_target = spender.lower()
         needs_approval = True  # daemon checks on-chain allowance; may skip
     return {
-        "to": to,
-        "data": data,
-        "value_wei": value_wei,
+        "to": decoded["target"],
+        "data": tx["data"],
+        "value_wei": decoded["value_wei"],
         "allowance_target": allowance_target,
+        "approve_amount_wei": sell_amount if needs_approval else 0,
         "buy_amount_wei": buy_amount,
         "needs_approval": needs_approval,
+        "decoded": decoded,
     }

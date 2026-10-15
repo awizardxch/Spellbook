@@ -158,10 +158,11 @@ class AgentClient(_BaseClient):
         """Request a bounded LP add (v2 addLiquidity, v3 mint, or v4
         PositionManager mint).
 
-        ``router`` is the v2 router or v3 NonfungiblePositionManager
-        address — supplied by the agent, shown to the human, never
-        guessed by the daemon. fee/ticks are v3-only (100/500/3000/10000).
-        v4 uses ``position_manager`` + ``permit2`` instead of ``router``;
+        ``router`` is the v2 router or v3 NonfungiblePositionManager. It,
+        and v4's ``position_manager`` + ``permit2``, come from the
+        daemon's pinned contract table: omit them, or pass exactly the
+        pinned address (anything else is refused). fee/ticks are v3-only
+        (100/500/3000/10000). v4 uses ``position_manager`` + ``permit2``;
         amount_a/b_wei are the hard max spends and ``liquidity`` is the
         position liquidity to mint (computed off-chain by the agent).
         """

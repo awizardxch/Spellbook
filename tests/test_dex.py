@@ -686,38 +686,37 @@ from spellbook.dex import (
     validate_swap_intent_against_quote,
 )
 
-SELL = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-BUY = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-SPENDER = "0xcccccccccccccccccccccccccccccccccccccccc"
+import _dex_calldata as cd
+
+SELL = cd.SELL
+BUY = cd.BUY
+SPENDER = cd.HOLDER
 
 
 def _intent(**kw):
-    base = {"chain_id": 8453, "sell_token": SELL, "buy_token": BUY,
-            "sell_amount_wei": 10**18, "min_buy_amount_wei": 3000 * 10**6,
-            "max_slippage_bps": 50}
-    base.update(kw)
-    return base
+    return cd.swap_intent(**kw)
 
 
 def _quote(**kw):
-    base = {"venue": "0x", "chain_id": 8453, "sell_token": SELL,
-            "buy_token": BUY, "sell_amount": str(10**18),
-            "buy_amount": str(3100 * 10**6),
-            "allowance_target": SPENDER,
-            "tx": {"to": "0xdef1c0ded9bec7f1a1670819833240f027b25eff",
-                   "data": "0x1234567890abcdef",
-                   "value": "0"}}
+    base = cd.zerox_quote()
     base.update(kw)
     return base
+
+
+def _native_quote(value=str(10**18), sell=NATIVE_SENTINEL):
+    return _quote(sell_token=sell, allowance_target=None,
+                  tx={"to": cd.HOLDER, "value": value,
+                      "data": cd.ah_exec(token=NATIVE_SENTINEL)})
 
 
 def test_validate_swap_happy_path():
     plan = validate_swap_intent_against_quote(_intent(), _quote())
-    assert plan["to"] == "0xdef1c0ded9bec7f1a1670819833240f027b25eff"
-    assert plan["data"] == "0x1234567890abcdef"
+    assert plan["to"] == cd.HOLDER
+    assert plan["data"] == cd.ah_exec()
     assert plan["value_wei"] == 0
     assert plan["needs_approval"] is True
     assert plan["allowance_target"] == SPENDER
+    assert plan["approve_amount_wei"] == 10**18
     assert plan["buy_amount_wei"] == 3100 * 10**6
 
 
@@ -758,38 +757,30 @@ def test_validate_swap_no_allowance_target_for_token_sell():
 def test_validate_swap_token_sell_must_have_zero_value():
     with pytest.raises(DexError, match="must be 0"):
         validate_swap_intent_against_quote(_intent(), _quote(
-            tx={"to": "0xdef1c0ded9bec7f1a1670819833240f027b25eff",
-                "data": "0x1234567890abcdef", "value": "100"}))
+            tx={"to": cd.HOLDER, "data": cd.ah_exec(), "value": "100"}))
 
 
 def test_validate_swap_native_sell():
     intent = _intent(sell_token=NATIVE_SENTINEL)
-    q = _quote(sell_token=NATIVE_SENTINEL, allowance_target=None,
-               tx={"to": "0xdef1c0ded9bec7f1a1670819833240f027b25eff",
-                   "data": "0x1234567890abcdef", "value": str(10**18)})
-    plan = validate_swap_intent_against_quote(intent, q)
+    plan = validate_swap_intent_against_quote(intent, _native_quote())
     assert plan["value_wei"] == 10**18
     assert plan["needs_approval"] is False
 
 
 def test_validate_swap_native_value_mismatch():
     intent = _intent(sell_token=NATIVE_SENTINEL)
-    q = _quote(sell_token=NATIVE_SENTINEL, allowance_target=None,
-               tx={"to": "0xdef1c0ded9bec7f1a1670819833240f027b25eff",
-                   "data": "0x1234567890abcdef", "value": str(10**18 - 1)})
     with pytest.raises(DexError, match="tx value"):
-        validate_swap_intent_against_quote(intent, q)
+        validate_swap_intent_against_quote(
+            intent, _native_quote(value=str(10**18 - 1)))
 
 
 def test_validate_swap_native_sell_zero_address():
     # Uniswap's native representation is the zero address (their docs),
-    # not the 0x sentinel — the validator must accept both.
+    # not the 0x sentinel â€” the validator must accept both.
     from spellbook.dex import NATIVE_ZERO
     intent = _intent(sell_token=NATIVE_ZERO)
-    q = _quote(sell_token=NATIVE_ZERO, allowance_target=None,
-               tx={"to": "0xdef1c0ded9bec7f1a1670819833240f027b25eff",
-                   "data": "0x1234567890abcdef", "value": str(10**18)})
-    plan = validate_swap_intent_against_quote(intent, q)
+    plan = validate_swap_intent_against_quote(
+        intent, _native_quote(sell=NATIVE_ZERO))
     assert plan["value_wei"] == 10**18
     assert plan["needs_approval"] is False
 
@@ -881,7 +872,7 @@ def _base_chain(monkeypatch):
 
 
 def _swap_params(**over):
-    p = {"intent": "dex_swap", "chain": "evm-8453", "venue": "matcha",
+    p = {"intent": "dex_swap", "chain": "evm-4663", "venue": "matcha",
          "sell_token": A, "buy_token": B,
          "sell_amount_wei": 10**18, "min_buy_amount_wei": 9 * 10**17,
          "max_slippage_bps": 50, "purpose": "test"}
@@ -919,7 +910,7 @@ def test_validate_swap_recommended_venue_has_no_warning(tmp_path, monkeypatch):
     d = _daemon(tmp_path)
     intent = d._validate_dex_swap(_swap_params())
     assert intent["venue"] == "matcha"
-    assert intent["chain_id"] == 8453
+    assert intent["chain_id"] == 4663
     assert intent["venue_warning"] is None
 
 
@@ -982,6 +973,12 @@ PERMIT2 = "0x4444444444444444444444444444444444444444"
 PAIR = "0x5555555555555555555555555555555555555555"
 NPM = "0x6666666666666666666666666666666666666666"
 HOOKLESS = "0x0000000000000000000000000000000000000000"
+V2_ROUTER = "0x8888888888888888888888888888888888888888"
+#: S-21: LP contracts come from the pin table only. These tests run on a
+#: test chain (8453) whose contracts the operator has pinned explicitly.
+LP_PINS = {"pinned_contracts": {"8453": {
+    "v4_position_manager": POSM, "permit2": PERMIT2,
+    "v3_position_manager": NPM, "v2_router": V2_ROUTER}}}
 
 
 def _v4_add_params(**over):
@@ -1015,7 +1012,7 @@ def _claim_params(**over):
 
 def test_validate_lp_add_v4_happy(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     intent = d._validate_dex_lp_add(_v4_add_params())
     assert intent["protocol"] == "v4"
     assert intent["position_manager"] == POSM
@@ -1025,14 +1022,14 @@ def test_validate_lp_add_v4_happy(tmp_path, monkeypatch):
 
 def test_validate_lp_add_v4_rejects_router(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     with pytest.raises(Exception, match="v2/v3-only"):
         d._validate_dex_lp_add(_v4_add_params(router=NPM))
 
 
 def test_validate_lp_add_v4_rejects_hooked_pool(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     with pytest.raises(Exception, match="hook"):
         d._validate_dex_lp_add(_v4_add_params(
             hooks="0x7777777777777777777777777777777777777777"))
@@ -1040,28 +1037,28 @@ def test_validate_lp_add_v4_rejects_hooked_pool(tmp_path, monkeypatch):
 
 def test_validate_lp_add_v4_rejects_misaligned_ticks(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     with pytest.raises(Exception, match="align"):
         d._validate_dex_lp_add(_v4_add_params(tick_lower=-601))
 
 
 def test_validate_lp_add_v4_rejects_min_fields(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     with pytest.raises(Exception, match="v2/v3-only"):
         d._validate_dex_lp_add(_v4_add_params(amount_a_min_wei=5))
 
 
 def test_validate_lp_add_v4_rejects_bad_fee(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     with pytest.raises(Exception, match="uint24"):
         d._validate_dex_lp_add(_v4_add_params(fee=2**24))
 
 
 def test_validate_lp_add_v4_native_rules(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     # Native as token_a is now supported; its max spend may be zero.
     ok = d._validate_dex_lp_add(
         _v4_add_params(token_a=HOOKLESS, amount_a_wei=0))
@@ -1084,14 +1081,14 @@ def test_validate_lp_add_v4_native_rules(tmp_path, monkeypatch):
 
 def test_validate_lp_add_v4_rejects_unknown_field(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     with pytest.raises(Exception, match="schema violation"):
         d._validate_dex_lp_add(_v4_add_params(evil_calldata="0xdead"))
 
 
 def test_validate_lp_remove_v2_happy(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     intent = d._validate_dex_lp_remove(
         _remove_params(protocol="v2", router="0x8888888888888888888888888888888888888888",
                        pair=PAIR, token_id=None))
@@ -1101,7 +1098,7 @@ def test_validate_lp_remove_v2_happy(tmp_path, monkeypatch):
 
 def test_validate_lp_remove_v2_requires_pair(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     with pytest.raises(Exception, match="pair"):
         d._validate_dex_lp_remove(
             _remove_params(protocol="v2",
@@ -1111,14 +1108,14 @@ def test_validate_lp_remove_v2_requires_pair(tmp_path, monkeypatch):
 
 def test_validate_lp_remove_v3_requires_token_id(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     with pytest.raises(Exception, match="token_id"):
         d._validate_dex_lp_remove(_remove_params(token_id=None))
 
 
 def test_validate_lp_remove_v4_happy(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     intent = d._validate_dex_lp_remove(
         _remove_params(protocol="v4", position_manager=POSM, router=None,
                        burn_nft=True))
@@ -1128,21 +1125,21 @@ def test_validate_lp_remove_v4_happy(tmp_path, monkeypatch):
 
 def test_validate_lp_remove_rejects_burn_on_v3(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     with pytest.raises(Exception, match="v4-only"):
         d._validate_dex_lp_remove(_remove_params(burn_nft=True))
 
 
 def test_validate_lp_remove_rejects_unknown_field(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     with pytest.raises(Exception, match="schema violation"):
         d._validate_dex_lp_remove(_remove_params(opaque="0x1234"))
 
 
 def test_validate_lp_claim_v3_happy(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     intent = d._validate_dex_lp_claim(_claim_params())
     assert intent["protocol"] == "v3"
     assert intent["token_id"] == 7
@@ -1150,14 +1147,14 @@ def test_validate_lp_claim_v3_happy(tmp_path, monkeypatch):
 
 def test_validate_lp_claim_rejects_v2(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     with pytest.raises(Exception, match="dex_lp_remove"):
         d._validate_dex_lp_claim(_claim_params(protocol="v2"))
 
 
 def test_validate_lp_claim_v4_happy(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     intent = d._validate_dex_lp_claim(
         _claim_params(protocol="v4", position_manager=POSM, router=None))
     assert intent["position_manager"] == POSM
@@ -1165,14 +1162,14 @@ def test_validate_lp_claim_v4_happy(tmp_path, monkeypatch):
 
 def test_velocity_entries_remove_claim_empty(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     assert d._velocity_entries(_remove_params()) == []
     assert d._velocity_entries(_claim_params()) == []
 
 
 def test_velocity_entries_lp_add_v4_uses_max_spends(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     entries = d._velocity_entries(_v4_add_params())
     assert entries == [("evm-8453", A.lower(), 10**18),
                        ("evm-8453", B.lower(), 2 * 10**18)]
@@ -1180,14 +1177,14 @@ def test_velocity_entries_lp_add_v4_uses_max_spends(tmp_path, monkeypatch):
 
 def test_rt_lp_remove_always_queues(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     out = d.rt_dex_lp_remove(_remove_params(), "muse-test")
     assert out["decision"] == "queued"
 
 
 def test_rt_lp_claim_always_queues(tmp_path, monkeypatch):
     _base_chain(monkeypatch)
-    d = _daemon(tmp_path)
+    d = _daemon(tmp_path, LP_PINS)
     out = d.rt_dex_lp_claim(_claim_params(), "muse-test")
     assert out["decision"] == "queued"
 

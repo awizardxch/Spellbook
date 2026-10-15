@@ -523,10 +523,12 @@ mTLS cert, or submit transactions.
   permit2?, token_a, token_b, amount_a_wei, amount_b_wei,
   amount_a_min_wei?, amount_b_min_wei?, fee?, tick_lower?, tick_upper?,
   tick_spacing?, hooks?, liquidity?, purpose?, deadline_sec?}` → bounded
-  LP-add intent (v2/v3/v4, §10). v2/v3 name a `router` (v2 router or v3
-  NonfungiblePositionManager); v4 names `position_manager` + `permit2`,
-  where `amount_a/b_wei` are the hard max spends and `liquidity` is the
-  position liquidity to mint.
+  LP-add intent (v2/v3/v4, §10). The v2 router, v3
+  NonfungiblePositionManager, v4 `position_manager` and `permit2` come
+  from the pinned contract table (S-21): omit them, or pass exactly the
+  pinned address — anything else, or a chain with no pin, is refused.
+  For v4, `amount_a/b_wei` are the hard max spends and `liquidity` is
+  the position liquidity to mint.
 - `POST /v1/dex_lp_remove {intent, chain, protocol, router?,
   position_manager?, pair?, token_a, token_b, token_id?, liquidity,
   amount_a_min_wei?, amount_b_min_wei?, burn_nft?, purpose?,
@@ -695,9 +697,36 @@ tooling (approve token), showing
   calldata itself at execution time. Rules:
   - No opaque calldata ever reaches the signer: swap calldata comes from
     the venue's firm quote (fetched at execution, ~30s lifetime) and is
-    validated field-by-field against the approved bounds
-    (`dex.validate_swap_intent_against_quote`); LP calldata is built
-    locally from the approved bounds via whitelisted builders only.
+    **decoded** and bound to the approved bounds before signing
+    (`dex.validate_swap_intent_against_quote` → `dex.decode_swap_tx`;
+    the quote's own sell/buy/amount fields are the venue's claims, not
+    evidence); LP calldata is built locally from the approved bounds via
+    whitelisted builders only.
+  - **Pinned contracts (S-20, added 2026-10-15).** Swap targets,
+    spenders and LP contracts come only from the in-code table
+    `dex.PINNED_CONTRACTS` (per chain id and role); a chain/role with no
+    pin is refused at request time and again at execution. Built in:
+    Robinhood Chain 4663 — 0x AllowanceHolder (matcha and cast), v4
+    PositionManager, Permit2. No Universal Router, v2 router or v3
+    NonfungiblePositionManager is pinned yet, and no other chain is.
+    The operator may add or replace pins with
+    `dex.pinned_contracts: {"<chain id>": {"<role>": "0x…"}}` in
+    spellbook.json; each override is logged at startup and labeled as
+    such in `dex_venues` and the queue.
+  - **What a swap must decode to (S-20).** Refused unless: `to` is the
+    pinned target for the venue (AllowanceHolder for matcha/cast,
+    Universal Router for uniswap); the selector is a known entry point
+    of it (`AllowanceHolder.exec`, `UniversalRouter.execute`); the
+    decoded sell token and amount equal the intent's (an `exec` grant
+    of anything else, or of more, is refused); the recipient is the
+    wallet; the decoded minimum out (0x Settler's slippage struct, or
+    the Universal Router's swap/sweep/unwrap minimums) is at least the
+    intent's; `value` is 0 for a token sell and exactly the sell amount
+    for a native sell. Universal Router commands other than
+    V2/V3_SWAP_EXACT_IN, WRAP_ETH, UNWRAP_WETH and SWEEP are refused.
+    Calldata that does not decode is refused, naming venue and
+    selector. The ERC-20 approve the daemon issues is re-checked at
+    signing: pinned spender, sell token, at most the sell amount.
   - **Venue recommendations (not a gate):** the user keeps a
     recommended-venue list, `dex.recommended_venues` in spellbook.json
     (default: matcha + uniswap; "0x" is accepted as an alias for
@@ -712,13 +741,17 @@ tooling (approve token), showing
     time with a clear reason — that is a capability fact, not a policy
     choice.
   - Exact-amount ERC-20 approvals only (allowance checked on-chain
-    first; no unlimited approvals). The spender comes from the quote,
-    never hardcoded.
+    first; no unlimited approvals). The spender is the pinned contract;
+    a quote naming any other spender is refused.
   - One approval = one execution attempt: the approve (+swap/LP) is the
     single execution of the intent. Unknown-fate broadcasts are never
     retried (existing §10 unknown-fate rule).
   - The human's queue view shows the decoded bounds (sell/buy/min/slippage
-    or LP range/amounts/router) — never just a hash.
+    or LP range/amounts/router) — never just a hash. A queued swap also
+    shows `swap_checks`: the pinned target and spender, the accepted
+    selectors and the required recipient; the decoded call itself
+    (target, selector, tokens, amounts, recipient) is returned with the
+    execution result as `decoded`, since the calldata only exists then.
   - **LP remove/claim (implemented 2026-09-25):** `dex_lp_remove` and
     `dex_lp_claim` are force-queued — they always need human approval
     and never auto-execute, even with an empty velocity footprint.
@@ -731,9 +764,19 @@ tooling (approve token), showing
     that the pool is initialized (`getSlot0` non-zero), and funds through
     two exact-amount Permit2 stages (token → Permit2, then Permit2 →
     PositionManager with expiry = the intent deadline — never unlimited).
-    v4 is hookless-pools-only and refuses native currency (wrap to WETH
-    first) in this release; v2 claims are refused outright because v2
+    v4 is hookless-pools-only; v2 claims are refused outright because v2
     fees are embedded in the LP token — the remove is the claim.
+  - **LP contracts and caps (S-21, added 2026-10-15).** The v2 router,
+    v3 NonfungiblePositionManager, v4 PositionManager and Permit2 for
+    add, remove and claim come from the pinned table, re-resolved at
+    execution; an agent-supplied address is accepted only if it is the
+    pin. Each leg is keyed one way for policy and velocity
+    (`dex.dex_asset_key`: the zero address and 0x's 0xEeee… are
+    `native`), so a v4 native leg counts against the native caps. Before
+    signing, the v4 `modifyLiquidities` call is decoded: actions exactly
+    `[MINT_POSITION, SETTLE_PAIR]`, the intent's currencies, a hookless
+    pool, each `amountMax` within its approved cap, the native `value`
+    within the native cap, and the position NFT owned by the wallet.
     Protocol semantics come from the official Uniswap docs (v3
     NonfungiblePositionManager, v4 PositionManager / Actions guides);
     the spec above describes only what Spellbook adds: strict schemas,

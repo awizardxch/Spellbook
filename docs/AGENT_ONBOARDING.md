@@ -728,6 +728,35 @@ the chain: the 46630 testnet is not served by either venue, so asking
 for a matcha swap on Robinhood Chain testnet is refused immediately
 with "does not serve" (a capability fact, not a policy choice).
 
+### What the daemon checks before signing a swap
+
+The venue's transaction is decoded and compared with your intent; the
+quote's own numbers are not trusted. Contracts come from a pinned,
+in-code table per chain (`spellbook dex-venues` lists it under
+`pinned_contracts`). Today only Robinhood Chain (4663) is pinned, with
+the 0x AllowanceHolder (matcha and cast), the v4 PositionManager and
+Permit2. **Refused:**
+
+- any chain/venue whose swap contract is not pinned — Base and every
+  other chain for matcha/cast, and **uniswap everywhere** (no Universal
+  Router is pinned yet), refused at request time;
+- a `to` or spender other than the pinned contract;
+- a selector that is not a known swap entry point, or calldata that
+  does not decode (the error names the venue and selector);
+- a decoded sell token or amount different from the intent (an `exec`
+  allowance larger than the sell, including unlimited);
+- a recipient other than this wallet, or a decoded minimum out below
+  `min_buy_amount_wei`;
+- nonzero `value` on an ERC-20 sell, or a native sell whose `value` is
+  not exactly the sell amount.
+
+The daemon's own approve is the exact sell amount to the pinned spender.
+A queued swap shows `swap_checks` (pinned target, spender, recipient);
+the execution result carries `decoded` (target, selector, tokens,
+amounts, recipient). The operator can pin more contracts in
+spellbook.json (`dex.pinned_contracts`); each override is logged at
+daemon start and labeled in the queue.
+
 ### Direct pool calldata (no API key)
 
 ```python
@@ -833,20 +862,27 @@ holds a single asset.
      `burn-nft` retires the NFT on full exits). `dex-lp-claim` → a
      **zero-liquidity** `DECREASE_LIQUIDITY` (the documented fee-credit
      path) + `TAKE_PAIR`.
-   - **Robinhood Chain Permit2:** The canonical Permit2 address differs
-     by chain. On Robinhood Chain (4663) use
-     `0x000000000022D473030F116dDEE9F6B43aC78BA3`, **not** the Ethereum
-     mainnet `0x000000000022D473030F64655049CB8E2943346F`. Using the wrong
-     address results in no-op approval transactions (status=1 but no code
-     at the address) followed by `INCREASE_LIQUIDITY`/`MINT_POSITION`
-     reverts when the PositionManager cannot pull tokens via Permit2.
+   - **LP contracts are pinned.** Omit `router`, `position-manager` and
+     `permit2`: the daemon uses its pinned table (`spellbook dex-venues`
+     → `pinned_contracts`). On Robinhood Chain (4663) that is the v4
+     PositionManager `0x58daec3116aae6d93017baaea7749052e8a04fa7` and
+     Permit2 `0x000000000022D473030F116dDEE9F6B43aC78BA3`. Passing any
+     other address is refused, and so is any LP intent on a chain or
+     protocol with no pin — today that is every v2/v3 LP intent and every
+     chain but 4663, until the operator pins more.
+   - **Native legs count as native.** In a v4 add the native leg
+     (`0x000…0`) is checked and recorded under `native`, the same key as
+     a plain native transfer, so it uses the native auto-approve and
+     velocity caps. Before signing, the daemon decodes its own mint call
+     and refuses unless both legs are within their caps and the position
+     NFT goes to this wallet.
    - **Spellbook's guardrails on top:** remove/claim always queue for
      human approval (never auto-execute, never count toward velocity —
      they receive value, not spend it). Execution pre-flights are
      read-only and fail closed: the wallet must own the position NFT
      (`ownerOf`), the v2 pair contract's `token0`/`token1` must match
-     the intent before any approval, v4 is **hookless pools only** and
-     refuses native currency (wrap to WETH first), approvals are always
+     the intent before any approval, v4 is **hookless pools only** (a
+     native leg must be currency0 and settles as tx value), approvals are always
      exact amounts (never unlimited), and one approval = one execution
      attempt with no retries. Never accept or forward opaque calldata —
      the daemon builds every call from the approved bounds.
