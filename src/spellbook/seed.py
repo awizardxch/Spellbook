@@ -38,20 +38,27 @@ def bip39_wordlist() -> list[str]:
     return _wordlist()
 
 
+def strip_comments(text: str) -> str:
+    """The hex payload of a seed file: `#` comment lines and whitespace dropped."""
+    return "".join(line.strip() for line in text.splitlines()
+                   if not line.strip().startswith("#"))
+
+
 def load_seed(path: str) -> bytes:
     """Load the 32-byte seed from a daemon-user-owned, mode-0600 file.
 
-    The file holds 64 hex chars (whitespace tolerated). Fails closed on
-    permissions, length, or encoding — a daemon that cannot prove its seed
-    file is private refuses to start.
+    The file holds 64 hex chars (whitespace tolerated). Lines starting with
+    `#` are comments — the seed-role header (seedrole.py) lives there. Fails
+    closed on permissions, length, or encoding — a daemon that cannot prove
+    its seed file is private refuses to start.
     """
     st = os.stat(path)
     if st.st_mode & 0o077:
         raise PermissionError(f"seed file {path} is not 0600 — refusing to load")
     with open(path) as f:
-        text = f.read().strip()
+        text = f.read()
     try:
-        seed = bytes.fromhex(text)
+        seed = bytes.fromhex(strip_comments(text))
     except ValueError:
         raise ValueError("seed file is not hex")
     if len(seed) != 32:

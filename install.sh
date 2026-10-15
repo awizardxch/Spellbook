@@ -22,16 +22,23 @@
 #      (Override: an operator-supplied $SAGE_BIN is accepted only with
 #      SAGE_PIN_VERIFIED=1, i.e. verified out-of-band by the operator.)
 #   3. Creates the dedicated `spellbook` OS user (S2), the client group, and the
-#      0600/0700 layout. Generates the wallet seed ONCE and prints the paper
-#      backup mnemonic ONCE — write it down, it is never shown again.
+#      0600/0700 layout. Generates the wallet seeds ONCE (0600 files; nothing
+#      secret is printed).
 #   4. Installs the daemon (pip, isolated venv as the spellbook user), writes
-#      the default-off policy (D9), the systemd unit, and the two tokens (S7).
+#      the default-off policy (D9), the systemd unit, and the two tokens (S7)
+#      — the agent's request token goes to a 0600 file owned by the agent
+#      user; only its PATH is printed.
 #   5. Runs the §10 off-chain drill with a THROWAWAY key — never the real key.
 #      Install completes when the drill passes (S14); the on-chain phases
 #      print as a checklist and need their own explicit authorization.
-#   6. Prints next steps (policy opt-in, token delivery, directory entry §8).
+#   6. Paper backup (§6): shown ONLY on a real terminal (stdin and stdout
+#      both TTYs), by `spellbook export`, on /dev/tty, with a pause and a
+#      screen clear — words only, never raw keys. Without a terminal the
+#      install still completes and prints how the HUMAN shows the backup
+#      later. Then next steps (policy opt-in, directory entry §8).
 #
-# What it NEVER does: asks for keys, transmits anything outward, touches the
+# What it NEVER does: asks for keys, prints a mnemonic, a private key or a
+# token to stdout (review S-05), transmits anything outward, touches the
 # real muse key, auto-updates an existing install, or proceeds on an
 # unverified release.
 
@@ -45,6 +52,9 @@ CLIENT_GROUP="spellbook-clients"
 PREFIX="/opt/spellbook"
 SOCK_DIR="/run/spellbook"
 SOCK_PATH="${SOCK_DIR}/spellbook.sock"
+# The agent's copy of the request token: a 0600 file owned by the agent
+# user, never echoed (S-05). Override with SPELLBOOK_AGENT_TOKEN_FILE.
+AGENT_TOKEN_FILE="${SPELLBOOK_AGENT_TOKEN_FILE:-/etc/spellbook/request.token}"
 
 # Release-key fingerprint is published in the pinned town thread once
 # Speechless generates it (open decision #7). Until then installs from a
@@ -246,8 +256,8 @@ runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/pip" install --quiet "$STAGE" \
 AGENT_UID="$(id -u "$AGENT_USER")"
 HUMAN_UID="$(id -u "$HUMAN_USER")"
 
-# The wallet seed: generated ONCE, as the spellbook user, 0600. The paper
-# backup mnemonic prints ONCE below — write it down now (§6).
+# The wallet seed: generated ONCE, as the spellbook user, 0600. Its words
+# are shown by `spellbook export` in §6, on a terminal, to the human (§6).
 # Never auto-update an existing install: a seed.key already on disk means
 # this machine is provisioned — refuse rather than silently re-key it.
 [ ! -e "${PREFIX}/seed.key" ] || fail "${PREFIX}/seed.key already exists — this machine looks installed. Refusing to overwrite; uninstall first."
@@ -262,12 +272,15 @@ chmod 0600 "${PREFIX}/seed.key"
 # mnemonic whose keys derive the way stock wallets do (Sage / MetaMask).
 # The daemon uses these keys (key_derivation=standard in the config below),
 # so the standard backup is the primary recovery path; the KDF seed above
-# stays as the daemon-native secondary. Its backup block prints ONCE in
-# §6 — the output below is never logged anywhere else.
+# stays as the daemon-native secondary. The script prints PUBLIC material
+# only (addresses, file paths); the words are shown in §6 by
+# `spellbook export`, on a terminal, never on this script's stdout (S-05).
 [ ! -e "${PREFIX}/std_seed.key" ] || fail "${PREFIX}/std_seed.key already exists — this machine looks installed. Refusing to overwrite; uninstall first."
+[ ! -e "${PREFIX}/std_entropy.key" ] || fail "${PREFIX}/std_entropy.key already exists — this machine looks installed. Refusing to overwrite; uninstall first."
 log "generating the standard-recovery wallet (once) ..."
-STD_BACKUP="$(runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" \
-  "${SRC}/scripts/make_standard_wallet.py" "${PREFIX}")"
+runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" \
+  "${SRC}/scripts/make_standard_wallet.py" "${PREFIX}" \
+  || fail "standard-recovery wallet creation failed"
 
 log "writing config ..."
 runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" - "$PREFIX" "$AGENT_UID" "$HUMAN_UID" "$CHIA_ENABLED" "$SAGE_BIN_FINAL" <<'EOF'
@@ -340,16 +353,20 @@ EOF
 chown "${SPELLBOOK_USER}:${SPELLBOOK_USER}" "${PREFIX}/spellbook.json" "${PREFIX}/policy.json" "${PREFIX}/ledger.jsonl"
 chmod 0600 "${PREFIX}/spellbook.json" "${PREFIX}/policy.json" "${PREFIX}/ledger.jsonl"
 
-# S7: two tokens from day one. The request token is shown ONCE for the
-# agent's environment; the approve token is NEVER shown — move it to the
-# human's separate device out-of-band (O5).
+# S7: two tokens from day one. Neither is ever printed (S-05). The agent's
+# copy of the request token is a 0600 file owned by the agent user; the
+# approve token exists only in the daemon's copy — move it to the human's
+# separate device out-of-band (O5).
 log "generating tokens ..."
-REQ_TOKEN="$(runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" -c "import secrets; print(secrets.token_hex(32))")"
-APP_TOKEN="$(runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" -c "import secrets; print(secrets.token_hex(32))")"
-printf '%s' "$REQ_TOKEN" > "${PREFIX}/request.token"
-printf '%s' "$APP_TOKEN" > "${PREFIX}/approve.token"
+[ ! -e "${AGENT_TOKEN_FILE}" ] || fail "${AGENT_TOKEN_FILE} already exists — this machine looks installed. Refusing to overwrite; uninstall first."
+mkdir -p "$(dirname "${AGENT_TOKEN_FILE}")"
+chmod 0755 "$(dirname "${AGENT_TOKEN_FILE}")"
+"${VENV}/bin/python" "${SRC}/scripts/make_tokens.py" "${PREFIX}" "${AGENT_TOKEN_FILE}" \
+  || fail "token creation failed"
 chown "${SPELLBOOK_USER}:${SPELLBOOK_USER}" "${PREFIX}/request.token" "${PREFIX}/approve.token"
 chmod 0600 "${PREFIX}/request.token" "${PREFIX}/approve.token"
+chown "${AGENT_USER}:${AGENT_USER}" "${AGENT_TOKEN_FILE}"
+chmod 0600 "${AGENT_TOKEN_FILE}"
 
 log "installing the systemd unit ..."
 cat > /etc/systemd/system/spellbookd.service <<EOF
@@ -399,68 +416,24 @@ chown "${SPELLBOOK_USER}:${SPELLBOOK_USER}" "${PREFIX}/drill-status.json"
 chmod 0600 "${PREFIX}/drill-status.json"
 
 # ---------------------------------------------------------------- 6. paper backup + next steps
-MNEMONIC="$(runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" -c \
-  "from spellbook.seed import load_seed, mnemonic_from_entropy; print(mnemonic_from_entropy(load_seed('${PREFIX}/seed.key')))")"
-# Raw KDF keys: each imports directly into the matching stock wallet and
-# yields the same address the daemon uses (EVM -> MetaMask, BLS -> Sage).
-KDF_KEYS="$(runuser -u "${SPELLBOOK_USER}" -- "${VENV}/bin/python" -c "
-from spellbook.seed import load_seed
-from spellbook import kdf, chia_sign
-seed = load_seed('${PREFIX}/seed.key')
-for chain in ('evm-4663', 'evm-46630'):
-    d = kdf.derive_labeled(seed, chain, 'default')
-    print('  ' + chain + ' raw EVM privkey -> MetaMask: ' + d['scalar_hex'])
-    print('    address ' + d['address'])
-for chain, net in (('chia-testnet', 'testnet11'), ('chia-mainnet', 'mainnet')):
-    d = kdf.derive_labeled(seed, chain, 'default')
-    sk = bytes.fromhex(d['scalar_hex'])
-    print('  ' + chain + ' raw BLS key -> Sage: ' + d['scalar_hex'])
-    print('    address ' + chia_sign.receive_address(sk, 0, net))
-from spellbook import solana as solana_mod
-for chain in ('solana-devnet', 'solana-mainnet'):
-    kp = solana_mod.custom_keypair(seed, chain, 'default')
-    print('  ' + chain + ' raw ed25519 secret -> Phantom import (base58 of 64-byte secret):')
-    print('    ' + solana_mod.phantom_backup_secret(kp))
-    print('    address ' + solana_mod.address_of_keypair(kp))
-print('  Solana KDF keys differ per network by design (P9) and recover through')
-print('  the daemon only - stock wallets derive unrelated keys from these words.')
-")"
-
+# Nothing secret below (S-05). The paper backup is shown ONLY by
+# `spellbook export`: it needs stdin and stdout to be a terminal, refuses
+# the agent's OS user (SUDO_UID / real uid against allowed_request_uids),
+# writes the words to /dev/tty, waits for Enter, then clears the screen.
+# Non-interactive runs (agent bootstrap, CI, cloud-init, `script`) complete
+# the install and print how the human shows the backup later.
 cat <<EOF
 
 ================================================================
 INSTALL COMPLETE — off-chain drill green.
 ================================================================
 
-PAPER BACKUP (§6) — write these down NOW, on paper, offline.
-Shown ONCE and never again. Two copies, two places.
-Anyone holding EITHER set below holds the wallet.
-
-----------------------------------------------------------------
-SET 1 — STANDARD RECOVERY (primary: these are the daemon's live keys).
-The 24 words AND the raw keys work in STOCK wallets.
-----------------------------------------------------------------
-
-${STD_BACKUP}
-
-----------------------------------------------------------------
-SET 2 — SPELLBOOK DAEMON SEED (custom KDF — secondary recovery).
-The 24 words recover through the Spellbook daemon ONLY (they do NOT
-work in Sage/MetaMask); the raw keys below import directly and yield
-the same addresses the daemon would use.
-----------------------------------------------------------------
-
-  24 WORDS (daemon recovery only):
-    ${MNEMONIC}
-
-${KDF_KEYS}
-
-Verify after import: every address above must match what the wallet shows.
-
-AGENT WIRING (request token — shown ONCE):
+AGENT WIRING (nothing to copy — the token is in a file you own):
     export SPELLBOOK_SOCKET=${SOCK_PATH}
-    export SPELLBOOK_REQUEST_TOKEN=${REQ_TOKEN}
-  then:  python3 -c "from spellbook.client import AgentClient"
+    export SPELLBOOK_REQUEST_TOKEN_FILE=${AGENT_TOKEN_FILE}
+  then:  spellbook --token-file "\$SPELLBOOK_REQUEST_TOKEN_FILE" status
+  The file is 0600, owned by ${AGENT_USER}. Never paste its content into
+  chat, a log, a config or a tool argument.
 
 HUMAN APPROVAL (approve token — NEVER shown, NEVER in the agent's env):
   move ${PREFIX}/approve.token to the human's separate device out-of-band (O5),
@@ -468,10 +441,27 @@ HUMAN APPROVAL (approve token — NEVER shown, NEVER in the agent's env):
 
 DERIVED ADDRESSES (labels: default):
 EOF
-# As the agent's user: proves the socket, group, token, and peer-UID wiring
-# all work end to end for the exact principal that will use it.
+# As the agent's user: proves the socket, group, token file, and peer-UID
+# wiring all work end to end for the exact principal that will use it.
 runuser -u "${AGENT_USER}" -- env "SPELLBOOK_SOCKET=${SOCK_PATH}" \
-  "SPELLBOOK_REQUEST_TOKEN=${REQ_TOKEN}" "${VENV}/bin/spellbook" addresses
+  "${VENV}/bin/spellbook" --token-file "${AGENT_TOKEN_FILE}" addresses
+
+echo
+if [ -t 0 ] && [ -t 1 ]; then
+  log "PAPER BACKUP (§6): shown on this terminal once, then cleared."
+  log "Have pen and paper ready. Press Enter when the words are written down."
+  if ! "${VENV}/bin/spellbook" export --prefix "${PREFIX}"; then
+    warn "the paper backup was NOT shown (see the reason above)."
+    warn "Show it later, as the human, from a terminal:  sudo spellbook export --prefix ${PREFIX}"
+  fi
+else
+  log "PAPER BACKUP (§6): NOT shown — this run has no terminal (stdin/stdout"
+  log "is a pipe, a log or an agent's tool output). The install is complete;"
+  log "the words exist only in ${PREFIX} (0600, ${SPELLBOOK_USER}). The HUMAN"
+  log "shows them once, from their own login on a terminal:"
+  log "    sudo ${VENV}/bin/spellbook export --prefix ${PREFIX}"
+  log "It refuses pipes and refuses the agent's OS user (${AGENT_USER})."
+fi
 
 cat <<'EOF'
 
@@ -481,8 +471,8 @@ NEXT STEPS (all opt-in):
   - town directory entry (§8)
   - the on-chain drill phases print in the drill output above
   - dashboard sign-in for agents is API-only: docs/AGENT_ONBOARDING.md §8
-    (challenge -> local Ed25519 sign -> POST /api/auth/verify; your key
-    never leaves this machine)
+    (challenge -> `spellbook sign-dashboard-challenge` -> POST
+    /api/auth/verify; the identity seed stays in the daemon)
 
 note: the default config is a signer, not a policy engine (S4).
 EOF

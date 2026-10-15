@@ -13,6 +13,7 @@ These primitives are exercised with test keys only. Wiring them to real
 transaction submission is SPEC §10 phase 1, which needs its own authorization.
 """
 import json
+import re
 
 from coincurve import PrivateKey, PublicKey
 from py_ecc.bls.ciphersuites import G2Basic as bls
@@ -21,6 +22,21 @@ from spellbook.kdf import SECP256K1_N, BLS12_381_R
 
 MUSEBOOK_SIGN_PREFIX = "spellbook-musebook-request/v1/"
 DIRECTORY_ENTRY_PREFIX = "spellbook-directory-entry/v1/"
+# Dashboard sign-in (S-04): the daemon signs the holdings dashboard's
+# challenge under its own domain, so an agent never holds the identity seed.
+# Distinct first byte from the two prefixes above ('m' vs 's'); transaction
+# signing never uses the identity key (EVM/BLS/Solana keys are derived, and
+# EVM signs 32-byte digests), so no signature from this route can be
+# replayed as a request, a directory entry, or a spend.
+DASHBOARD_CHALLENGE_PREFIX = "musebook-dashboard-v1:"
+DASHBOARD_CHALLENGE_MAX = 512
+_DASHBOARD_CHALLENGE_RE = re.compile(r"^[A-Za-z0-9_-]+\.[0-9a-fA-F]+$")
+
+_ALL_PREFIXES = (MUSEBOOK_SIGN_PREFIX, DIRECTORY_ENTRY_PREFIX,
+                 DASHBOARD_CHALLENGE_PREFIX)
+for _a in _ALL_PREFIXES:
+    for _b in _ALL_PREFIXES:
+        assert _a == _b or not _b.startswith(_a), "signing prefixes must not nest"
 
 
 def build_musebook_canonical(method: str, path: str, body: str) -> bytes:
@@ -28,6 +44,23 @@ def build_musebook_canonical(method: str, path: str, body: str) -> bytes:
     if "\n" in method or "\n" in path:
         raise ValueError("method/path must not contain newlines")
     return (MUSEBOOK_SIGN_PREFIX + method + "\n" + path + "\n" + body).encode()
+
+
+def build_dashboard_challenge_canonical(challenge: str) -> bytes:
+    """Prefix + the dashboard's `<base64url>.<hmac-hex>` challenge, verbatim.
+
+    The challenge shape is enforced here (P1): only the dashboard's own
+    challenge grammar is accepted, so this route cannot sign arbitrary
+    bytes, a Musebook request, a directory entry or anything with a
+    newline or a non-ASCII byte in it.
+    """
+    if not isinstance(challenge, str):
+        raise ValueError("challenge must be a string")
+    if not 0 < len(challenge) <= DASHBOARD_CHALLENGE_MAX:
+        raise ValueError(f"challenge must be 1..{DASHBOARD_CHALLENGE_MAX} chars")
+    if not _DASHBOARD_CHALLENGE_RE.match(challenge):
+        raise ValueError("challenge must look like <base64url>.<hex>")
+    return (DASHBOARD_CHALLENGE_PREFIX + challenge).encode("ascii")
 
 
 def build_directory_canonical(entry: dict) -> bytes:

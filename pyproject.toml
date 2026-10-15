@@ -13,12 +13,14 @@ dependencies = [
     "pycryptodome>=3.20.0",   # Keccak-256 — EVM addresses
     "pynacl>=1.5.0",          # Ed25519 — identity signing behind the S1 gate
     "solders>=0.21.0",        # Solana — Ed25519 keypairs, transaction build/sign (no relay needed)
+    "blspy>=2.0.3",           # BLS12-381 signing for Chia spends (chia_sign.py, stdkeys.py)
 ]
 
 [project.optional-dependencies]
 test = [
     "pytest>=8.0.0",
     "eth-keys>=0.7.0",  # independent ECDSA cross-check in tests/test_evm.py
+    "chia_rs>=0.27.0",  # runs puzzles in tests/test_chia_sign.py and tests/test_chia_offer.py
 ]
 
 [project.scripts]
