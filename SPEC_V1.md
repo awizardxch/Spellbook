@@ -233,9 +233,10 @@ no keys): daemon source code, setup guide, town directory (addresses only).
 
 New labeled addresses never need a new backup, and every one restores in stock
 software:
-- **Chia:** the daemon imports the `chia-mainnet/sign/default` BLS secret;
-  Sage manages address discovery natively (derivations, derivation indices,
-  gap limit). Labeled receive addresses come through the Sage RPC.
+- **Chia:** the `chia-mainnet/sign/default` BLS secret is provisioned into
+  Sage once (`spellbook sage-provision`); Sage manages address discovery
+  natively (derivations, derivation indices, gap limit). Labeled receive
+  addresses come through the Sage RPC.
 - **EVM:** each label is its own info string
   (`muse-wallet/v1/evm-4663/sign/<label>`) → its own secp256k1 key → its own
   address. `tips`, `bounties`, `trading` are independent keys, each
@@ -329,14 +330,26 @@ unchanged. The daemon refuses to start in standard mode without
   owned by the daemon's OS user (S2) — the agent's user cannot read `keys.bin`.
 - **RPC:** `sage rpc start` → `https://127.0.0.1:9257`, mutual TLS; certs under
   `<datadir>/ssl/`, daemon-user-owned. The daemon is the only process that
-  reads the client cert.
-- **Key import:** at first boot the daemon imports the derived BLS secret via
+  reads the client cert. The daemon also verifies the **server**: Sage's own
+  `wallet.crt` is the sole trust anchor (`CERT_REQUIRED`, partial chain —
+  the cert is issued by Chia's public shared CA, which can never be an
+  anchor), and the leaf's SHA-256 is pinned (`chia.sage_cert_fingerprint`,
+  recorded at provisioning). A listener on the port with any other
+  certificate is refused during the TLS handshake, before a request is
+  written; a pre-existing listener (one answering before the daemon started
+  its own Sage child) is accepted only on a matching pin. Hostname checking
+  is off: the peer is 127.0.0.1 and the pin is its identity.
+- **Key provisioning:** a human runs `spellbook sage-provision --config-dir
+  <prefix>` once at install (as the daemon user). It starts Sage, pins the
+  certificate into the config, and imports the derived BLS secret via
   `POST /import_key` as a 32-byte hex private key (verified against
   `v0.13.1`: 32-byte hex → raw BLS master secret; 48-byte hex → watch-only
-  public key — S11). `save_secrets` defaults true; the daemon sets it
-  explicitly true and fails closed if the wallet comes back watch-only. The
-  wallet fingerprint is recorded in the daemon config. No mnemonic is ever
-  generated or displayed.
+  public key — S11), checking the returned fingerprint against the local
+  derivation. **The daemon never imports keys at runtime**: it logs in by
+  the locally derived fingerprint and fails closed when Sage lacks it
+  (status reads included). The legacy runtime import survives only behind
+  `chia.sage_runtime_key_import: true`, documented as unsafe, default off.
+  No mnemonic is ever generated or displayed.
 - **Sync:** Sage connects to Chia peers directly or to a configured trusted
   node. Record observed sync behavior in the Phase 1 log; slow/failed sync is a
   go/no-go input for Phase 2.
