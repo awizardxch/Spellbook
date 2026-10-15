@@ -713,6 +713,9 @@ cfg = {
         # runtime (sage_runtime_key_import stays false — unsafe legacy).
         "sage_cert_fingerprint": None,
         "sage_runtime_key_import": False,
+        # Upper bound on fee_mojos for offers and other Sage intents; the
+        # fee is also counted against native policy caps.
+        "max_offer_fee_mojos": 50000000,
     } if chia else {}),
     # Solana wiring (direct HTTPS JSON-RPC — no relay, no Sage needed):
     # `network` is the active network — "devnet" default; "mainnet-beta" is

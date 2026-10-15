@@ -41,7 +41,11 @@ spellbook.json (all fields optional unless noted):
                               UNSAFE legacy behavior: lets the daemon
                               /import_key the master key at runtime when
                               Sage lacks the fingerprint. Leave off; run
-                              `spellbook sage-provision` once instead)} —
+                              `spellbook sage-provision` once instead),
+                          "max_offer_fee_mojos": int (default 50_000_000 —
+                              upper bound on the fee_mojos an offer or any
+                              other Sage intent may request; the fee is
+                              also counted against native policy caps)} —
                           Sage wiring (§10 phase 1); {} or missing with
                           --no-sage. The daemon spawns `sage rpc start` with
                           XDG_DATA_HOME=sage_data_home when the RPC port is
@@ -90,6 +94,11 @@ import re
 
 from spellbook.policy import Policy
 
+# Upper bound on fee_mojos for offers and every other Sage intent that takes
+# a fee (chia.max_offer_fee_mojos). 0.05 XCH: generous for any real fee,
+# far below anything worth burning to farmers.
+DEFAULT_MAX_OFFER_FEE_MOJOS = 50_000_000
+
 
 def _must_600(path: str):
     st = os.stat(path)
@@ -122,6 +131,10 @@ def load_config(config_dir: str) -> dict:
             "Sage's wallet.crt")
     if not isinstance(chia_cfg.get("sage_runtime_key_import", False), bool):
         raise ValueError("chia.sage_runtime_key_import must be a boolean")
+    mx = chia_cfg.get("max_offer_fee_mojos", DEFAULT_MAX_OFFER_FEE_MOJOS)
+    if isinstance(mx, bool) or not isinstance(mx, int) or mx < 0:
+        raise ValueError("chia.max_offer_fee_mojos must be a non-negative "
+                         "integer")
     return cfg
 
 

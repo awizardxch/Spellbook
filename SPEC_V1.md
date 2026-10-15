@@ -621,6 +621,15 @@ below; the daemon enforces whatever is configured, nothing more.
 - `destination_allowlist` (optional) — when set, non-allowlisted destinations
   above the auto-approve level are denied rather than queued
 - All amounts in base units (mojos / wei).
+- **What policy counts for offers (Chia).** Policy judges one entry per
+  (chain, asset), summed over everything the wallet gives up: offer legs
+  are merged per asset (the same asset twice in one offer is refused at
+  request time, on the relay and the Sage path), the offer `fee_mojos` is
+  added to the native entry and bounded by `chia.max_offer_fee_mojos`
+  (default 50,000,000; the bound applies to every Sage intent's fee), and
+  on a take the NFT royalty Sage reports is added to the give leg in its
+  asset; a taker leg carrying `option_assets` or an unknown asset kind is
+  refused.
 - **Non-fungible moves and option exercise (Chia).** `option_exercise`
   counts the option's strike (read from Sage at request time, re-read and
   compared at execution) as a give leg in the strike asset, because

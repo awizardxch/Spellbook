@@ -70,7 +70,9 @@ It provisions:
 Intents that always wait for the human, whatever `auto_approve_below`
 says: `offer_cancel`, `message_sign`, `option_exercise` (its strike is
 counted as a spend in the strike asset), `option_transfer`,
-`did_transfer`, `nft_assign_did`.
+`did_transfer`, `nft_assign_did`. Offer fees are counted against native
+policy and capped by `chia.max_offer_fee_mojos`; an offer may name each
+asset once; taking an NFT offer counts the royalty you also pay.
 
 Client:
 
