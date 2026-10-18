@@ -35,12 +35,19 @@ FEE = 6_000_000_000
 TXID = "ab" * 32
 
 
-def _quote(amount_in=2_000_000, amount_out=600, executable=True, give=NATIVE,
-           take=CAT, body=None):
+SINGLE_BODY = {"launcher_id": POOL, "in_index": 0, "out_index": 1}
+
+
+def _quote(net_in=1_940_000, amount_out=600, executable=True, give=NATIVE,
+           take=CAT, body=None, venue="forge-swap"):
+    """A quote as the router answers it (testnet11, 2026-10-17): `intent.offer` is the
+    NET entry -- the amount less the router's fee, which `build` pays beside it -- and
+    the single-pool body carries in/out indexes and a fee_destination."""
     return {"executable": executable,
-            "settlement": {"venue": "forge", "body": body or {"launcher_id": POOL}},
+            "settlement": {"venue": venue,
+                           "body": body or dict(SINGLE_BODY, fee_destination="ee" * 32)},
             "intent": {"kind": "forge-swap",
-                       "offer": [{"asset_id": give, "amount": str(amount_in)}],
+                       "offer": [{"asset_id": give, "amount": str(net_in)}],
                        "request": [{"asset_id": take, "amount": str(amount_out)}],
                        "price_impact_bps": 14, "total_fee_bps": 330,
                        "route": [{"pool": POOL, "in": give, "out": take}],
@@ -56,6 +63,9 @@ class _Router:
         self.settles = []          # bodies POSTed to /swap, in order
         self.settle_script = []    # (status, payload) or an exception, per call
         self.reads = []
+        self.sized = 600           # what /size says a wallet-built offer asks for
+        self.sizes = []            # bodies POSTed to /size
+        self.size_answer = None    # a fixed (malformed) /size answer, or a ForgeError
         self.status_answer = {"success": True, "confirmed": True,
                               "proof": "pre-trade tips spent", "pools": []}
 
@@ -65,6 +75,15 @@ class _Router:
             return {"success": True, "network": self.network, "markets": []}
         if url.endswith("/api/v1/agent/quote"):
             return {"success": True, "quotes": list(self.quotes)}
+        if url.endswith("/api/v1/agent/size"):
+            self.sizes.append(body)
+            if isinstance(self.size_answer, BaseException):
+                raise self.size_answer
+            if self.size_answer is not None:
+                return self.size_answer
+            return {"success": True,
+                    "offer": [{"asset_id": body["asset_in"], "amount": body["amount_in"]}],
+                    "request": [{"asset_id": body["asset_out"], "amount": str(self.sized)}]}
         if url.endswith("/api/v1/agent/status"):
             return dict(self.status_answer)
         raise AssertionError(f"unexpected read {url}")
@@ -137,21 +156,63 @@ def test_router_comes_from_config_https_only():
         forge_mod.responder_for("simnet", {})
 
 
-def test_pick_quote_takes_only_an_exact_executable_forge_route():
+def test_candidates_are_executable_wallet_routes_best_first():
+    split_body = {"branches": [{"launcher_ids": [POOL], "path": [NATIVE, CAT], "amount_in": "1"}]}
     answer = {"quotes": [
         _quote(executable=False, amount_out=999),
-        _quote(amount_in=1_999_999, amount_out=998),             # sells another amount
+        _quote(net_in=2_000_001, amount_out=998),                # gives more than amount_in
         _quote(amount_out=996, take=NATIVE),                     # wrong asset out
+        _quote(amount_out=995, venue="forge-multihop",
+               body={"launcher_ids": [POOL, POOL], "path": [NATIVE, CAT, CAT]}),
+        _quote(amount_out=994, venue="forge-vault-route", body={"vault_route": {}}),
         _quote(amount_out=600),
         # The router's own "offer" is dropped with every other non-lane key;
-        # the daemon adds its wallet's offer. The best payer wins.
-        _quote(amount_out=700, body={"launcher_id": POOL, "offer": "x"}),
-        _quote(amount_out=650),
+        # the daemon adds its wallet's offer.
+        _quote(amount_out=700, body=dict(SINGLE_BODY, offer="x")),
+        _quote(amount_out=650, venue="forge-split", body=split_body),
     ]}
-    pick = forge_mod.pick_quote(answer, NATIVE, CAT, 2_000_000)
-    assert pick["amount_out"] == 700
-    assert pick["settlement_body"] == {"launcher_id": POOL}
-    assert forge_mod.pick_quote({"quotes": []}, NATIVE, CAT, 1) is None
+    found = forge_mod.candidates(answer, NATIVE, CAT, 2_000_000)
+    assert [c["quoted_out"] for c in found] == [700, 650, 600]
+    assert found[0]["settlement_body"] == SINGLE_BODY
+    assert found[1] == {"venue": "forge-split", "settlement_body": split_body,
+                        "quoted_out": 650, "intent": found[1]["intent"]}
+    assert forge_mod.candidates({"quotes": []}, NATIVE, CAT, 1) == []
+
+
+def test_size_sets_the_ask_and_never_the_give():
+    c = forge_mod.candidates({"quotes": [_quote()]}, NATIVE, CAT, 2_000_000)[0]
+    sent = []
+
+    def read(method, url, body=None):
+        sent.append(body)
+        return {"success": True, "offer": [{"asset_id": NATIVE, "amount": "2000000"}],
+                "request": [{"asset_id": CAT, "amount": "640"}]}
+    assert forge_mod.size("https://r", NATIVE, CAT, 2_000_000, c, read=read) == 640
+    assert sent[0] == {"asset_in": NATIVE, "asset_out": CAT, "amount_in": "2000000",
+                       "settlement": {"venue": "forge-swap", "body": SINGLE_BODY},
+                       "addresses": []}
+    for bad in ({"offer": [{"asset_id": NATIVE, "amount": "2000001"}],
+                 "request": [{"asset_id": CAT, "amount": "640"}]},
+                {"offer": [{"asset_id": NATIVE, "amount": "2000000"}],
+                 "request": [{"asset_id": NATIVE, "amount": "640"}]},
+                {"offer": [{"asset_id": NATIVE, "amount": "2000000"}], "request": []},
+                {"offer": "x"}):
+        with pytest.raises(forge_mod.ForgeError):
+            forge_mod.size("https://r", NATIVE, CAT, 2_000_000, c, read=lambda *a, **k: bad)
+
+
+def test_pick_sized_falls_through_to_the_next_route():
+    answer = {"quotes": [_quote(amount_out=700), _quote(amount_out=650,
+                                                        body=dict(SINGLE_BODY, launcher_id="bb" * 32))]}
+
+    def read(method, url, body=None):
+        if body["settlement"]["body"]["launcher_id"] == POOL:
+            raise forge_mod.ForgeError("multi-hop cannot be sized")
+        return {"offer": [{"asset_id": NATIVE, "amount": "2000000"}],
+                "request": [{"asset_id": CAT, "amount": "630"}]}
+    pick = forge_mod.pick_sized("https://r", answer, NATIVE, CAT, 2_000_000, read=read)
+    assert pick["amount_out"] == 630 and pick["settlement_body"]["launcher_id"] == "bb" * 32
+    assert forge_mod.pick_sized("https://r", {"quotes": []}, NATIVE, CAT, 1, read=read) is None
 
 
 def test_settle_is_sent_once_and_classified_by_its_answer():
@@ -192,21 +253,22 @@ def test_settle_is_sent_once_and_classified_by_its_answer():
 
 
 def test_only_lane_keys_reach_the_settle_body():
-    answer = {"quotes": [_quote(body={"launcher_id": POOL, "dry_run": True,
-                                      "display_on_dexie": True, "offer": "x"})]}
-    assert forge_mod.pick_quote(answer, NATIVE, CAT, 2_000_000)["settlement_body"] == {
-        "launcher_id": POOL}
-    assert forge_mod.pick_quote({"quotes": [_quote(body={"x": 1})]}, NATIVE, CAT, 2_000_000) is None
+    answer = {"quotes": [_quote(body=dict(SINGLE_BODY, dry_run=True, display_on_dexie=True,
+                                          offer="x", fee_destination="ee" * 32))]}
+    assert forge_mod.candidates(answer, NATIVE, CAT, 2_000_000)[0]["settlement_body"] == SINGLE_BODY
+    assert forge_mod.candidates({"quotes": [_quote(body={"x": 1})]}, NATIVE, CAT, 2_000_000) == []
+    assert forge_mod.candidates({"quotes": [_quote(body=dict(SINGLE_BODY, out_index="1"))]},
+                                NATIVE, CAT, 2_000_000) == []
 
 
-def test_pick_quote_survives_malformed_router_json():
+def test_candidates_survive_malformed_router_json():
     for answer in ({"quotes": "x"}, {"quotes": [{"executable": True, "settlement": "x",
                                                  "intent": "y"}]},
                    {"quotes": [dict(_quote(), intent={"offer": "x", "request": []})]},
                    {"quotes": [dict(_quote(), executable="yes")]}, [], None):
-        assert forge_mod.pick_quote(answer, NATIVE, CAT, 2_000_000) is None
+        assert forge_mod.candidates(answer, NATIVE, CAT, 2_000_000) == []
     huge = _quote(amount_out=str(2 ** 64))
-    assert forge_mod.pick_quote({"quotes": [huge]}, NATIVE, CAT, 2_000_000) is None
+    assert forge_mod.candidates({"quotes": [huge]}, NATIVE, CAT, 2_000_000) == []
 
 
 def test_redirects_are_answers_not_followed():
@@ -329,25 +391,40 @@ def test_mainnet_needs_the_separate_flag(forge_daemon):
     assert router.reads == []
 
 
+def test_the_fee_is_priced_at_the_wallets_own_rate(forge_daemon):
+    # Testnet11 live run, 2026-10-17: the wallet was fee-exempt, the sizing priced the
+    # public 3%, and the lane (rating the offer by its own coins) refused the ask.
+    d, fake, router = forge_daemon
+    _queued(d, router)
+    own = d._forge_rate_addresses("chia-testnet")
+    assert own and all(a.startswith("txch1") for a in own)
+    quote_body = next(b for m, u, b in router.reads if u.endswith("/api/v1/agent/quote"))
+    assert quote_body["addresses"] == own
+    assert router.sizes[-1]["addresses"] == own
+
+
 # -------------------------------------------------------------- execution
 
 def test_approve_makes_the_offer_rehearses_and_settles_once(forge_daemon):
     d, fake, router = forge_daemon
     qid = _queued(d, router)
     approved = d.queue[qid]["params"]["receive_address"]
-    router.quotes = [_quote(amount_out=640)]       # the fresh quote pays more
+    router.sized = 640                             # the fresh sizing pays more
     before = int(time.time())
     out = d.rt_queue_approve({"queue_id": qid}, "human")
     assert out["ok"] is True, out
     offered, requested, fee = fake.made[0]
+    # The whole amount goes in (not the quote's net entry); the ask is the router's
+    # wallet-built sizing: the payout less its fee.
     assert offered == [{"asset": "native", "amount_mojos": 2_000_000}]
-    assert requested == [{"asset": CAT, "amount_mojos": 640}], "asks the fresh quote"
+    assert requested == [{"asset": CAT, "amount_mojos": 640}], "asks the fresh sizing"
+    assert router.sizes[-1]["amount_in"] == "2000000"
     assert fee == FEE
     assert fake.last_make["receive_address"] == approved, "pays this wallet"
     expires = fake.last_make["expires_at_second"]
     assert before + 120 <= expires <= int(time.time()) + 600
     assert [s["dry_run"] for s in router.settles] == [True, False]
-    assert all(s == {"launcher_id": POOL, "offer": "OFFERoid1", "dry_run": s["dry_run"]}
+    assert all(s == dict(SINGLE_BODY, offer="OFFERoid1", dry_run=s["dry_run"])
                for s in router.settles)
     assert out["tx_hash"] == TXID and out["offer_id"] == "oid1"
     assert out["watch"]["spent_coin_ids"] == ["ee" * 32]
@@ -357,7 +434,7 @@ def test_approve_makes_the_offer_rehearses_and_settles_once(forge_daemon):
 def test_execution_refuses_below_the_approved_minimum(forge_daemon):
     d, fake, router = forge_daemon
     qid = _queued(d, router)
-    router.quotes = [_quote(amount_out=549)]
+    router.sized = 549
     out = d.rt_queue_approve({"queue_id": qid}, "human")
     assert out["ok"] is False and "below the approved minimum" in out["error"]
     assert fake.made == [] and router.settles == []
@@ -454,7 +531,13 @@ def test_forge_status_needs_the_wallets_own_offer_completed(forge_daemon):
     fake.records["oid1"]["status"] = "completed"
     res = d.rt_forge_status(st, "m")
     assert res["confirmed"] is True and res["offer_status"] == "completed"
-    router.status_answer = {"success": True, "confirmed": True, "proof": "indexed tips exist"}
+    assert d._forge_open_offers() == {}, "a completed offer is no longer open"
+    # The wallet's proof stands on its own: on a live testnet11 split the trade
+    # landed and paid exactly while the router's watch still named an unspent coin.
+    router.status_answer = {"success": True, "confirmed": False, "proof": "pre-trade tips spent"}
+    res = d.rt_forge_status(st, "m")
+    assert res["confirmed"] is True and res["pool_tips_spent"] is False
+    fake.records["oid1"]["status"] = "cancelled"
     assert d.rt_forge_status(st, "m")["confirmed"] is False
     assert d.rt_forge_status({"chain": "chia-testnet", "watch": out["watch"]}, "m")["ok"] is False
     assert d.rt_forge_status(dict(st, x=1), "m")["ok"] is False

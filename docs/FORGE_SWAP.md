@@ -99,22 +99,29 @@ any of them is refused. What the daemon does with it, in order:
 
 1. **Quote from its own router.** `chia.forge_responders[<network>]`
    (default: the Forge's routers above; https, or http to loopback only).
-   `markets` must report the chain's network. The daemon keeps the best
-   executable quote whose `intent.offer` is exactly `[asset_in, amount_in]`
-   and whose `intent.request` is one leg of `asset_out` (R1: the
-   `settlement.body` is used as returned). A route paying below the minimum
-   is refused; nothing is queued.
+   `markets` must report the chain's network. A quote's `intent` is shaped
+   for `build` (the net entry, with the router fee as a payment beside it,
+   which a wallet cannot make), so the daemon never offers `intent` as is:
+   it takes the best executable single-pool or split routes and asks the
+   router's `POST /api/v1/agent/size` what a wallet-built offer giving
+   exactly `amount_in` must ask for (the payout less the router fee),
+   refusing any answer that changes the give. The quote and the sizing carry
+   the wallet's own addresses (public on chain) so the fee is priced at the
+   rate the settle lane will charge these coins: an exempt or tiered wallet
+   sized at the public rate asks too little and is refused. A route paying
+   below the minimum is refused; nothing is queued. Multi-hop and vault
+   routes cannot be wallet-built (the website keeps them site-built too).
 2. **Queue for the human, always** (`ALWAYS_QUEUE_INTENTS`), even when
    auto-approve would pass it; caps can still deny it. The queue entry
    shows what is given, the minimum taken, the fee, the router, network,
    expected output, price impact, fees and route from the daemon's own
    quote, the offer expiry, and the receive address (this wallet's own,
    S2). Velocity counts the given leg plus the fee.
-3. **On approval, quote again** from the router now configured. It must be
-   the router the human approved, and the route must still pay at least the
-   minimum; otherwise nothing is signed.
+3. **On approval, quote and size again** from the router now configured. It
+   must be the router the human approved, and the sized ask must still be at
+   least the minimum; otherwise nothing is signed.
 4. **Sage makes the offer** through the `offer_make` path: give exactly
-   `amount_in`, ask for the fresh quote's amount (at least the minimum),
+   `amount_in`, ask for the fresh sized amount (at least the minimum),
    paid to the approved receive address, balance-checked, expiring after
    `chia.forge_offer_ttl_seconds` (default 600). **From this point the
    signed offer can be filled by whoever holds it until it expires**: the
@@ -125,18 +132,21 @@ any of them is refused. What the daemon does with it, in order:
 5. **Rehearse** (`dry_run: true`, R4). The fee must be at least 5 x the
    rehearsal's measured cost (R3).
 6. **Settle once** (R5, R9). Only the lane keys of the quote's
-   `settlement.body` are sent (`launcher_id(s)`, `path`, `branches`,
-   `swap_launcher_id`, `vault_launcher_id`), with `dry_run` set by the
-   daemon. `success:true`, not a dry run, with a transaction id, returns the
+   `settlement.body` are sent (`launcher_id`, `in_index`, `out_index`,
+   `launcher_ids`, `path`, `branches`), with `dry_run` set by the daemon. `success:true`, not a dry run, with a transaction id, returns the
    transaction id, the offer id and `watch`. **Every other outcome after the
    offer exists** (a refused rehearsal, a fee under the floor, a 4xx, an
    ambiguous answer, a malformed one) is `approved-submit-unknown`:
    velocity consumed fail-closed, the offer recorded open, never resent
    (R6, R7 as amended below).
-7. **Watch** with `forge_status {chain, offer_id, watch}`. `confirmed` needs
-   both the wallet's own offer `completed` in Sage and the router's
-   `proof: "pre-trade tips spent"` (R8): spent pool coins alone could be
-   another trader's swap.
+7. **Watch** with `forge_status {chain, offer_id, watch?}`. `confirmed` is
+   the wallet's own proof: Sage shows the swap's offer `completed`, i.e. its
+   reserved coins were spent by a bundle that paid what the offer asks (a
+   cancel reads `cancelled`). The router's pool check (`pool_tips_spent`,
+   R8) is reported beside it as information only: spent pool coins alone
+   could be another trader's swap, and on the live run below the trade
+   landed and paid exactly while the router's watch still named an unspent
+   coin.
 
 The Forge charges its router fee off the pool's payout, so the offer
 receives exactly what it asks for; anything above that and the rate's fee
@@ -147,10 +157,27 @@ see the contract's "The fee rate a wallet earns". Without one, a trade pays
 at most the public rate it was quoted at.
 
 Tests: `tests/test_forge_swap.py` (bounds-only schema, config-pinned
-router, network check, always-queue, the execution order, ambiguous vs
-definite outcomes, the fee caps). A live testnet11 run of T7 through
-`forge_swap` is still owed, including the offer expiry riding through the
-settle lane.
+router, network check, always-queue, sizing, the wallet's rate, the
+execution order, ambiguous vs definite outcomes, the fee caps).
+
+### Live run through `forge_swap` (2026-10-17/18, testnet11)
+
+The daemon's own code against the live testnet11 router and a real Sage
+wallet (Sage reached through Spellbook's pinned `SageRpc`; the human
+approval was `queue_approve`). 0.001 TXCH into 🍕
+(`969289f7…`), fee 0.006 TXCH.
+
+| Run | What happened | What it proved |
+|---|---|---|
+| 1 | every live quote rejected before queueing | `intent.offer` is the net entry (970,000,000 of 1,000,000,000): a wallet cannot use it; the Forge gained `/api/v1/agent/size` (Forge PR 231) |
+| 2 | sized at the public 3% (ask 92,853); rehearsal refused: the wallet is fee-exempt, the lane wanted the full release | offer recorded open, pair blocked, Sage marked it `expired` after 600 s, balances unchanged: the refusal path is safe; the sizing must carry the wallet's addresses |
+| 3 | sized at the wallet's rate (ask 95,727, minimum 90,940, three-branch split); rehearsal and one live settle, transaction `fdd693f3…` | wallet −1,000,000,000 −6,000,000,000 fee, +95,727 🍕 exactly; Sage offer `completed`; `forge_status` confirmed; Sage's `expires_at_second` rides through the settle lane |
+
+Run 3's router status never reported every pre-trade tip spent although
+the bundle landed (one watched coin was spent on chain at block
+4,840,019, others presumably belong to pools the split did not touch);
+that is a router-side watch issue, which is why `confirmed` rests on the
+wallet.
 
 ### Binding the spends to the intent (bare-key signers only)
 

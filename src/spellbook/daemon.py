@@ -5384,19 +5384,36 @@ class Daemon:
                 "total_fee_bps": num(intent.get("total_fee_bps")),
                 "route": hops(intent.get("route"))}
 
+    def _forge_rate_addresses(self, chain: str) -> list:
+        """This wallet's own addresses, standard derivations first, for the router's
+        fee ladder. Empty (public rate) if the scan is unavailable."""
+        try:
+            puzzle_hashes, _ = self._own_puzzle_hashes(chain)
+        except Exception:  # noqa: BLE001 — pricing falls back to the public rate
+            return []
+        hrp = chia_sign.ADDRESS_PREFIX[chia.NETWORKS[chain]]
+        return [chia_sign.address_for_puzzle_hash(bytes.fromhex(ph), hrp)
+                for ph in puzzle_hashes[:forge_mod.MAX_RATE_ADDRESSES]]
+
     def _forge_route(self, chain: str, asset_in: str, asset_out: str,
                      amount_in: int) -> tuple:
-        """Quote from the configured router and keep the executable Forge route
-        paying the most for exactly amount_in. Returns (base, pick)."""
+        """Quote from the configured router and size the best single-pool or
+        split route for a wallet-built offer giving exactly amount_in (the
+        router's /size: the payout less its fee). Returns (base, pick), where
+        pick["amount_out"] is what the offer would ask for."""
         network = chia.NETWORKS[chain]
         base = forge_mod.responder_for(network, self.chia_cfg)
         forge_mod.check_network(base, network)
-        answer = forge_mod.quote(base, asset_in, asset_out, amount_in)
-        pick = forge_mod.pick_quote(answer, asset_in, asset_out, amount_in)
+        # The wallet's own addresses (public on chain) price the router fee at the
+        # rate the settle lane will charge these coins.
+        addresses = self._forge_rate_addresses(chain)
+        answer = forge_mod.quote(base, asset_in, asset_out, amount_in, addresses=addresses)
+        pick = forge_mod.pick_sized(base, answer, asset_in, asset_out, amount_in,
+                                    addresses=addresses)
         if pick is None:
             raise forge_mod.ForgeError(
-                "no executable Forge route sells exactly "
-                f"{amount_in} of {asset_in[:12]}… for {asset_out[:12]}…")
+                "no executable single-pool or split Forge route could be sized "
+                f"for {amount_in} of {asset_in[:12]}… into {asset_out[:12]}…")
         return base, pick
 
     def rt_forge_swap(self, p: dict, muse_id: str) -> dict:
@@ -5473,10 +5490,13 @@ class Daemon:
         return self._run_fund_intent(params, muse_id, entries, "forge_swap")
 
     def rt_forge_status(self, p: dict, muse_id: str) -> dict:
-        """Read-only: has an approved Forge swap landed? `confirmed` needs BOTH
-        the wallet's own offer completed in Sage and the router's proof that
-        the pool coins it built on are spent (R8): spent pool coins alone could
-        be another trader's swap."""
+        """Read-only: has an approved Forge swap landed? `confirmed` is the
+        wallet's own proof: Sage shows the swap's offer `completed`, i.e. its
+        reserved coins were spent by a bundle that paid what the offer asks (a
+        cancel reads `cancelled`). Spent pool coins alone could be another
+        trader's swap, so the router's pool check is reported beside it, as
+        information only: on a live testnet11 split (2026-10-17) the trade
+        landed, paid exactly, and the router's watch still named an unspent coin."""
         if not set(p).issubset(FORGE_STATUS_FIELDS) or not {"chain", "offer_id"} <= set(p):
             return {"ok": False,
                     "error": "schema violation: forge_status needs chain, "
@@ -5498,7 +5518,7 @@ class Daemon:
                 tips = forge_mod.status(base, watch)
             except forge_mod.ForgeError as e:
                 tips = {"tips_spent": False, "proof": None, "detail": str(e)}
-        confirmed = offer_status == "completed" and tips["tips_spent"]
+        confirmed = offer_status == "completed"
         if offer_status in ("completed", "cancelled", "expired"):
             self._forge_mark_settled(offer_id)
         return {"ok": True, "confirmed": confirmed, "offer_status": offer_status,

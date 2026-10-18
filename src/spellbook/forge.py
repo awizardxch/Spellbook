@@ -149,9 +149,21 @@ def check_network(base: str, network: str, read=None) -> dict:
     return markets
 
 
-def quote(base: str, asset_in: str, asset_out: str, amount_in: int, read=None) -> dict:
+#: Most wallet addresses sent to the router to price its fee (its own cap is 600).
+MAX_RATE_ADDRESSES = 200
+
+
+def _rate_addresses(addresses) -> list:
+    return [a for a in (addresses or []) if isinstance(a, str)][:MAX_RATE_ADDRESSES]
+
+
+def quote(base: str, asset_in: str, asset_out: str, amount_in: int, read=None,
+          addresses=None) -> dict:
+    """Every route, best first. ``addresses`` (the wallet's own, public on chain) price
+    the router fee at the rate the wallet earns, as the settle lane will rate it."""
     return (read or _read)("POST", f"{base}/api/v1/agent/quote",
-                {"asset_in": asset_in, "asset_out": asset_out, "amount_in": str(amount_in)})
+                {"asset_in": asset_in, "asset_out": asset_out, "amount_in": str(amount_in),
+                 "addresses": _rate_addresses(addresses)})
 
 
 _HEX64 = re.compile(r"[0-9a-f]{64}")
@@ -195,46 +207,99 @@ def _sides(intent) -> tuple[list, list] | None:
 
 
 #: The settle body keys each lane reads (the router picks the lane by shape). Only
-#: these are forwarded: a router cannot slip ``dry_run``, ``display_on_dexie`` or
-#: anything else into the body the wallet's offer is posted with.
-_LANE_KEYS = ("launcher_id", "launcher_ids", "path", "branches",
-              "swap_launcher_id", "vault_launcher_id")
+#: these are forwarded: a router cannot slip ``dry_run``, ``display_on_dexie``,
+#: ``fee_destination`` or anything else into the body the wallet's offer is posted with.
+_LANE_KEYS = ("launcher_id", "in_index", "out_index", "launcher_ids", "path", "branches")
 _MAX_BODY_BYTES = 64 * 1024
+#: The venues a wallet-built offer can settle through (the router's /size sizes these;
+#: multi-hop and vault routes stay site-built, on the website too).
+WALLET_VENUES = ("forge-swap", "forge-split")
+#: How many of the best routes to try sizing before giving up.
+SIZE_ATTEMPTS = 3
 
 
 def _lane_body(body) -> dict | None:
     if not isinstance(body, dict):
         return None
     kept = {k: body[k] for k in _LANE_KEYS if k in body}
+    for idx in ("in_index", "out_index"):
+        if idx in kept and (isinstance(kept[idx], bool) or not isinstance(kept[idx], int)
+                            or not 0 <= kept[idx] < 16):
+            return None
     if not kept or len(json.dumps(kept)) > _MAX_BODY_BYTES:
         return None
     return kept
 
 
-def pick_quote(answer: dict, asset_in: str, asset_out: str, amount_in: int) -> dict | None:
-    """The executable Forge quote paying the most ``asset_out`` that gives EXACTLY
-    ``amount_in`` of ``asset_in`` and asks for one positive amount of ``asset_out``;
-    None when there is none. Returns {"amount_out", "settlement_body", "intent"} with
-    the body reduced to the lane keys."""
+def candidates(answer: dict, asset_in: str, asset_out: str, amount_in: int) -> list:
+    """Executable single-pool and split quotes from ``asset_in`` to ``asset_out`` for
+    ``amount_in``, best payer first. A quote's ``intent`` gives the NET entry (the
+    router's fee is a payment beside it, for ``build``), so it gives at most
+    ``amount_in`` of ``asset_in``; its request is only a ranking here, never what the
+    wallet asks for (see ``size``). Each: {"venue", "settlement_body", "quoted_out",
+    "intent"} with the body reduced to the lane keys."""
     quotes = answer.get("quotes") if isinstance(answer, dict) else None
-    best = None
+    found = []
     for q in quotes if isinstance(quotes, list) else []:
         if not isinstance(q, dict) or q.get("executable") is not True:
             continue
         settlement = q.get("settlement")
-        body = _lane_body(settlement.get("body")) if isinstance(settlement, dict) else None
+        if not isinstance(settlement, dict) or settlement.get("venue") not in WALLET_VENUES:
+            continue
+        body = _lane_body(settlement.get("body"))
         sides = _sides(q.get("intent"))
         if body is None or sides is None:
             continue
         offered, requested = sides
-        if offered != [(asset_in, amount_in)]:
+        if (len(offered) != 1 or offered[0][0] != asset_in or offered[0][1] is None
+                or offered[0][1] > amount_in):
             continue
         if len(requested) != 1 or requested[0][0] != asset_out or requested[0][1] is None:
             continue
-        if best is None or requested[0][1] > best["amount_out"]:
-            best = {"amount_out": requested[0][1], "settlement_body": body,
-                    "intent": q.get("intent")}
-    return best
+        found.append({"venue": settlement["venue"], "settlement_body": body,
+                      "quoted_out": requested[0][1], "intent": q.get("intent")})
+    found.sort(key=lambda c: c["quoted_out"], reverse=True)
+    return found
+
+
+def size(base: str, asset_in: str, asset_out: str, amount_in: int, candidate: dict,
+         read=None, addresses=None) -> int:
+    """What a wallet-built offer giving exactly ``amount_in`` must ask for on this
+    route (``/api/v1/agent/size``: the payout less the router's fee). Refused unless
+    the answer gives exactly ``amount_in`` of ``asset_in`` and asks for one positive
+    amount of ``asset_out`` -- the router sizes the request, never the give."""
+    answer = (read or _read)("POST", f"{base}/api/v1/agent/size", {
+        "asset_in": asset_in, "asset_out": asset_out, "amount_in": str(amount_in),
+        "settlement": {"venue": candidate["venue"], "body": candidate["settlement_body"]},
+        # The ask is the payout less the fee AT THE WALLET'S RATE: the lane rates the
+        # offer by its own coins, and an exempt or tiered wallet sized at the public rate
+        # asks too little and is refused (testnet11 live run, 2026-10-17).
+        "addresses": _rate_addresses(addresses)})
+    sides = _sides({"offer": answer.get("offer"), "request": answer.get("request")})
+    if sides is None:
+        raise ForgeError("the Forge router's size answer is malformed")
+    offered, requested = sides
+    if offered != [(asset_in, amount_in)]:
+        raise ForgeError(f"the Forge router sized an offer giving {offered}, not {amount_in}")
+    if len(requested) != 1 or requested[0][0] != asset_out or requested[0][1] is None:
+        raise ForgeError("the Forge router's size answer asks for something else")
+    return requested[0][1]
+
+
+def pick_sized(base: str, answer: dict, asset_in: str, asset_out: str, amount_in: int,
+               read=None, addresses=None) -> dict | None:
+    """The first of the best routes the router can size for a wallet-built offer.
+    Returns {"amount_out" (what the offer asks for), "venue", "settlement_body",
+    "intent"}; None when none sizes."""
+    for c in candidates(answer, asset_in, asset_out, amount_in)[:SIZE_ATTEMPTS]:
+        try:
+            amount_out = size(base, asset_in, asset_out, amount_in, c, read=read,
+                              addresses=addresses)
+        except ForgeError:
+            continue
+        return {"amount_out": amount_out, "venue": c["venue"],
+                "settlement_body": c["settlement_body"], "intent": c["intent"]}
+    return None
 
 
 def settle(base: str, body: dict, dry_run: bool, timeout: int = 120, send=None) -> dict:
