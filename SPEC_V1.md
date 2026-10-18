@@ -532,13 +532,17 @@ mTLS cert, or submit transactions.
   coins, own receive address, expiry `chia.forge_offer_ttl_seconds`,
   default 600 s), the daemon rehearses it with `dry_run`, checks the fee
   against the node's floor (5 x the rehearsal's cost), and settles it once.
-  The daemon never signs a spend the router built. A settle whose outcome is
-  unknown is `approved-submit-unknown` with the `watch` to poll, never
-  resent. The fee cap is `chia.forge_max_fee_mojos` (default 0.01 XCH: the
+  The daemon never signs a spend the router built, and forwards only the
+  lane keys of the router's settlement body. Once the offer exists, any
+  outcome short of a settle with a transaction id is
+  `approved-submit-unknown` (velocity consumed, the offer recorded open in
+  `forge_open.json`, a second swap of the pair refused until it expires or
+  is cancelled), never resent. The fee cap is `chia.forge_max_fee_mojos` (default 0.01 XCH: the
   offer pays the network fee for the whole pool settlement). Velocity counts
   the given leg plus the fee.
-- `POST /v1/forge_status {chain, watch}` → has an approved Forge swap
-  landed? `confirmed` only when the pool coins it spent are spent on chain.
+- `POST /v1/forge_status {chain, offer_id, watch?}` → has an approved Forge
+  swap landed? `confirmed` only when Sage shows the swap's own offer
+  completed AND the router proves the pool coins it built on are spent.
   Read-only.
 - `POST /v1/dex_lp_add {intent, chain, protocol, router?, position_manager?,
   permit2?, token_a, token_b, amount_a_wei, amount_b_wei,

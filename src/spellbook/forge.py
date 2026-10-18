@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -78,16 +79,27 @@ def responder_for(network: str, chia_cfg: dict | None) -> str:
     return url
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect is an answer, never followed: following one would walk a read
+    (or a settle) off the pinned https origin."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def _send(method: str, url: str, body: dict | None, timeout: int) -> tuple[int, dict | None]:
-    """One request. Returns (status, parsed JSON or None) for ANY HTTP answer; raises
-    the transport error when no answer came back."""
+    """One request. Returns (status, parsed JSON object or None) for ANY HTTP answer,
+    a 30x included (never followed); raises the transport error when no answer came."""
     data = json.dumps(body).encode() if body is not None else None
     headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
     if data is not None:
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _OPENER.open(req, timeout=timeout) as r:
             status, raw = r.status, r.read()
     except urllib.error.HTTPError as e:
         status, raw = e.code, e.read()
@@ -122,7 +134,7 @@ def _read(method: str, url: str, body: dict | None = None, timeout: int = 30,
                 return payload
             else:
                 detail = (payload or {}).get("error") or f"HTTP {status}"
-                raise ForgeError(f"Forge router refused ({url}): {detail}")
+                raise ForgeError(f"Forge router refused ({url}): {str(detail)[:300]}")
         if attempt < len(READ_RETRY_DELAYS_SEC):
             sleep(READ_RETRY_DELAYS_SEC[attempt])
     raise ForgeError(f"Forge router unavailable ({url}): {last}")
@@ -142,75 +154,136 @@ def quote(base: str, asset_in: str, asset_out: str, amount_in: int, read=None) -
                 {"asset_in": asset_in, "asset_out": asset_out, "amount_in": str(amount_in)})
 
 
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+_MAX_MOJOS = 2 ** 64 - 1
+
+
 def _amount(value) -> int | None:
-    try:
-        n = int(str(value))
-    except (TypeError, ValueError):
+    """A positive whole number of mojos within uint64, from an int or a digit string."""
+    if isinstance(value, bool):
         return None
-    return n if n > 0 else None
+    if isinstance(value, int):
+        n = value
+    elif isinstance(value, str) and value.isdigit():
+        n = int(value)
+    else:
+        return None
+    return n if 0 < n <= _MAX_MOJOS else None
 
 
-def _sides(intent: dict) -> tuple[list, list]:
-    def legs(items):
-        out = []
-        for it in items or []:
-            asset = str((it or {}).get("asset_id") or "").lower().removeprefix("0x")
-            out.append((asset, _amount((it or {}).get("amount"))))
-        return out
-    return legs((intent or {}).get("offer")), legs((intent or {}).get("request"))
+def _hex_id(value) -> str | None:
+    v = str(value).lower().removeprefix("0x") if isinstance(value, str) else ""
+    return v if _HEX64.fullmatch(v) else None
+
+
+def _sides(intent) -> tuple[list, list] | None:
+    """(offer legs, request legs) as [(asset id, amount)], or None if malformed."""
+    if not isinstance(intent, dict):
+        return None
+    sides = []
+    for key in ("offer", "request"):
+        items = intent.get(key)
+        if not isinstance(items, list):
+            return None
+        legs = []
+        for it in items:
+            if not isinstance(it, dict):
+                return None
+            legs.append((_hex_id(it.get("asset_id")), _amount(it.get("amount"))))
+        sides.append(legs)
+    return sides[0], sides[1]
+
+
+#: The settle body keys each lane reads (the router picks the lane by shape). Only
+#: these are forwarded: a router cannot slip ``dry_run``, ``display_on_dexie`` or
+#: anything else into the body the wallet's offer is posted with.
+_LANE_KEYS = ("launcher_id", "launcher_ids", "path", "branches",
+              "swap_launcher_id", "vault_launcher_id")
+_MAX_BODY_BYTES = 64 * 1024
+
+
+def _lane_body(body) -> dict | None:
+    if not isinstance(body, dict):
+        return None
+    kept = {k: body[k] for k in _LANE_KEYS if k in body}
+    if not kept or len(json.dumps(kept)) > _MAX_BODY_BYTES:
+        return None
+    return kept
 
 
 def pick_quote(answer: dict, asset_in: str, asset_out: str, amount_in: int) -> dict | None:
-    """The best executable Forge quote that gives EXACTLY ``amount_in`` of ``asset_in``
-    and asks for one positive amount of ``asset_out``; None when there is none.
-    Returns {"amount_out", "settlement_body", "intent", "quote"}."""
-    for q in answer.get("quotes") or []:
-        if not isinstance(q, dict) or not q.get("executable"):
+    """The executable Forge quote paying the most ``asset_out`` that gives EXACTLY
+    ``amount_in`` of ``asset_in`` and asks for one positive amount of ``asset_out``;
+    None when there is none. Returns {"amount_out", "settlement_body", "intent"} with
+    the body reduced to the lane keys."""
+    quotes = answer.get("quotes") if isinstance(answer, dict) else None
+    best = None
+    for q in quotes if isinstance(quotes, list) else []:
+        if not isinstance(q, dict) or q.get("executable") is not True:
             continue
-        body = (q.get("settlement") or {}).get("body")
-        if not isinstance(body, dict) or "offer" in body:
+        settlement = q.get("settlement")
+        body = _lane_body(settlement.get("body")) if isinstance(settlement, dict) else None
+        sides = _sides(q.get("intent"))
+        if body is None or sides is None:
             continue
-        offered, requested = _sides(q.get("intent") or {})
+        offered, requested = sides
         if offered != [(asset_in, amount_in)]:
             continue
         if len(requested) != 1 or requested[0][0] != asset_out or requested[0][1] is None:
             continue
-        return {"amount_out": requested[0][1], "settlement_body": body,
-                "intent": q.get("intent"), "quote": q}
-    return None
+        if best is None or requested[0][1] > best["amount_out"]:
+            best = {"amount_out": requested[0][1], "settlement_body": body,
+                    "intent": q.get("intent")}
+    return best
 
 
-def settle(base: str, body: dict, timeout: int = 120, send=None) -> dict:
-    """POST the offer to the settle lane ONCE. A dry run answers or raises ForgeError;
-    a live settle answers, raises ForgeError (a definite refusal: nothing was pushed),
-    or raises ForgeAmbiguous (it may land: watch it, never resend)."""
-    dry = body.get("dry_run") is True
+def settle(base: str, body: dict, dry_run: bool, timeout: int = 120, send=None) -> dict:
+    """POST the offer to the settle lane ONCE, with ``dry_run`` set by the caller.
+    A rehearsal answers or raises ForgeError; a live settle answers (success, a
+    transaction id, not a dry run), raises ForgeError (a definite refusal: the
+    router did not push), or raises ForgeAmbiguous (it may land: never resend)."""
     url = f"{base}/api/v1/agent/swap"
+    sent = dict(body, dry_run=bool(dry_run))
     try:
-        status, payload = (send or _send)("POST", url, body, timeout)
+        status, payload = (send or _send)("POST", url, sent, timeout)
     except Exception as e:  # noqa: BLE001 — a live POST that got no answer is ambiguous
-        if dry:
+        if dry_run:
             raise ForgeError(f"Forge rehearsal got no answer: {e}") from e
         raise ForgeAmbiguous(f"Forge settle got no answer ({e}); it may still land",
                              None, None) from e
-    payload = payload or {}
+    payload = payload if isinstance(payload, dict) else {}
+    watch = payload.get("watch") if isinstance(payload.get("watch"), dict) else None
+    txid = _hex_id(payload.get("transaction_id"))
     if payload.get("success") is True and 200 <= status < 300:
-        return payload
-    detail = payload.get("error") or payload.get("code") or f"HTTP {status}"
-    if dry:
+        if dry_run:
+            return payload
+        if payload.get("dry_run") is True or txid is None:
+            # "success" without a pushed transaction is not a settle.
+            raise ForgeAmbiguous("Forge settle answered success without a transaction",
+                                 txid, watch)
+        return {**payload, "transaction_id": txid, "watch": watch}
+    detail = str(payload.get("error") or payload.get("code") or f"HTTP {status}")[:300]
+    if dry_run:
         raise ForgeError(f"Forge rehearsal refused: {detail}")
-    if payload.get("ambiguous") is True or payload.get("code") == "FORGE_PUSH_PENDING" or status >= 500:
-        raise ForgeAmbiguous(f"Forge settle outcome unknown: {detail}",
-                             payload.get("transaction_id"), payload.get("watch"))
+    if (payload.get("ambiguous") is True or payload.get("code") == "FORGE_PUSH_PENDING"
+            or status >= 500 or not 400 <= status < 500):
+        raise ForgeAmbiguous(f"Forge settle outcome unknown: {detail}", txid, watch)
     raise ForgeError(f"Forge settle refused: {detail}")
 
 
-def status(base: str, watch: dict, read=None) -> dict:
-    """Has it landed? ``confirmed`` is true only with ``proof: "pre-trade tips spent"``
-    (R8); "indexed tips exist" is true the moment a push is accepted."""
-    watch = watch or {}
-    body = {"launcher_ids": list(watch.get("launcher_ids") or []),
-            "spent_coin_ids": list(watch.get("spent_coin_ids") or [])}
+def status(base: str, watch, read=None) -> dict:
+    """What the router says about the pools a swap touched. ``tips_spent`` is true
+    only with proof "pre-trade tips spent" — which proves the pool coins were spent,
+    by this swap or ANOTHER one, so the daemon confirms with the wallet's own offer
+    status too."""
+    watch = watch if isinstance(watch, dict) else {}
+
+    def ids(key):
+        value = watch.get(key)
+        return [v for v in (_hex_id(x) for x in value) if v] if isinstance(value, list) else []
+    body = {"launcher_ids": ids("launcher_ids")[:64], "spent_coin_ids": ids("spent_coin_ids")[:64]}
+    if not body["launcher_ids"] and not body["spent_coin_ids"]:
+        raise ForgeError("the watch names no pool or coin")
     answer = (read or _read)("POST", f"{base}/api/v1/agent/status", body)
-    confirmed = answer.get("confirmed") is True and answer.get("proof") == "pre-trade tips spent"
-    return {**answer, "confirmed": confirmed}
+    tips_spent = answer.get("confirmed") is True and answer.get("proof") == "pre-trade tips spent"
+    return {"tips_spent": tips_spent, "proof": answer.get("proof"), "detail": answer.get("detail")}

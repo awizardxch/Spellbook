@@ -250,7 +250,8 @@ def _forge_swap(a):
 
 
 def _forge_status(a):
-    return _client().forge_status(chain=a["chain"], watch=a["watch"])
+    return _client().forge_status(chain=a["chain"], offer_id=a["offer_id"],
+                                  watch=a.get("watch"))
 
 
 def _message_sign(a):
@@ -410,12 +411,13 @@ TOOLS = [
           ("chain", "asset_in", "asset_out", "amount_in", "min_amount_out",
            "fee")),
     _tool("spellbook_forge_status",
-          "Has an approved Forge swap landed? Pass the watch the swap "
-          "returned. confirmed is true only once the pool coins it spent are "
-          "spent on chain.",
+          "Has an approved Forge swap landed? Pass the offer_id and watch the "
+          "swap returned. confirmed is true only once the wallet's own offer "
+          "completed and the pool coins it built on are spent.",
           _forge_status,
-          {"chain": _CHAIN, "watch": {"type": "object"}},
-          ("chain", "watch"), read_only=True),
+          {"chain": _CHAIN, "offer_id": {"type": "string"},
+           "watch": {"type": "object"}},
+          ("chain", "offer_id"), read_only=True),
     _tool("spellbook_message_sign",
           "Queue signing a message (always needs human approval). sign_type: "
           "plain (Chia/Solana), personal (EIP-191) or typed_data (EIP-712 JSON).",

@@ -145,7 +145,7 @@ OFFER_CANCEL_FIELDS = {"intent", "chain", "offer_id", "offer_ids",
 FORGE_SWAP_FIELDS = {"intent", "chain", "asset_in", "asset_out",
                      "amount_in_mojos", "min_amount_out_mojos", "fee_mojos",
                      "purpose"}
-FORGE_STATUS_FIELDS = {"chain", "watch"}
+FORGE_STATUS_FIELDS = {"chain", "offer_id", "watch"}
 
 # Full Sage wallet surface: every fund-moving Sage endpoint is a queued
 # intent with an explicit schema (S13: unknown shapes are rejected, never
@@ -595,6 +595,10 @@ class Daemon:
         self.ledger = Ledger(os.path.join(config_dir, "ledger.jsonl"))
         self.queue_path = os.path.join(config_dir, "queue.json")
         self.velocity_path = os.path.join(config_dir, "velocity.jsonl")
+        # Forge offers made but not proven settled: the signed offer is in a
+        # router's hands and fillable until it expires, so a second swap of
+        # the same pair waits (forge_swap; review 2026-10-17, finding 1).
+        self.forge_open_path = os.path.join(config_dir, "forge_open.json")
         # Mint/issuance gate (six-gate rule): mint_gate.json is written by
         # the human's own tooling, never by the agent and never by any
         # daemon route. It must name the exact canonical digests of the
@@ -5297,6 +5301,13 @@ class Daemon:
     # approval has Sage make the offer (the offer_make path: own payee, own
     # coins, balance-checked), rehearses it, settles it once, and hands back
     # what to watch. The daemon never signs a spend the router built.
+    #
+    # Once Sage has made the offer, the signed offer is in the router's hands
+    # (the rehearsal carries it) and anyone holding it can fill it until it
+    # expires, whatever the router answered. So every outcome short of a
+    # proven settle leaves the offer OPEN on record: a second swap of the same
+    # pair is refused until it expires or the human cancels it (offer_cancel),
+    # and velocity counts it, fail-closed (review 2026-10-17, finding 1).
 
     @staticmethod
     def _forge_asset(asset) -> tuple:
@@ -5318,10 +5329,65 @@ class Daemon:
             ttl = 600
         return max(120, min(ttl, 3600))
 
+    def _forge_open_offers(self) -> dict:
+        """offer_id -> {chain, give, take, expires} for Forge offers made and not
+        proven settled, expired ones dropped."""
+        try:
+            with open(self.forge_open_path) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            data = {}
+        now = int(time.time())
+        live = {k: v for k, v in (data if isinstance(data, dict) else {}).items()
+                if isinstance(v, dict) and int(v.get("expires", 0)) > now}
+        if live != data:
+            _atomic_write_json(self.forge_open_path, live)
+        return live
+
+    def _forge_mark_open(self, offer_id: str, chain: str, give: str, take: str,
+                         expires: int) -> None:
+        live = self._forge_open_offers()
+        live[offer_id] = {"chain": chain, "give": give, "take": take,
+                          "expires": expires}
+        _atomic_write_json(self.forge_open_path, live)
+
+    def _forge_mark_settled(self, offer_id: str) -> None:
+        live = self._forge_open_offers()
+        if live.pop(offer_id, None) is not None:
+            _atomic_write_json(self.forge_open_path, live)
+
+    def _forge_refuse_if_open(self, chain: str, give: str, take: str) -> None:
+        for offer_id, o in self._forge_open_offers().items():
+            if (o.get("chain"), o.get("give"), o.get("take")) == (chain, give, take):
+                raise chia.SageError(
+                    f"an earlier Forge offer for this pair ({offer_id}) may still "
+                    f"fill until {o['expires']} (unix); wait for it to expire, "
+                    "confirm it with forge_status, or cancel it with offer_cancel")
+
+    @staticmethod
+    def _forge_display(intent, pick_out: int) -> dict:
+        """The quote's figures for the approval card, typed and bounded: these
+        come from the router, so they are information, never a guarantee."""
+        def num(v):
+            return v if isinstance(v, int) and not isinstance(v, bool) and abs(v) < 10**12 else None
+
+        def hops(items, limit=8):
+            out = []
+            for h in (items if isinstance(items, list) else [])[:limit]:
+                if isinstance(h, dict):
+                    out.append({k: h[k] for k in ("pool", "in", "out")
+                                if isinstance(h.get(k), str) and _HEX64.fullmatch(h[k])})
+            return out
+        intent = intent if isinstance(intent, dict) else {}
+        return {"expected_out_mojos": pick_out,
+                "price_impact_bps": num(intent.get("price_impact_bps")),
+                "total_fee_bps": num(intent.get("total_fee_bps")),
+                "route": hops(intent.get("route"))}
+
     def _forge_route(self, chain: str, asset_in: str, asset_out: str,
                      amount_in: int) -> tuple:
-        """Quote from the configured router and keep the best executable
-        Forge route that sells exactly amount_in. Returns (base, pick)."""
+        """Quote from the configured router and keep the executable Forge route
+        paying the most for exactly amount_in. Returns (base, pick)."""
         network = chia.NETWORKS[chain]
         base = forge_mod.responder_for(network, self.chia_cfg)
         forge_mod.check_network(base, network)
@@ -5347,6 +5413,7 @@ class Daemon:
         if chain not in chia.NETWORKS:
             return {"ok": False,
                     "error": f"forge_swap is Chia-only, got {chain!r}"}
+        purpose = p.get("purpose", "")
         try:
             self._chia_offer_guards(p, chain, forge=True)
             give, give_id = self._forge_asset(p["asset_in"])
@@ -5357,8 +5424,10 @@ class Daemon:
             min_out = p["min_amount_out_mojos"]
             for name, n in (("amount_in_mojos", amount_in),
                             ("min_amount_out_mojos", min_out)):
-                if isinstance(n, bool) or not isinstance(n, int) or n <= 0:
-                    raise chia.SageError(f"{name} must be a positive integer")
+                if (isinstance(n, bool) or not isinstance(n, int) or n <= 0
+                        or n > 2 ** 64 - 1):
+                    raise chia.SageError(f"{name} must be a positive integer "
+                                         "within uint64")
             fee = p["fee_mojos"]
             if fee == 0:
                 # R3: a zero fee is refused whenever the mempool is full,
@@ -5366,6 +5435,9 @@ class Daemon:
                 raise chia.SageError(
                     "fee_mojos must be positive: a Forge settlement needs "
                     "at least 5 mojos per unit of cost")
+            if not isinstance(purpose, str) or len(purpose) > 500:
+                raise chia.SageError("purpose must be text, at most 500 chars")
+            self._forge_refuse_if_open(chain, give, take)
         except chia.SageError as e:
             return {"ok": False, "error": str(e)}
         try:
@@ -5385,55 +5457,64 @@ class Daemon:
                 network, None, puzzle_hashes, index_for_ph)
         except chia_sign.ChiaSignError as e:
             return {"ok": False, "error": str(e)}
-        intent = pick["intent"] or {}
         params = {"intent": "forge_swap", "chain": chain,
                   "offered": [{"asset": give, "amount_mojos": amount_in}],
                   "requested": [{"asset": take, "amount_mojos": min_out}],
-                  "fee_mojos": fee, "purpose": p.get("purpose", ""),
+                  "fee_mojos": fee, "purpose": purpose,
                   "receive_address": recv, "_receive_ph": receive_ph.hex(),
-                  # What the human is shown: the route the daemon found
-                  # itself, from the router in its own config. Execution
-                  # quotes again and holds the approved bounds above.
-                  "_forge": {"responder": base, "network": network,
-                             "quoted_at": int(time.time()),
-                             "expected_out_mojos": pick["amount_out"],
-                             "price_impact_bps": intent.get("price_impact_bps"),
-                             "total_fee_bps": intent.get("total_fee_bps"),
-                             "route": intent.get("route"),
-                             "branches": intent.get("branches")}}
+                  # What the human is shown beside the bounds: the router in
+                  # the daemon's own config and what its quote said. Execution
+                  # quotes again and holds only the approved bounds above.
+                  "_forge": dict(self._forge_display(pick["intent"],
+                                                     pick["amount_out"]),
+                                 responder=base, network=network,
+                                 quoted_at=int(time.time()))}
         entries = self._velocity_entries(params)
         return self._run_fund_intent(params, muse_id, entries, "forge_swap")
 
     def rt_forge_status(self, p: dict, muse_id: str) -> dict:
-        """Read-only: has an approved Forge swap landed? Asks the configured
-        router; `confirmed` only with proof "pre-trade tips spent" (R8)."""
-        if not set(p).issubset(FORGE_STATUS_FIELDS) or "chain" not in p:
+        """Read-only: has an approved Forge swap landed? `confirmed` needs BOTH
+        the wallet's own offer completed in Sage and the router's proof that
+        the pool coins it built on are spent (R8): spent pool coins alone could
+        be another trader's swap."""
+        if not set(p).issubset(FORGE_STATUS_FIELDS) or not {"chain", "offer_id"} <= set(p):
             return {"ok": False,
-                    "error": "schema violation: forge_status needs chain, watch"}
-        chain = p["chain"]
-        watch = p.get("watch")
-        if chain not in chia.NETWORKS or not isinstance(watch, dict):
-            return {"ok": False, "error": "forge_status needs a Chia chain "
-                                          "and the watch a swap returned"}
+                    "error": "schema violation: forge_status needs chain, "
+                             "offer_id and the watch the swap returned"}
+        chain, offer_id, watch = p["chain"], p["offer_id"], p.get("watch")
+        if chain not in chia.NETWORKS or not isinstance(offer_id, str):
+            return {"ok": False, "error": "forge_status needs a Chia chain and "
+                                          "the offer_id the swap returned"}
         try:
-            base = forge_mod.responder_for(chia.NETWORKS[chain], self.chia_cfg)
-            answer = forge_mod.status(base, watch)
-        except forge_mod.ForgeError as e:
-            return {"ok": False, "error": str(e)}
-        return {"ok": True, "confirmed": answer["confirmed"],
-                "proof": answer.get("proof"),
-                "pools": answer.get("pools")}
+            rpc, _, _ = self._chia_sage_rpc(chain)
+            record = rpc.get_offer(offer_id)
+        except chia.SageError as e:
+            return {"ok": False, "error": f"offer {offer_id}: {e}"}
+        offer_status = record.get("status") if isinstance(record, dict) else None
+        tips = {"tips_spent": False, "proof": None, "detail": None}
+        if isinstance(watch, dict):
+            try:
+                base = forge_mod.responder_for(chia.NETWORKS[chain], self.chia_cfg)
+                tips = forge_mod.status(base, watch)
+            except forge_mod.ForgeError as e:
+                tips = {"tips_spent": False, "proof": None, "detail": str(e)}
+        confirmed = offer_status == "completed" and tips["tips_spent"]
+        if offer_status in ("completed", "cancelled", "expired"):
+            self._forge_mark_settled(offer_id)
+        return {"ok": True, "confirmed": confirmed, "offer_status": offer_status,
+                "pool_tips_spent": tips["tips_spent"], "proof": tips["proof"],
+                "detail": tips["detail"]}
 
     def _execute_forge_swap(self, params: dict) -> dict:
         """Execute an approved Forge swap.
 
-        Order matters and every step can stop the swap with nothing spent:
-        guards and re-validated bounds; a fresh quote from the router in the
-        CURRENT config, which must be the router the human saw and must
-        still pay at least the approved minimum; Sage makes the offer (own
-        coins, own payee, short expiry); a dry-run rehearsal; then one live
-        settle. A settle whose outcome is unknown raises BroadcastUnknown
-        with what to watch — the offer is never sent twice (R6, R9).
+        Before the offer exists, every refusal is clean: guards and bounds;
+        no open offer for the pair; a fresh quote from the router in the
+        CURRENT config, which must be the router the human saw and must still
+        pay at least the approved minimum. After Sage makes the offer (own
+        coins, own payee, short expiry), nothing short of a proven settle is
+        a clean failure: the offer is recorded open and any other outcome is
+        BroadcastUnknown — velocity consumed, never resent (R6, R9).
         """
         chain = params["chain"]
         self._chia_offer_guards(params, chain, forge=True)
@@ -5446,6 +5527,7 @@ class Daemon:
         _, take_id = self._forge_asset(take)
         fee = params.get("fee_mojos", 0)
         approved_on = (params.get("_forge") or {}).get("responder")
+        self._forge_refuse_if_open(chain, give, take)
         try:
             base, pick = self._forge_route(chain, give_id, take_id, amount_in)
         except forge_mod.ForgeError as e:
@@ -5468,36 +5550,42 @@ class Daemon:
             fee_mojos=fee, receive_address=params.get("receive_address"),
             expires_at_second=expires)
         offer_id, offer = made["offer_id"], made["offer"]
-        unsettled = (f"offer {offer_id} was made but not settled; it expires "
-                     f"at {expires} (unix), or cancel it now with offer_cancel")
-        body = dict(pick["settlement_body"])
-        body["offer"] = offer
+        # From here the offer exists and is about to leave the machine.
+        self._forge_mark_open(offer_id, chain, give, take, expires)
+        open_note = (f"offer {offer_id} may still be filled by whoever holds "
+                     f"it until {expires} (unix); it is recorded open, so this "
+                     "pair waits until it expires, forge_status shows it "
+                     "settled, or offer_cancel cancels it on chain")
+
+        def unknown(msg, txid=None, watch=None):
+            err = chia.BroadcastUnknown(txid or offer_id, f"forge_swap: {msg} — {open_note}")
+            err.watch = watch
+            return err
+
+        body = pick["settlement_body"]
+        body = dict(body, offer=offer)
         try:
-            rehearsal = forge_mod.settle(base, dict(body, dry_run=True))
-        except forge_mod.ForgeError as e:
-            raise chia.SageError(f"forge_swap: {e} — {unsettled}") from e
-        cost = (rehearsal.get("result") or {}).get("cost")
-        if isinstance(cost, int) and cost > 0 and fee < 5 * cost:
-            raise chia.SageError(
-                f"forge_swap: fee {fee} is under the node's floor for this "
-                f"settlement (5 x cost {cost} = {5 * cost}) — re-request with "
-                f"a higher fee_mojos; {unsettled}")
-        try:
-            live = forge_mod.settle(base, body)
+            rehearsal = forge_mod.settle(base, body, dry_run=True)
+            result = rehearsal.get("result")
+            cost = result.get("cost") if isinstance(result, dict) else None
+            if (isinstance(cost, int) and not isinstance(cost, bool)
+                    and cost > 0 and fee < 5 * cost):
+                raise forge_mod.ForgeError(
+                    f"fee {fee} is under the node's floor for this settlement "
+                    f"(5 x cost {cost} = {5 * cost}); re-request with a higher "
+                    "fee_mojos once this offer is closed")
+            live = forge_mod.settle(base, body, dry_run=False)
         except forge_mod.ForgeAmbiguous as e:
-            unknown = chia.BroadcastUnknown(
-                e.transaction_id or offer_id,
-                f"forge_swap: {e}. Do not re-request: poll forge_status with "
-                f"the watch. The offer expires at {expires} (unix).")
-            unknown.watch = e.watch
-            raise unknown from e
+            raise unknown(str(e), e.transaction_id, e.watch) from e
         except forge_mod.ForgeError as e:
-            raise chia.SageError(f"forge_swap: {e} — {unsettled}") from e
-        return {"submitted": True, "tx_hash": live.get("transaction_id"),
+            raise unknown(str(e)) from e
+        except Exception as e:  # noqa: BLE001 — the offer has left: never a clean failure
+            raise unknown(f"unexpected answer from the Forge router: {e!r}") from e
+        return {"submitted": True, "tx_hash": live["transaction_id"],
                 "offer_id": offer_id, "watch": live.get("watch"),
                 "amount_out_mojos": amount_out,
                 "note": "settled through the Forge; in the mempool — poll "
-                        "forge_status with the watch until confirmed"}
+                        "forge_status with offer_id and watch until confirmed"}
 
     def rt_offer_take(self, p: dict, muse_id: str) -> dict:
         fields = set(p)
@@ -6581,7 +6669,10 @@ class Daemon:
                     "price_impact_bps": forge.get("price_impact_bps"),
                     "total_fee_bps": forge.get("total_fee_bps"),
                     "route": forge.get("route"),
-                    "branches": forge.get("branches"),
+                    # Only give / take_at_least bind: the figures above are
+                    # the router's, typed and bounded, for information.
+                    "guarantee": "give exactly `give`; receive at least "
+                                 "`take_at_least` or nothing settles",
                     "offer_ttl_seconds": self._forge_offer_ttl(),
                     "receive_address": p.get("receive_address"),
                     "receive_ph": p.get("_receive_ph"),

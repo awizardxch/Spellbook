@@ -346,11 +346,15 @@ class AgentClient(_BaseClient):
             "min_amount_out_mojos": min_amount_out_mojos,
             "fee_mojos": fee_mojos, "purpose": purpose})
 
-    def forge_status(self, *, chain: str, watch: dict) -> dict:
+    def forge_status(self, *, chain: str, offer_id: str,
+                     watch: dict | None = None) -> dict:
         """Has an approved Forge swap landed? ``confirmed`` is true only when
-        the pool coins it spent are spent on chain. Never re-request a swap
-        because this is still false."""
-        return self._call("forge_status", {"chain": chain, "watch": watch})
+        Sage shows the swap's own offer completed AND the pool coins it built
+        on are spent. Never re-request a swap because this is still false."""
+        params = {"chain": chain, "offer_id": offer_id}
+        if watch is not None:
+            params["watch"] = watch
+        return self._call("forge_status", params)
 
     def offer_take(self, *, chain: str, offer: str, fee_mojos: int = 0,
                    purpose: str = "") -> dict:

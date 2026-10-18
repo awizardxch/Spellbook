@@ -14,7 +14,7 @@ Request-token commands (the agent's side):
   spellbook offer-cancel --chain chia-testnet --offer-id <id> [--offer-id <id>...]
   spellbook forge-swap --chain chia-testnet --asset-in native --asset-out <cat> \
       --amount-in-mojos N --min-amount-out-mojos M --fee-mojos F
-  spellbook forge-status --chain chia-testnet --watch '<watch json>'
+  spellbook forge-status --chain chia-testnet --offer-id <id> --watch '<watch json>'
   spellbook chia-read --chain chia-testnet --op get_offers
   spellbook nft-mint --chain chia-testnet --did-id did:chia:1... --mint '{...}'
   spellbook did-create --chain chia-testnet --name my-did
@@ -487,7 +487,8 @@ def cmd_forge_swap(a, client: AgentClient):
 
 
 def cmd_forge_status(a, client: AgentClient):
-    _show(client.forge_status(chain=a.chain, watch=json.loads(a.watch)))
+    _show(client.forge_status(chain=a.chain, offer_id=a.offer_id,
+                              watch=json.loads(a.watch) if a.watch else None))
 
 
 def cmd_offer_take(a, client: AgentClient):
@@ -1014,7 +1015,8 @@ def main(argv=None):
     fst = sub.add_parser("forge-status",
                          help="has an approved Forge swap landed?")
     fst.add_argument("--chain", required=True)
-    fst.add_argument("--watch", required=True,
+    fst.add_argument("--offer-id", required=True)
+    fst.add_argument("--watch", default=None,
                      help="the watch object the swap returned, as JSON")
 
     tk = sub.add_parser("offer-take")

@@ -62,7 +62,7 @@ against. Every rule here was exercised against the hosted responder on
 | R4 | Rehearse with `dry_run: true` first and require `success: true`. A dry run also repairs a stale hosted pool record (auto-resync runs in preflight), so it is the cheapest way to make the next quote true. | A refused rehearsal costs nothing; a refused live settle after signing costs a re-quote. |
 | R5 | Treat the live answer by its `success` field, not its status code: `202 success:true pending:true` is a landed push. | This was the review's finding 03; the first version of the route got it wrong. |
 | R6 | On `success:false` with `ambiguous: true` (503, `FORGE_PUSH_PENDING`, or a push timeout): do **not** re-quote, re-sign or resubmit. Poll status with the `watch` the response carries until confirmed, or until the pre-trade tips are still unspent after ~30 minutes. The first live settle through this route came back exactly so and landed eleven blocks later. | A second bundle from fresh coins is a second trade. |
-| R7 | On `success:false` without `ambiguous` (409 pool pays X, trader asks Y, 422, 400): the offer will never settle; the coins are still the agent's; quote again. | The lanes recompute against the chain and refuse over-asks. |
+| R7 | On `success:false` without `ambiguous` (409 pool pays X, trader asks Y, 422, 400): this router did not settle it, but the signed offer is still valid in whoever's hands it reached, until it expires or is cancelled on chain. Treat it as open: do not make a second offer for the same trade until the first has expired or been cancelled. | The lanes recompute against the chain and refuse over-asks; a refusal does not unsign the offer (review 2026-10-17, finding 1). |
 | R8 | Poll status with the **whole** `watch` object. `confirmed: true` with `proof: "pre-trade tips spent"` is the proof; `"indexed tips exist"` alone is not (it is true the moment the push is accepted). | The index leads the chain by design. |
 | R9 | Never send the same offer twice. | Same coins, same nonce: a double spend at best, a confusing refusal at worst. |
 
@@ -116,17 +116,27 @@ any of them is refused. What the daemon does with it, in order:
 4. **Sage makes the offer** through the `offer_make` path: give exactly
    `amount_in`, ask for the fresh quote's amount (at least the minimum),
    paid to the approved receive address, balance-checked, expiring after
-   `chia.forge_offer_ttl_seconds` (default 600). A refused or unsettled
-   offer dies on its own.
-5. **Rehearse** (`dry_run: true`, R4). A refusal stops here. The fee must
-   be at least 5 x the rehearsal's measured cost (R3).
-6. **Settle once** (R5, R9). `202 success:true` returns the transaction id,
-   the offer id and `watch`. An ambiguous answer (`FORGE_PUSH_PENDING`,
-   `ambiguous: true`, any 5xx, no answer) is `approved-submit-unknown` with
-   the `watch`, velocity consumed fail-closed, never resent (R6). A 4xx is a
-   definite refusal (R7).
-7. **Watch** with `forge_status {chain, watch}`; `confirmed` is true only
-   with `proof: "pre-trade tips spent"` (R8).
+   `chia.forge_offer_ttl_seconds` (default 600). **From this point the
+   signed offer can be filled by whoever holds it until it expires**: the
+   rehearsal hands it to the router. So the offer is recorded open
+   (`forge_open.json`), and a second swap of the same pair is refused until
+   it expires, `forge_status` shows it completed, or the human cancels it
+   on chain (`offer_cancel`).
+5. **Rehearse** (`dry_run: true`, R4). The fee must be at least 5 x the
+   rehearsal's measured cost (R3).
+6. **Settle once** (R5, R9). Only the lane keys of the quote's
+   `settlement.body` are sent (`launcher_id(s)`, `path`, `branches`,
+   `swap_launcher_id`, `vault_launcher_id`), with `dry_run` set by the
+   daemon. `success:true`, not a dry run, with a transaction id, returns the
+   transaction id, the offer id and `watch`. **Every other outcome after the
+   offer exists** (a refused rehearsal, a fee under the floor, a 4xx, an
+   ambiguous answer, a malformed one) is `approved-submit-unknown`:
+   velocity consumed fail-closed, the offer recorded open, never resent
+   (R6, R7 as amended below).
+7. **Watch** with `forge_status {chain, offer_id, watch}`. `confirmed` needs
+   both the wallet's own offer `completed` in Sage and the router's
+   `proof: "pre-trade tips spent"` (R8): spent pool coins alone could be
+   another trader's swap.
 
 The Forge charges its router fee off the pool's payout, so the offer
 receives exactly what it asks for; anything above that and the rate's fee

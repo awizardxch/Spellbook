@@ -32,6 +32,7 @@ NATIVE = "0" * 64
 POOL = "aa" * 32
 TESTNET_ROUTER = forge_mod.DEFAULT_RESPONDERS["testnet11"]
 FEE = 6_000_000_000
+TXID = "ab" * 32
 
 
 def _quote(amount_in=2_000_000, amount_out=600, executable=True, give=NATIVE,
@@ -78,8 +79,8 @@ class _Router:
             return step
         if body.get("dry_run"):
             return 200, {"success": True, "dry_run": True,
-                         "result": {"transaction_id": "tx" * 32, "cost": 900_000_000}}
-        return 202, {"success": True, "pending": True, "transaction_id": "tx" * 32,
+                         "result": {"transaction_id": TXID, "cost": 900_000_000}}
+        return 202, {"success": True, "pending": True, "transaction_id": TXID,
                      "watch": {"launcher_ids": [POOL], "spent_coin_ids": ["ee" * 32]}}
 
 
@@ -140,12 +141,15 @@ def test_pick_quote_takes_only_an_exact_executable_forge_route():
     answer = {"quotes": [
         _quote(executable=False, amount_out=999),
         _quote(amount_in=1_999_999, amount_out=998),             # sells another amount
-        _quote(amount_out=997, body={"launcher_id": POOL, "offer": "x"}),  # pre-filled
         _quote(amount_out=996, take=NATIVE),                     # wrong asset out
         _quote(amount_out=600),
+        # The router's own "offer" is dropped with every other non-lane key;
+        # the daemon adds its wallet's offer. The best payer wins.
+        _quote(amount_out=700, body={"launcher_id": POOL, "offer": "x"}),
+        _quote(amount_out=650),
     ]}
     pick = forge_mod.pick_quote(answer, NATIVE, CAT, 2_000_000)
-    assert pick["amount_out"] == 600
+    assert pick["amount_out"] == 700
     assert pick["settlement_body"] == {"launcher_id": POOL}
     assert forge_mod.pick_quote({"quotes": []}, NATIVE, CAT, 1) is None
 
@@ -160,26 +164,72 @@ def test_settle_is_sent_once_and_classified_by_its_answer():
                 raise answer
             return answer
         try:
-            out = forge_mod.settle("https://r", {"launcher_id": POOL, "offer": "o",
-                                                 **({"dry_run": True} if dry else {})},
-                                   send=send)
+            out = forge_mod.settle("https://r", {"launcher_id": POOL, "offer": "o"},
+                                   dry_run=dry, send=send)
         except forge_mod.ForgeError as e:
             out = e
         assert len(calls) == 1, "a settle is never retried"
+        assert calls[0]["dry_run"] is dry, "dry_run is always set by the daemon"
         return out
 
-    assert run((202, {"success": True, "transaction_id": "t"}))["transaction_id"] == "t"
+    assert run((202, {"success": True, "transaction_id": TXID}))["transaction_id"] == TXID
     refused = run((409, {"success": False, "error": "pool pays 5, trader asks 6"}))
     assert type(refused) is forge_mod.ForgeError
     pending = run((503, {"success": False, "ambiguous": True, "code": "FORGE_PUSH_PENDING",
-                         "transaction_id": "t", "watch": {"launcher_ids": [POOL]}}))
+                         "transaction_id": TXID, "watch": {"launcher_ids": [POOL]}}))
     assert isinstance(pending, forge_mod.ForgeAmbiguous)
-    assert pending.transaction_id == "t" and pending.watch == {"launcher_ids": [POOL]}
+    assert pending.transaction_id == TXID and pending.watch == {"launcher_ids": [POOL]}
     assert isinstance(run((502, None)), forge_mod.ForgeAmbiguous), "a live 5xx may have pushed"
     assert isinstance(run(TimeoutError("read timed out")), forge_mod.ForgeAmbiguous)
+    assert isinstance(run((302, None)), forge_mod.ForgeAmbiguous), "a redirect is not a refusal"
+    # "Success" without a pushed transaction is not a settle (review finding 2).
+    assert isinstance(run((200, {"success": True, "dry_run": True, "transaction_id": TXID})),
+                      forge_mod.ForgeAmbiguous)
+    assert isinstance(run((202, {"success": True})), forge_mod.ForgeAmbiguous)
     # A rehearsal pushes nothing: its failures are plain refusals.
     assert type(run(TimeoutError("x"), dry=True)) is forge_mod.ForgeError
     assert type(run((500, None), dry=True)) is forge_mod.ForgeError
+
+
+def test_only_lane_keys_reach_the_settle_body():
+    answer = {"quotes": [_quote(body={"launcher_id": POOL, "dry_run": True,
+                                      "display_on_dexie": True, "offer": "x"})]}
+    assert forge_mod.pick_quote(answer, NATIVE, CAT, 2_000_000)["settlement_body"] == {
+        "launcher_id": POOL}
+    assert forge_mod.pick_quote({"quotes": [_quote(body={"x": 1})]}, NATIVE, CAT, 2_000_000) is None
+
+
+def test_pick_quote_survives_malformed_router_json():
+    for answer in ({"quotes": "x"}, {"quotes": [{"executable": True, "settlement": "x",
+                                                 "intent": "y"}]},
+                   {"quotes": [dict(_quote(), intent={"offer": "x", "request": []})]},
+                   {"quotes": [dict(_quote(), executable="yes")]}, [], None):
+        assert forge_mod.pick_quote(answer, NATIVE, CAT, 2_000_000) is None
+    huge = _quote(amount_out=str(2 ** 64))
+    assert forge_mod.pick_quote({"quotes": [huge]}, NATIVE, CAT, 2_000_000) is None
+
+
+def test_redirects_are_answers_not_followed():
+    import http.server
+    import threading
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(302)
+            self.send_header("Location", "http://127.0.0.1:1/elsewhere")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+    srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+    t = threading.Thread(target=srv.handle_request, daemon=True)
+    t.start()
+    try:
+        status, payload = forge_mod._send(
+            "GET", f"http://127.0.0.1:{srv.server_port}/api/v1/agent/markets", None, 5)
+    finally:
+        srv.server_close()
+    assert status == 302 and payload is None
 
 
 def test_reads_retry_gateway_errors_but_not_refusals(monkeypatch):
@@ -197,11 +247,15 @@ def test_reads_retry_gateway_errors_but_not_refusals(monkeypatch):
     assert len(calls) == 1
 
 
-def test_status_confirms_only_on_spent_tips():
+def test_status_reports_tips_not_confirmation():
     def read(method, url, body=None):
         assert body == {"launcher_ids": [POOL], "spent_coin_ids": []}
-        return {"success": True, "confirmed": True, "proof": "indexed tips exist"}
-    assert forge_mod.status("https://r", {"launcher_ids": [POOL]}, read=read)["confirmed"] is False
+        return {"success": True, "confirmed": True, "proof": "indexed tips exist",
+                "detail": [{"launcher_id": POOL}]}
+    out = forge_mod.status("https://r", {"launcher_ids": [POOL, "junk"]}, read=read)
+    assert out["tips_spent"] is False and out["detail"] == [{"launcher_id": POOL}]
+    with pytest.raises(forge_mod.ForgeError):
+        forge_mod.status("https://r", {"launcher_ids": "x"}, read=read)
 
 
 # ---------------------------------------------------------------- request
@@ -280,6 +334,7 @@ def test_mainnet_needs_the_separate_flag(forge_daemon):
 def test_approve_makes_the_offer_rehearses_and_settles_once(forge_daemon):
     d, fake, router = forge_daemon
     qid = _queued(d, router)
+    approved = d.queue[qid]["params"]["receive_address"]
     router.quotes = [_quote(amount_out=640)]       # the fresh quote pays more
     before = int(time.time())
     out = d.rt_queue_approve({"queue_id": qid}, "human")
@@ -288,23 +343,15 @@ def test_approve_makes_the_offer_rehearses_and_settles_once(forge_daemon):
     assert offered == [{"asset": "native", "amount_mojos": 2_000_000}]
     assert requested == [{"asset": CAT, "amount_mojos": 640}], "asks the fresh quote"
     assert fee == FEE
-    assert fake.last_make["receive_address"] == d.queue.get(qid, {}).get(
-        "params", {}).get("receive_address", fake.last_make["receive_address"])
+    assert fake.last_make["receive_address"] == approved, "pays this wallet"
     expires = fake.last_make["expires_at_second"]
     assert before + 120 <= expires <= int(time.time()) + 600
-    assert [s.get("dry_run") for s in router.settles] == [True, None]
-    assert all(s["offer"] == "OFFERoid1" and s["launcher_id"] == POOL for s in router.settles)
-    assert out["tx_hash"] == "tx" * 32 and out["offer_id"] == "oid1"
+    assert [s["dry_run"] for s in router.settles] == [True, False]
+    assert all(s == {"launcher_id": POOL, "offer": "OFFERoid1", "dry_run": s["dry_run"]}
+               for s in router.settles)
+    assert out["tx_hash"] == TXID and out["offer_id"] == "oid1"
     assert out["watch"]["spent_coin_ids"] == ["ee" * 32]
     assert d.spent_last_24h("chia-testnet", "native") == 2_000_000 + FEE
-
-
-def test_offer_pays_this_wallets_own_address(forge_daemon):
-    d, fake, router = forge_daemon
-    qid = _queued(d, router)
-    approved = d.queue[qid]["params"]["receive_address"]
-    d.rt_queue_approve({"queue_id": qid}, "human")
-    assert fake.last_make["receive_address"] == approved
 
 
 def test_execution_refuses_below_the_approved_minimum(forge_daemon):
@@ -314,6 +361,7 @@ def test_execution_refuses_below_the_approved_minimum(forge_daemon):
     out = d.rt_queue_approve({"queue_id": qid}, "human")
     assert out["ok"] is False and "below the approved minimum" in out["error"]
     assert fake.made == [] and router.settles == []
+    assert d._forge_open_offers() == {}
 
 
 def test_execution_refuses_a_router_changed_since_approval(forge_daemon):
@@ -325,14 +373,23 @@ def test_execution_refuses_a_router_changed_since_approval(forge_daemon):
     assert fake.made == [] and router.settles == []
 
 
-def test_refused_rehearsal_never_goes_live(forge_daemon):
+def _assert_left_open(d, router, out, settles):
+    """Review finding 1: once the offer has left, any outcome short of a
+    proven settle is unknown, counted, and blocks a second swap of the pair."""
+    assert out["decision"] == "approved-submit-unknown", out
+    assert "oid1" in out["note"] and "offer_cancel" in out["note"]
+    assert len(router.settles) == settles
+    assert d.spent_last_24h("chia-testnet", "native") == 2_000_000 + FEE
+    assert "oid1" in d._forge_open_offers()
+    again = d.rt_forge_swap(_swap(), "muse")
+    assert again["ok"] is False and "oid1" in again["error"]
+
+
+def test_refused_rehearsal_leaves_the_offer_open(forge_daemon):
     d, fake, router = forge_daemon
     qid = _queued(d, router)
     router.settle_script = [(409, {"success": False, "error": "pool pays 5, trader asks 6"})]
-    out = d.rt_queue_approve({"queue_id": qid}, "human")
-    assert out["ok"] is False and "expires at" in out["error"]
-    assert len(router.settles) == 1
-    assert d.spent_last_24h("chia-testnet", "native") == 0
+    _assert_left_open(d, router, d.rt_queue_approve({"queue_id": qid}, "human"), 1)
 
 
 def test_fee_under_the_node_floor_never_goes_live(forge_daemon):
@@ -341,8 +398,17 @@ def test_fee_under_the_node_floor_never_goes_live(forge_daemon):
     router.settle_script = [(200, {"success": True, "dry_run": True,
                                    "result": {"cost": 2_000_000_000}})]
     out = d.rt_queue_approve({"queue_id": qid}, "human")
-    assert out["ok"] is False and "floor" in out["error"]
-    assert len(router.settles) == 1
+    assert "floor" in out["note"]
+    _assert_left_open(d, router, out, 1)
+
+
+def test_malformed_rehearsal_is_unknown_not_a_crash(forge_daemon):
+    d, fake, router = forge_daemon
+    qid = _queued(d, router)
+    router.settle_script = [(200, {"success": True, "result": "ok"}),
+                            (202, "not json")]
+    out = d.rt_queue_approve({"queue_id": qid}, "human")
+    _assert_left_open(d, router, out, 2)
 
 
 def test_ambiguous_settle_is_unknown_with_its_watch_and_not_resent(forge_daemon):
@@ -351,30 +417,57 @@ def test_ambiguous_settle_is_unknown_with_its_watch_and_not_resent(forge_daemon)
     watch = {"launcher_ids": [POOL], "spent_coin_ids": ["ee" * 32]}
     router.settle_script = [None, (503, {"success": False, "ambiguous": True,
                                          "code": "FORGE_PUSH_PENDING",
-                                         "transaction_id": "tx" * 32, "watch": watch})]
+                                         "transaction_id": TXID, "watch": watch})]
     out = d.rt_queue_approve({"queue_id": qid}, "human")
-    assert out["decision"] == "approved-submit-unknown"
-    assert out["tx_hash"] == "tx" * 32 and out["watch"] == watch
-    assert len(router.settles) == 2, "rehearsal + one live settle, never a resend"
-    # Velocity is consumed fail-closed: the trade may have landed.
-    assert d.spent_last_24h("chia-testnet", "native") == 2_000_000 + FEE
+    assert out["tx_hash"] == TXID and out["watch"] == watch
+    _assert_left_open(d, router, out, 2)
     assert d.rt_queue_approve({"queue_id": qid}, "human")["ok"] is False
 
 
-def test_live_refusal_is_definite(forge_daemon):
+def test_live_refusal_leaves_the_offer_open(forge_daemon):
     d, fake, router = forge_daemon
     qid = _queued(d, router)
     router.settle_script = [None, (409, {"success": False, "error": "pool pays 5, trader asks 6"})]
+    _assert_left_open(d, router, d.rt_queue_approve({"queue_id": qid}, "human"), 2)
+
+
+def test_open_offer_expires_and_frees_the_pair(forge_daemon, monkeypatch):
+    d, fake, router = forge_daemon
+    qid = _queued(d, router)
+    router.settle_script = [None, (409, {"success": False, "error": "refused"})]
+    d.rt_queue_approve({"queue_id": qid}, "human")
+    later = time.time() + 3601
+    monkeypatch.setattr(time, "time", lambda: later)
+    assert d._forge_open_offers() == {}
+    assert d.rt_forge_swap(_swap(), "muse")["decision"] == "queued"
+
+
+def test_forge_status_needs_the_wallets_own_offer_completed(forge_daemon):
+    d, fake, router = forge_daemon
+    qid = _queued(d, router)
     out = d.rt_queue_approve({"queue_id": qid}, "human")
-    assert out["ok"] is False and "refused" in out["error"]
-    decisions = [r["decision"] for r in d.ledger.read_all()]
-    assert any(x.startswith("approved-submit-failed") for x in decisions)
-
-
-def test_forge_status_route(forge_daemon):
-    d, _, router = forge_daemon
-    watch = {"launcher_ids": [POOL], "spent_coin_ids": ["ee" * 32]}
-    assert d.rt_forge_status({"chain": "chia-testnet", "watch": watch}, "m")["confirmed"] is True
+    st = {"chain": "chia-testnet", "offer_id": out["offer_id"], "watch": out["watch"]}
+    # Pool tips spent, but the wallet's own offer not completed: another
+    # trader's swap could have spent them (review finding 4).
+    res = d.rt_forge_status(st, "m")
+    assert res["pool_tips_spent"] is True and res["confirmed"] is False
+    fake.records["oid1"]["status"] = "completed"
+    res = d.rt_forge_status(st, "m")
+    assert res["confirmed"] is True and res["offer_status"] == "completed"
     router.status_answer = {"success": True, "confirmed": True, "proof": "indexed tips exist"}
-    assert d.rt_forge_status({"chain": "chia-testnet", "watch": watch}, "m")["confirmed"] is False
-    assert d.rt_forge_status({"chain": "chia-testnet", "watch": watch, "x": 1}, "m")["ok"] is False
+    assert d.rt_forge_status(st, "m")["confirmed"] is False
+    assert d.rt_forge_status({"chain": "chia-testnet", "watch": out["watch"]}, "m")["ok"] is False
+    assert d.rt_forge_status(dict(st, x=1), "m")["ok"] is False
+
+
+def test_approval_card_fields_are_typed(forge_daemon):
+    d, fake, router = forge_daemon
+    q = _quote()
+    q["intent"].update(price_impact_bps="0 (trust me)", total_fee_bps=10**20,
+                       route=[{"pool": "<b>", "in": NATIVE, "out": CAT}, "x"] * 10)
+    router.quotes = [q]
+    qid = _queued(d, router)
+    item = next(i for i in d._decoded_queue() if i["queue_id"] == qid)
+    assert item["price_impact_bps"] is None and item["total_fee_bps"] is None
+    assert len(item["route"]) <= 8
+    assert all(set(h) <= {"pool", "in", "out"} and "pool" not in h for h in item["route"])
