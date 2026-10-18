@@ -1790,6 +1790,16 @@ verify, install locally — per muse, per D1.
   never cached (#47); approve client waits out the execution window (#49).
   Release tags are bare `X.Y.Z` (what `spellbook-upgrade` accepts).
 
+- 2026-10-18 — release v0.3.3. Security review 2026-10-15 rounds 1–3 (PRs
+  111, 113, 114): Sage leaf pin, identity seed refused as KDF root, release
+  acceptance on canonical main past a 24 h window, the daemon user owns the
+  ceremony key, forced proven backup (BACKUP PENDING; pre-0.3.3 installs
+  read `legacy` and keep working with a warning), hosted ceremony pages; and
+  `forge_swap` / `forge_status` (PR 115, §4; live-tested on testnet11). A
+  0.3.2 machine takes it once by hand: `bash install.sh --upgrade 0.3.3` as
+  root. After-upgrade steps: docs/AGENT_LIFECYCLE.md "0.3.3"; the Sage pin
+  is unchanged, so the 0.3.2 prebuilt binary is reused.
+
 - 2026-09-28 — release v0.3.2. Prebuilt Sage binary: on linux-x86_64,
   install.sh downloads a release-signed `sage` binary (SHA-256 + release-key
   signature verified exactly like the release tarball) instead of the 20+
