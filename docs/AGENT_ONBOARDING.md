@@ -1039,14 +1039,40 @@ human-approval flow (the human still approves each trade's bounds).
 
 ## 9b. Trading on the Forge (Chia)
 
-Swapping XCH/CATs through the Forge DEX (forge.awizard.dev, testnet11) is
-a different lane from §9's EVM DEX trading. The agent-facing spec —
-sequence, rules R1–R9, the `forge_swap` intent proposal, and the
-acceptance tests T1–T9 (exercised against the hosted responder on
-2026-09-26) — lives in [docs/FORGE_SWAP.md](FORGE_SWAP.md). Read it before
-writing any Forge trading code. The responder's own `docs/FORGE_AGENT_API.md`
-is authoritative for the API's semantics; the Spellbook doc states the
-agent's obligations and what the daemon must enforce.
+Swapping XCH/CATs through the Forge DEX (forge.awizard.dev; mainnet and
+testnet11) is a different lane from §9's EVM DEX trading. Since 0.3.3 it
+is one intent, `forge_swap`, and you send **bounds only**:
+
+```
+spellbook forge-swap --chain chia-mainnet|chia-testnet \
+  --asset-in native|<64-hex CAT> --asset-out native|<64-hex CAT> \
+  --amount-in-mojos N --min-amount-out-mojos M --fee-mojos F --purpose "..."
+spellbook forge-status --chain <chain> --offer-id <id> --watch '<watch json>'
+```
+
+(MCP: `spellbook_forge_swap`, `spellbook_forge_status`.) Do not fetch
+quotes, routes or offers yourself and do not pass a router URL: the daemon
+quotes from the router in its own config, sizes a wallet-built offer at the
+wallet's own fee rate, and **always** queues for the human. On approval Sage
+makes the offer and the daemon settles it once.
+
+**Agent rules:**
+- Pick `--fee-mojos` around `6000000000` (0.006 XCH): the offer pays the
+  network fee for the whole pool settlement, and the node refuses a fee under
+  5 mojos per unit of cost. The cap is `chia.forge_max_fee_mojos` (0.01 XCH).
+- Set `--min-amount-out-mojos` a few percent under what you expect; the
+  approval card shows the daemon's own expected output.
+- An answer of `approved-submit-unknown` means the offer was made and may
+  still fill until it expires (600 s). **Do not re-request** the swap: poll
+  `forge-status` with the `offer_id`, and tell the human; the same pair is
+  refused while that offer is open.
+- `forge-status` `confirmed: true` (Sage shows the offer `completed`) is the
+  proof the trade landed.
+- Mainnet needs the human's `chia.mainnet_submit_enabled`.
+
+The full spec (sequence, rules R1–R9, what the daemon enforces, the live
+testnet11 runs) is [docs/FORGE_SWAP.md](FORGE_SWAP.md); the router's
+`/docs/FORGE_AGENT_API.md` is authoritative for the API.
 
 ## 10. Wallet message signatures (all chains)
 
