@@ -12,6 +12,9 @@ Request-token commands (the agent's side):
   spellbook offer-make --chain chia-testnet --offered native:1000 --requested <cat>:500
   spellbook offer-take --chain chia-testnet --offer <offer-string>
   spellbook offer-cancel --chain chia-testnet --offer-id <id> [--offer-id <id>...]
+  spellbook forge-swap --chain chia-testnet --asset-in native --asset-out <cat> \
+      --amount-in-mojos N --min-amount-out-mojos M --fee-mojos F
+  spellbook forge-status --chain chia-testnet --offer-id <id> --watch '<watch json>'
   spellbook chia-read --chain chia-testnet --op get_offers
   spellbook nft-mint --chain chia-testnet --did-id did:chia:1... --mint '{...}'
   spellbook did-create --chain chia-testnet --name my-did
@@ -473,6 +476,19 @@ def cmd_offer_make(a, client: AgentClient):
         fee_mojos=a.fee_mojos or 0, purpose=a.purpose or "",
         expires_at_second=a.expires_at_second,
         receive_address=a.receive_address))
+
+
+def cmd_forge_swap(a, client: AgentClient):
+    _show(client.forge_swap(
+        chain=a.chain, asset_in=a.asset_in, asset_out=a.asset_out,
+        amount_in_mojos=a.amount_in_mojos,
+        min_amount_out_mojos=a.min_amount_out_mojos,
+        fee_mojos=a.fee_mojos, purpose=a.purpose or ""))
+
+
+def cmd_forge_status(a, client: AgentClient):
+    _show(client.forge_status(chain=a.chain, offer_id=a.offer_id,
+                              watch=json.loads(a.watch) if a.watch else None))
 
 
 def cmd_offer_take(a, client: AgentClient):
@@ -983,6 +999,26 @@ def main(argv=None):
     mk.add_argument("--expires-at-second", type=int, default=None)
     mk.add_argument("--receive-address", default=None)
 
+    fs = sub.add_parser(
+        "forge-swap",
+        help="swap on the Forge (Chia AMM): bounds only; always queued")
+    fs.add_argument("--chain", required=True)
+    fs.add_argument("--asset-in", required=True,
+                    help="'native' or a 64-hex CAT asset id")
+    fs.add_argument("--asset-out", required=True,
+                    help="'native' or a 64-hex CAT asset id")
+    fs.add_argument("--amount-in-mojos", type=int, required=True)
+    fs.add_argument("--min-amount-out-mojos", type=int, required=True)
+    fs.add_argument("--fee-mojos", type=int, required=True)
+    fs.add_argument("--purpose", default="")
+
+    fst = sub.add_parser("forge-status",
+                         help="has an approved Forge swap landed?")
+    fst.add_argument("--chain", required=True)
+    fst.add_argument("--offer-id", required=True)
+    fst.add_argument("--watch", default=None,
+                     help="the watch object the swap returned, as JSON")
+
     tk = sub.add_parser("offer-take")
     tk.add_argument("--chain", required=True)
     tk.add_argument("--offer", required=True)
@@ -1239,6 +1275,7 @@ def main(argv=None):
              "contract-call-view": cmd_contract_call_view,
              "dex-venues": cmd_dex_venues,
              "offer-make": cmd_offer_make, "offer-take": cmd_offer_take,
+             "forge-swap": cmd_forge_swap, "forge-status": cmd_forge_status,
              "offer-cancel": cmd_offer_cancel, "chia-read": cmd_chia_read,
              "nft-mint": cmd_nft_mint,
              "nft-assign-did": cmd_nft_assign_did,

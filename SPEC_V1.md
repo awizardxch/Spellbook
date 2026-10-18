@@ -519,6 +519,33 @@ mTLS cert, or submit transactions.
   per-transaction approval is what authorizes the venue.
 - `GET /v1/dex_venues` → the user's recommended swap venues plus every
   known venue (API-key env var, served chain ids). Read-only.
+- `POST /v1/forge_swap {intent, chain, asset_in, asset_out,
+  amount_in_mojos, min_amount_out_mojos, fee_mojos, purpose?}` → bounded
+  swap on the Forge, the Chia AMM (chia-mainnet / chia-testnet; added
+  2026-10-17, docs/FORGE_SWAP.md). Bounds only: no route, quote, router URL
+  or payee is accepted. The daemon quotes from the router in its config
+  (`chia.forge_responders`, defaulting to the Forge's own; the router must
+  report the right `network`), sizes the best single-pool or split route for
+  a wallet-built offer giving exactly `amount_in_mojos` (the router's
+  `/api/v1/agent/size`, priced at the wallet's own fee rate by its
+  addresses), refuses one paying below the minimum, and
+  queues — always, whatever auto-approve says. On approval it quotes again
+  (same router, at least the approved minimum), Sage makes the offer (own
+  coins, own receive address, expiry `chia.forge_offer_ttl_seconds`,
+  default 600 s), the daemon rehearses it with `dry_run`, checks the fee
+  against the node's floor (5 x the rehearsal's cost), and settles it once.
+  The daemon never signs a spend the router built, and forwards only the
+  lane keys of the router's settlement body. Once the offer exists, any
+  outcome short of a settle with a transaction id is
+  `approved-submit-unknown` (velocity consumed, the offer recorded open in
+  `forge_open.json`, a second swap of the pair refused until it expires or
+  is cancelled), never resent. The fee cap is `chia.forge_max_fee_mojos` (default 0.01 XCH: the
+  offer pays the network fee for the whole pool settlement). Velocity counts
+  the given leg plus the fee.
+- `POST /v1/forge_status {chain, offer_id, watch?}` → has an approved Forge
+  swap landed? `confirmed` when Sage shows the swap's own offer completed
+  (its coins spent by a bundle that paid what it asks); the router's pool
+  check is reported beside it as information. Read-only.
 - `POST /v1/dex_lp_add {intent, chain, protocol, router?, position_manager?,
   permit2?, token_a, token_b, amount_a_wei, amount_b_wei,
   amount_a_min_wei?, amount_b_min_wei?, fee?, tick_lower?, tick_upper?,

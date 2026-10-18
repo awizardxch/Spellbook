@@ -8,9 +8,17 @@ to swap through the Forge, in an order a test run can pass or fail
 against. Every rule here was exercised against the hosted responder on
 2026-09-26; the one live settle that verified it is recorded at the end.
 
-- **Base URL:** the responder, `https://forge-responder.up.railway.app`
-  (never the static site).
-- **Network:** testnet11.
+- **Base URL:** the router for the network, never the static site:
+  mainnet `https://forge-ui-production.up.railway.app`, testnet11
+  `https://forge-responder.up.railway.app`. Each serves the contract at
+  `/docs/FORGE_AGENT_API.md`; `GET /api/v1/agent/markets` names the
+  `network` it serves.
+- **Network:** mainnet (live since 2026-10-09) and testnet11.
+- **Spellbook agents:** use the `forge_swap` intent (below). It takes the
+  wallet-built path: Sage makes the offer, so the daemon never signs a spend
+  the router built, and none of the decoding in "Binding the spends to the
+  intent" is needed. That section stays for programs that hold a bare key
+  and use `build` / `finalize`.
 - **Conventions:** all amounts are whole mojos as decimal strings; all ids
   are hex without `0x`; the native coin is `0000…0000` (`"xch"` is accepted
   on input).
@@ -54,7 +62,7 @@ against. Every rule here was exercised against the hosted responder on
 | R4 | Rehearse with `dry_run: true` first and require `success: true`. A dry run also repairs a stale hosted pool record (auto-resync runs in preflight), so it is the cheapest way to make the next quote true. | A refused rehearsal costs nothing; a refused live settle after signing costs a re-quote. |
 | R5 | Treat the live answer by its `success` field, not its status code: `202 success:true pending:true` is a landed push. | This was the review's finding 03; the first version of the route got it wrong. |
 | R6 | On `success:false` with `ambiguous: true` (503, `FORGE_PUSH_PENDING`, or a push timeout): do **not** re-quote, re-sign or resubmit. Poll status with the `watch` the response carries until confirmed, or until the pre-trade tips are still unspent after ~30 minutes. The first live settle through this route came back exactly so and landed eleven blocks later. | A second bundle from fresh coins is a second trade. |
-| R7 | On `success:false` without `ambiguous` (409 pool pays X, trader asks Y, 422, 400): the offer will never settle; the coins are still the agent's; quote again. | The lanes recompute against the chain and refuse over-asks. |
+| R7 | On `success:false` without `ambiguous` (409 pool pays X, trader asks Y, 422, 400): this router did not settle it, but the signed offer is still valid in whoever's hands it reached, until it expires or is cancelled on chain. Treat it as open: do not make a second offer for the same trade until the first has expired or been cancelled. | The lanes recompute against the chain and refuse over-asks; a refusal does not unsign the offer (review 2026-10-17, finding 1). |
 | R8 | Poll status with the **whole** `watch` object. `confirmed: true` with `proof: "pre-trade tips spent"` is the proof; `"indexed tips exist"` alone is not (it is true the moment the push is accepted). | The index leads the chain by design. |
 | R9 | Never send the same offer twice. | Same coins, same nonce: a double spend at best, a confusing refusal at worst. |
 
@@ -72,37 +80,110 @@ against. Every rule here was exercised against the hosted responder on
   a relayer cannot redirect it.
 - It never persists a pool successor on a push the node merely held.
 
-## The Spellbook side: `forge_swap` (proposal)
+## The Spellbook side: `forge_swap` (built 2026-10-17)
 
-Spellbook's daemon (SPEC_V1 §4) exposes `request_spend` for plain transfers
-and signs nothing opaque. A Forge swap needs one more intent kind. This is
-the proposal; the acceptance tests below are what it must pass.
+`spellbook forge-swap` / `spellbook_forge_swap` / `POST /v1/forge_swap`
+(SPEC_V1 §4). The agent sends bounds and nothing else:
 
-- **Request:**
-  `{ kind: "forge_swap", quote_id, intent, coin_spends, fee }`
-  - `intent` = the quote's `intent` (shown to the human verbatim)
-  - `coin_spends` = build's unsigned spends (signed only after approval)
-- **Policy:** spend caps apply to `intent.offer[].amount`; the destination
-  is "a Forge pool"; the request is refused if `intent.executable` is false
-  or the quote is older than N seconds (the daemon's choice; 120 s is
-  sensible — quotes are cheap).
-- **Decode before signing (Chialisp audit 2026-10-07, S4):** the daemon
-  never signs a spend it has not decoded. Before anything is signed, each
-  `coin_spends[]` entry is parsed with `chia_offer.parse_conditions` and
-  checked against the intent — see "Binding the spends to the intent".
-  Any mismatch refuses the whole request (nothing is signed, nothing is
-  queued).
-- **Approval:** returns `{ signature }` (96-byte aggregated BLS over the
-  spends), never a txid. The queue entry the human approves shows the
-  decoded intent **and** the receive puzzle hash the spends assert
-  (`receive_ph`), so the approver sees where the requested leg pays.
-- **After:** the agent calls `finalize` and `swap` itself and polls status;
-  or hands the offer to its relay's `/v1/broadcast` (the dry run's
-  `result.bundle` is the bundle) if it prefers to push.
+```
+{intent: "forge_swap", chain: "chia-mainnet" | "chia-testnet",
+ asset_in, asset_out,              "native" or a 64-hex CAT id
+ amount_in_mojos,                  sold exactly
+ min_amount_out_mojos,             the least it will take
+ fee_mojos,                        > 0, at most chia.forge_max_fee_mojos
+ purpose?}
+```
 
-### Binding the spends to the intent
+No route, quote, offer, router URL or payee is accepted: a request naming
+any of them is refused. What the daemon does with it, in order:
 
-The responder builds the spends; the daemon's key signs them. A malicious
+1. **Quote from its own router.** `chia.forge_responders[<network>]`
+   (default: the Forge's routers above; https, or http to loopback only).
+   `markets` must report the chain's network. A quote's `intent` is shaped
+   for `build` (the net entry, with the router fee as a payment beside it,
+   which a wallet cannot make), so the daemon never offers `intent` as is:
+   it takes the best executable single-pool or split routes and asks the
+   router's `POST /api/v1/agent/size` what a wallet-built offer giving
+   exactly `amount_in` must ask for (the payout less the router fee),
+   refusing any answer that changes the give. The quote and the sizing carry
+   the wallet's own addresses (public on chain) so the fee is priced at the
+   rate the settle lane will charge these coins: an exempt or tiered wallet
+   sized at the public rate asks too little and is refused. A route paying
+   below the minimum is refused; nothing is queued. Multi-hop and vault
+   routes cannot be wallet-built (the website keeps them site-built too).
+2. **Queue for the human, always** (`ALWAYS_QUEUE_INTENTS`), even when
+   auto-approve would pass it; caps can still deny it. The queue entry
+   shows what is given, the minimum taken, the fee, the router, network,
+   expected output, price impact, fees and route from the daemon's own
+   quote, the offer expiry, and the receive address (this wallet's own,
+   S2). Velocity counts the given leg plus the fee.
+3. **On approval, quote and size again** from the router now configured. It
+   must be the router the human approved, and the sized ask must still be at
+   least the minimum; otherwise nothing is signed.
+4. **Sage makes the offer** through the `offer_make` path: give exactly
+   `amount_in`, ask for the fresh sized amount (at least the minimum),
+   paid to the approved receive address, balance-checked, expiring after
+   `chia.forge_offer_ttl_seconds` (default 600). **From this point the
+   signed offer can be filled by whoever holds it until it expires**: the
+   rehearsal hands it to the router. So the offer is recorded open
+   (`forge_open.json`), and a second swap of the same pair is refused until
+   it expires, `forge_status` shows it completed, or the human cancels it
+   on chain (`offer_cancel`).
+5. **Rehearse** (`dry_run: true`, R4). The fee must be at least 5 x the
+   rehearsal's measured cost (R3).
+6. **Settle once** (R5, R9). Only the lane keys of the quote's
+   `settlement.body` are sent (`launcher_id`, `in_index`, `out_index`,
+   `launcher_ids`, `path`, `branches`), with `dry_run` set by the daemon. `success:true`, not a dry run, with a transaction id, returns the
+   transaction id, the offer id and `watch`. **Every other outcome after the
+   offer exists** (a refused rehearsal, a fee under the floor, a 4xx, an
+   ambiguous answer, a malformed one) is `approved-submit-unknown`:
+   velocity consumed fail-closed, the offer recorded open, never resent
+   (R6, R7 as amended below).
+7. **Watch** with `forge_status {chain, offer_id, watch?}`. `confirmed` is
+   the wallet's own proof: Sage shows the swap's offer `completed`, i.e. its
+   reserved coins were spent by a bundle that paid what the offer asks (a
+   cancel reads `cancelled`). The router's pool check (`pool_tips_spent`,
+   R8) is reported beside it as information only: spent pool coins alone
+   could be another trader's swap, and on the live run below the trade
+   landed and paid exactly while the router's watch still named an unspent
+   coin.
+
+The Forge charges its router fee off the pool's payout, so the offer
+receives exactly what it asks for; anything above that and the rate's fee
+is refunded to the offer's own payment (T7 below: 48,329 + 399). A wallet
+holding listed NFTs or tokens earns a lower router rate by proving them
+with a signed fee-rate message (CHIP-0002, which `message_sign` produces);
+see the contract's "The fee rate a wallet earns". Without one, a trade pays
+at most the public rate it was quoted at.
+
+Tests: `tests/test_forge_swap.py` (bounds-only schema, config-pinned
+router, network check, always-queue, sizing, the wallet's rate, the
+execution order, ambiguous vs definite outcomes, the fee caps).
+
+### Live run through `forge_swap` (2026-10-17/18, testnet11)
+
+The daemon's own code against the live testnet11 router and a real Sage
+wallet (Sage reached through Spellbook's pinned `SageRpc`; the human
+approval was `queue_approve`). 0.001 TXCH into 🍕
+(`969289f7…`), fee 0.006 TXCH.
+
+| Run | What happened | What it proved |
+|---|---|---|
+| 1 | every live quote rejected before queueing | `intent.offer` is the net entry (970,000,000 of 1,000,000,000): a wallet cannot use it; the Forge gained `/api/v1/agent/size` (Forge PR 231) |
+| 2 | sized at the public 3% (ask 92,853); rehearsal refused: the wallet is fee-exempt, the lane wanted the full release | offer recorded open, pair blocked, Sage marked it `expired` after 600 s, balances unchanged: the refusal path is safe; the sizing must carry the wallet's addresses |
+| 3 | sized at the wallet's rate (ask 95,727, minimum 90,940, three-branch split); rehearsal and one live settle, transaction `fdd693f3…` | wallet −1,000,000,000 −6,000,000,000 fee, +95,727 🍕 exactly; Sage offer `completed`; `forge_status` confirmed; Sage's `expires_at_second` rides through the settle lane |
+
+Run 3's router status never reported every pre-trade tip spent although
+the bundle landed (one watched coin was spent on chain at block
+4,840,019, others presumably belong to pools the split did not touch);
+that is a router-side watch issue, which is why `confirmed` rests on the
+wallet.
+
+### Binding the spends to the intent (bare-key signers only)
+
+`forge_swap` does not take this path. It is kept for a program that holds
+a bare key and signs `build`'s spends itself. The responder builds the
+spends; the daemon's key signs them. A malicious
 or compromised responder could present an honest `intent` with spends that
 pay elsewhere, so the daemon treats `coin_spends[]` as untrusted input and
 requires, for every spend, before signing:

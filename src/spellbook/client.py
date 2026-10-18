@@ -330,6 +330,32 @@ class AgentClient(_BaseClient):
             params["receive_address"] = receive_address
         return self._call("offer_make", params)
 
+    def forge_swap(self, *, chain: str, asset_in: str, asset_out: str,
+                   amount_in_mojos: int, min_amount_out_mojos: int,
+                   fee_mojos: int, purpose: str = "") -> dict:
+        """Request a swap on the Forge (Chia AMM). Bounds only: sell exactly
+        ``amount_in_mojos`` of ``asset_in`` ("native" or a 64-hex CAT id),
+        take at least ``min_amount_out_mojos`` of ``asset_out``, pay
+        ``fee_mojos``. The daemon quotes from the router in its own config
+        and always queues for the human; on approval Sage makes the offer and
+        the daemon settles it once. Watch the result with ``forge_status``.
+        """
+        return self._call("forge_swap", {
+            "intent": "forge_swap", "chain": chain, "asset_in": asset_in,
+            "asset_out": asset_out, "amount_in_mojos": amount_in_mojos,
+            "min_amount_out_mojos": min_amount_out_mojos,
+            "fee_mojos": fee_mojos, "purpose": purpose})
+
+    def forge_status(self, *, chain: str, offer_id: str,
+                     watch: dict | None = None) -> dict:
+        """Has an approved Forge swap landed? ``confirmed`` is true only when
+        Sage shows the swap's own offer completed AND the pool coins it built
+        on are spent. Never re-request a swap because this is still false."""
+        params = {"chain": chain, "offer_id": offer_id}
+        if watch is not None:
+            params["watch"] = watch
+        return self._call("forge_status", params)
+
     def offer_take(self, *, chain: str, offer: str, fee_mojos: int = 0,
                    purpose: str = "") -> dict:
         """Request taking an offer string. The daemon decodes the offer at
