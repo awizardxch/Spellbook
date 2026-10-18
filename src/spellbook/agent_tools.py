@@ -241,6 +241,18 @@ def _dex_swap(a):
         purpose=a.get("purpose", ""), deadline_sec=a.get("deadline_sec"))
 
 
+def _forge_swap(a):
+    return _client().forge_swap(
+        chain=a["chain"], asset_in=a["asset_in"], asset_out=a["asset_out"],
+        amount_in_mojos=_int(a["amount_in"], "amount_in"),
+        min_amount_out_mojos=_int(a["min_amount_out"], "min_amount_out"),
+        fee_mojos=_int(a["fee"], "fee"), purpose=a.get("purpose", ""))
+
+
+def _forge_status(a):
+    return _client().forge_status(chain=a["chain"], watch=a["watch"])
+
+
 def _message_sign(a):
     return _client().message_sign(
         chain=a["chain"], message=a["message"], address=a.get("address", ""),
@@ -377,6 +389,33 @@ TOOLS = [
            "purpose": {"type": "string"}},
           ("chain", "venue", "sell_token", "buy_token", "sell_amount",
            "min_buy_amount", "max_slippage_bps")),
+    _tool("spellbook_forge_swap",
+          "Request a swap on the Forge, the Chia AMM (chia-mainnet or "
+          "chia-testnet). Bounds only: sell exactly amount_in of asset_in, "
+          "take at least min_amount_out of asset_out, pay fee. Assets are "
+          "'native' (XCH) or a 64-hex CAT id. The daemon quotes from its own "
+          "configured router and always queues for the human; on approval "
+          "the wallet makes the offer and the daemon settles it once. Poll "
+          "spellbook_forge_status with the returned watch; never re-request "
+          "a swap whose outcome is unknown.",
+          _forge_swap,
+          {"chain": _CHAIN,
+           "asset_in": {"type": "string",
+                        "description": "'native' or a 64-hex CAT asset id."},
+           "asset_out": {"type": "string",
+                         "description": "'native' or a 64-hex CAT asset id."},
+           "amount_in": _AMOUNT, "min_amount_out": _AMOUNT, "fee": _AMOUNT,
+           "purpose": {"type": "string",
+                       "description": "Why — shown to the human on approval."}},
+          ("chain", "asset_in", "asset_out", "amount_in", "min_amount_out",
+           "fee")),
+    _tool("spellbook_forge_status",
+          "Has an approved Forge swap landed? Pass the watch the swap "
+          "returned. confirmed is true only once the pool coins it spent are "
+          "spent on chain.",
+          _forge_status,
+          {"chain": _CHAIN, "watch": {"type": "object"}},
+          ("chain", "watch"), read_only=True),
     _tool("spellbook_message_sign",
           "Queue signing a message (always needs human approval). sign_type: "
           "plain (Chia/Solana), personal (EIP-191) or typed_data (EIP-712 JSON).",

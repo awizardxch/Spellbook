@@ -118,6 +118,12 @@ from spellbook.seedrole import ALLOW_KEY, SEED_ROLES
 # far below anything worth burning to farmers.
 DEFAULT_MAX_OFFER_FEE_MOJOS = 50_000_000
 
+# Upper bound on a forge_swap's fee (chia.forge_max_fee_mojos): 0.01 XCH. A
+# Forge offer pays the network fee for the whole pool settlement, and the node
+# refuses a nonzero fee under 5 mojos per unit of cost, which for a pool spend
+# is about 5 x 10^9 mojos (docs/FORGE_SWAP.md R3).
+DEFAULT_FORGE_MAX_FEE_MOJOS = 10_000_000_000
+
 
 def _must_600(path: str):
     st = os.stat(path)
@@ -154,6 +160,20 @@ def load_config(config_dir: str) -> dict:
     if isinstance(mx, bool) or not isinstance(mx, int) or mx < 0:
         raise ValueError("chia.max_offer_fee_mojos must be a non-negative "
                          "integer")
+    fmx = chia_cfg.get("forge_max_fee_mojos", DEFAULT_FORGE_MAX_FEE_MOJOS)
+    if isinstance(fmx, bool) or not isinstance(fmx, int) or fmx < 0:
+        raise ValueError("chia.forge_max_fee_mojos must be a non-negative "
+                         "integer")
+    ttl = chia_cfg.get("forge_offer_ttl_seconds", 600)
+    if isinstance(ttl, bool) or not isinstance(ttl, int) or not 120 <= ttl <= 3600:
+        raise ValueError("chia.forge_offer_ttl_seconds must be an integer "
+                         "from 120 to 3600")
+    responders = chia_cfg.get("forge_responders", {})
+    if not isinstance(responders, dict) or not all(
+            isinstance(k, str) and isinstance(v, str)
+            for k, v in responders.items()):
+        raise ValueError("chia.forge_responders must map a network name "
+                         "(mainnet, testnet11) to a router URL")
     # S-04: the seed's role and the unsafe opt-in are validated here so a
     # typo ("True", 1, "yes") can never read as consent.
     if cfg.get("seed_role") is not None and cfg["seed_role"] not in SEED_ROLES:

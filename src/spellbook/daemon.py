@@ -48,6 +48,7 @@ from spellbook.seed import header_lines, load_seed
 from spellbook import seedrole
 from spellbook import tokens as token_auth
 from spellbook import dex as dex_mod
+from spellbook import forge as forge_mod
 from spellbook import abi as abi_mod
 
 
@@ -77,6 +78,7 @@ REQUEST_ROUTES = {
     "chia_read",
     "offer_make", "offer_take", "offer_cancel",
     "offer_import", "offer_combine",
+    "forge_swap", "forge_status",
     "nft_mint", "nft_update", "nft_collection_update", "nft_redownload",
     "nft_assign_did",
     "did_create", "did_update", "did_transfer", "did_normalize",
@@ -105,7 +107,7 @@ APPROVE_ROUTES = {
 # funds and is refused until the human has proven the paper backup.
 BACKUP_PENDING_ROUTES = {
     "status", "addresses", "doctor", "queue_read", "ledger_read",
-    "chia_read", "dex_venues", "contract_call_view",
+    "chia_read", "dex_venues", "contract_call_view", "forge_status",
     "sign_musebook_request", "sign_dashboard_challenge",
     "queue_reject",
 }
@@ -114,6 +116,9 @@ BACKUP_PENDING_ROUTES = {
 # message_sign queue on their own routes; these go through _run_fund_intent.
 ALWAYS_QUEUE_INTENTS = {
     "option_exercise", "option_transfer", "did_transfer", "nft_assign_did",
+    # A Forge swap sends the wallet's offer to a third-party router: the
+    # human authorizes the venue and the bounds per transaction.
+    "forge_swap",
 }
 
 # v1 transfer schema — plain transfers only (S13). Unknown fields are
@@ -131,6 +136,16 @@ OFFER_TAKE_FIELDS = {"intent", "chain", "offer", "fee_mojos", "purpose",
                      "_give"}
 OFFER_CANCEL_FIELDS = {"intent", "chain", "offer_id", "offer_ids",
                        "fee_mojos", "purpose", "_offered"}
+
+# A swap on the Forge (Chia AMM, docs/FORGE_SWAP.md): the requester names
+# BOUNDS only — what to sell, exactly how much, the least it will take, and
+# the fee. No route, no quote, no router URL, no payee: the daemon quotes
+# from the router in its own config, Sage makes the offer, and the payee is
+# this wallet's own address.
+FORGE_SWAP_FIELDS = {"intent", "chain", "asset_in", "asset_out",
+                     "amount_in_mojos", "min_amount_out_mojos", "fee_mojos",
+                     "purpose"}
+FORGE_STATUS_FIELDS = {"chain", "watch"}
 
 # Full Sage wallet surface: every fund-moving Sage endpoint is a queued
 # intent with an explicit schema (S13: unknown shapes are rejected, never
@@ -328,6 +343,14 @@ def chia_asset_kind(asset: str) -> tuple:
     raise chia.SageError(
         f"bad chia asset {asset!r}: expected 'native', a 64-hex CAT asset "
         "id, or 'nft:<id>'")
+
+
+def _forge_result(out: dict, ex: dict) -> None:
+    """A settled forge_swap's extras: the offer Sage made, what it asked
+    for, what forge_status polls, and how to read the outcome."""
+    for key in ("offer_id", "watch", "amount_out_mojos", "note"):
+        if ex.get(key) is not None:
+            out[key] = ex[key]
 
 
 def _validate_offer_legs(items, side: str) -> list:
@@ -2204,6 +2227,8 @@ class Daemon:
             # the exact canonical digest of these params. Queue approval
             # is not enough.
             self._check_mint_gate(params)
+        if intent == "forge_swap":
+            return self._execute_forge_swap(params)
         if intent == "offer_make":
             if params.get("transport") == "native":
                 return self._execute_offer_make_native(params)
@@ -4904,12 +4929,16 @@ class Daemon:
         return out
 
     # ------------------------------------------------------------ offer intents
-    def _chia_offer_guards(self, params: dict, chain: str) -> None:
+    def _chia_offer_guards(self, params: dict, chain: str,
+                           forge: bool = False) -> None:
         """Fail-fast checks shared by every offer intent.
 
         Mainnet-without-flag and missing-seed refuse exactly like the
         transfer path. There is no destination to prefix-check — offers
-        name assets, not addresses.
+        name assets, not addresses. ``forge`` caps the fee by
+        chia.forge_max_fee_mojos instead: a Forge offer pays the fee for the
+        whole pool settlement, about 5 x 10^9 mojos at the node's floor —
+        a hundred times the plain-offer cap.
         """
         if chain == "chia-mainnet" and not self.chia_cfg.get(
                 "mainnet_submit_enabled"):
@@ -4921,11 +4950,16 @@ class Daemon:
         fee = params.get("fee_mojos", 0)
         if isinstance(fee, bool) or not isinstance(fee, int) or fee < 0:
             raise chia.SageError("fee_mojos must be a non-negative integer")
-        mx = self._max_fee_mojos()
+        mx = self._forge_max_fee_mojos() if forge else self._max_fee_mojos()
         if fee > mx:
+            key = "forge_max_fee_mojos" if forge else "max_offer_fee_mojos"
             raise chia.SageError(
-                f"fee_mojos {fee} exceeds chia.max_offer_fee_mojos {mx} "
-                "— refusing")
+                f"fee_mojos {fee} exceeds chia.{key} {mx} — refusing")
+
+    def _forge_max_fee_mojos(self) -> int:
+        from spellbook.config import DEFAULT_FORGE_MAX_FEE_MOJOS
+        return int(self.chia_cfg.get("forge_max_fee_mojos",
+                                     DEFAULT_FORGE_MAX_FEE_MOJOS))
 
     def _max_fee_mojos(self) -> int:
         from spellbook.config import DEFAULT_MAX_OFFER_FEE_MOJOS
@@ -5000,11 +5034,12 @@ class Daemon:
         """
         intent = params.get("intent")
         chain = params["chain"]
-        if intent in ("offer_make", "offer_take"):
+        if intent in ("offer_make", "offer_take", "forge_swap"):
             # Merge per asset (Sage sums duplicate legs) and count the
             # offer fee against native: policy sees exactly what the
             # wallet spends, never a split leg or an uncounted fee.
-            side = "offered" if intent == "offer_make" else "_give"
+            # forge_swap gives exactly its offered leg (the Forge offer).
+            side = "_give" if intent == "offer_take" else "offered"
             legs = [(it["asset"], it["amount_mojos"]) for it in params[side]]
             fee = params.get("fee_mojos", 0)
             if fee:
@@ -5152,8 +5187,11 @@ class Daemon:
             self._record_velocity_entries(params)
             self.ledger.append(muse_id, canon, ref,
                                "approved-submit-unknown:" + str(e))
-            return {"ok": True, "decision": "approved-submit-unknown",
-                    "tx_hash": ref, "note": str(e)}
+            out = {"ok": True, "decision": "approved-submit-unknown",
+                   "tx_hash": ref, "note": str(e)}
+            if getattr(e, "watch", None):
+                out["watch"] = e.watch  # forge_swap: what forge_status polls
+            return out
         except (evm.EvmError, chia.SageError, chia_relay.RelayError,
                 solana_mod.SolanaError, dex_mod.DexError) as e:
             self.ledger.append(muse_id, canon, None,
@@ -5178,6 +5216,7 @@ class Daemon:
             # tokens, amounts, recipient) — for the human and the audit.
             if ex.get("decoded"):
                 out["decoded"] = ex["decoded"]
+            _forge_result(out, ex)
             return out
         self.ledger.append(muse_id, canon, ex.get("offer_id"), "approved")
         out = {"ok": True, "decision": "approved", "note": ex.get("note", "")}
@@ -5250,6 +5289,215 @@ class Daemon:
             params["expires_at_second"] = expires
         entries = self._velocity_entries(params)
         return self._run_fund_intent(params, muse_id, entries, "offer_make")
+
+    # ------------------------------------------------------------ Forge swap
+    #
+    # docs/FORGE_SWAP.md. The requester sends bounds; the daemon quotes from
+    # the router in ITS config, shows the human the route it found, and on
+    # approval has Sage make the offer (the offer_make path: own payee, own
+    # coins, balance-checked), rehearses it, settles it once, and hands back
+    # what to watch. The daemon never signs a spend the router built.
+
+    @staticmethod
+    def _forge_asset(asset) -> tuple:
+        """(daemon form, Forge id) for a swap leg: XCH or a CAT, never an NFT."""
+        kind, ref = chia_asset_kind(asset)
+        if kind == "native":
+            return ("native", forge_mod.NATIVE_ID)
+        if kind == "cat" and ref != forge_mod.NATIVE_ID:
+            return (ref, ref)
+        raise chia.SageError(
+            f"forge_swap trades XCH and CATs only, got {asset!r}")
+
+    def _forge_offer_ttl(self) -> int:
+        """Seconds an approved swap's offer stays valid. Short on purpose: an
+        offer the router refused, or whose fate is unknown, dies on its own
+        instead of staying fillable in the wild."""
+        ttl = self.chia_cfg.get("forge_offer_ttl_seconds", 600)
+        if isinstance(ttl, bool) or not isinstance(ttl, int):
+            ttl = 600
+        return max(120, min(ttl, 3600))
+
+    def _forge_route(self, chain: str, asset_in: str, asset_out: str,
+                     amount_in: int) -> tuple:
+        """Quote from the configured router and keep the best executable
+        Forge route that sells exactly amount_in. Returns (base, pick)."""
+        network = chia.NETWORKS[chain]
+        base = forge_mod.responder_for(network, self.chia_cfg)
+        forge_mod.check_network(base, network)
+        answer = forge_mod.quote(base, asset_in, asset_out, amount_in)
+        pick = forge_mod.pick_quote(answer, asset_in, asset_out, amount_in)
+        if pick is None:
+            raise forge_mod.ForgeError(
+                "no executable Forge route sells exactly "
+                f"{amount_in} of {asset_in[:12]}… for {asset_out[:12]}…")
+        return base, pick
+
+    def rt_forge_swap(self, p: dict, muse_id: str) -> dict:
+        fields = set(p)
+        need = {"chain", "asset_in", "asset_out", "amount_in_mojos",
+                "min_amount_out_mojos", "fee_mojos"}
+        if not fields.issubset(FORGE_SWAP_FIELDS) or not need.issubset(fields):
+            return {"ok": False,
+                    "error": "schema violation: forge_swap needs chain, "
+                             "asset_in, asset_out, amount_in_mojos, "
+                             "min_amount_out_mojos, fee_mojos (and nothing "
+                             "else but purpose)"}
+        chain = p["chain"]
+        if chain not in chia.NETWORKS:
+            return {"ok": False,
+                    "error": f"forge_swap is Chia-only, got {chain!r}"}
+        try:
+            self._chia_offer_guards(p, chain, forge=True)
+            give, give_id = self._forge_asset(p["asset_in"])
+            take, take_id = self._forge_asset(p["asset_out"])
+            if give == take:
+                raise chia.SageError("asset_in and asset_out are the same")
+            amount_in = p["amount_in_mojos"]
+            min_out = p["min_amount_out_mojos"]
+            for name, n in (("amount_in_mojos", amount_in),
+                            ("min_amount_out_mojos", min_out)):
+                if isinstance(n, bool) or not isinstance(n, int) or n <= 0:
+                    raise chia.SageError(f"{name} must be a positive integer")
+            fee = p["fee_mojos"]
+            if fee == 0:
+                # R3: a zero fee is refused whenever the mempool is full,
+                # and a pool settlement is a large bundle.
+                raise chia.SageError(
+                    "fee_mojos must be positive: a Forge settlement needs "
+                    "at least 5 mojos per unit of cost")
+        except chia.SageError as e:
+            return {"ok": False, "error": str(e)}
+        try:
+            base, pick = self._forge_route(chain, give_id, take_id, amount_in)
+        except forge_mod.ForgeError as e:
+            return {"ok": False, "error": str(e)}
+        if pick["amount_out"] < min_out:
+            return {"ok": False,
+                    "error": f"the best Forge route pays {pick['amount_out']} "
+                             f"now, below min_amount_out_mojos {min_out} — "
+                             "nothing queued"}
+        # S2: the requested leg pays THIS wallet's own address.
+        try:
+            network = chia.NETWORKS[chain]
+            puzzle_hashes, index_for_ph = self._own_puzzle_hashes(chain)
+            recv, receive_ph = self._resolve_receive_address(
+                network, None, puzzle_hashes, index_for_ph)
+        except chia_sign.ChiaSignError as e:
+            return {"ok": False, "error": str(e)}
+        intent = pick["intent"] or {}
+        params = {"intent": "forge_swap", "chain": chain,
+                  "offered": [{"asset": give, "amount_mojos": amount_in}],
+                  "requested": [{"asset": take, "amount_mojos": min_out}],
+                  "fee_mojos": fee, "purpose": p.get("purpose", ""),
+                  "receive_address": recv, "_receive_ph": receive_ph.hex(),
+                  # What the human is shown: the route the daemon found
+                  # itself, from the router in its own config. Execution
+                  # quotes again and holds the approved bounds above.
+                  "_forge": {"responder": base, "network": network,
+                             "quoted_at": int(time.time()),
+                             "expected_out_mojos": pick["amount_out"],
+                             "price_impact_bps": intent.get("price_impact_bps"),
+                             "total_fee_bps": intent.get("total_fee_bps"),
+                             "route": intent.get("route"),
+                             "branches": intent.get("branches")}}
+        entries = self._velocity_entries(params)
+        return self._run_fund_intent(params, muse_id, entries, "forge_swap")
+
+    def rt_forge_status(self, p: dict, muse_id: str) -> dict:
+        """Read-only: has an approved Forge swap landed? Asks the configured
+        router; `confirmed` only with proof "pre-trade tips spent" (R8)."""
+        if not set(p).issubset(FORGE_STATUS_FIELDS) or "chain" not in p:
+            return {"ok": False,
+                    "error": "schema violation: forge_status needs chain, watch"}
+        chain = p["chain"]
+        watch = p.get("watch")
+        if chain not in chia.NETWORKS or not isinstance(watch, dict):
+            return {"ok": False, "error": "forge_status needs a Chia chain "
+                                          "and the watch a swap returned"}
+        try:
+            base = forge_mod.responder_for(chia.NETWORKS[chain], self.chia_cfg)
+            answer = forge_mod.status(base, watch)
+        except forge_mod.ForgeError as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "confirmed": answer["confirmed"],
+                "proof": answer.get("proof"),
+                "pools": answer.get("pools")}
+
+    def _execute_forge_swap(self, params: dict) -> dict:
+        """Execute an approved Forge swap.
+
+        Order matters and every step can stop the swap with nothing spent:
+        guards and re-validated bounds; a fresh quote from the router in the
+        CURRENT config, which must be the router the human saw and must
+        still pay at least the approved minimum; Sage makes the offer (own
+        coins, own payee, short expiry); a dry-run rehearsal; then one live
+        settle. A settle whose outcome is unknown raises BroadcastUnknown
+        with what to watch — the offer is never sent twice (R6, R9).
+        """
+        chain = params["chain"]
+        self._chia_offer_guards(params, chain, forge=True)
+        offered = _validate_offer_legs(params["offered"], "offered")
+        requested = _validate_offer_legs(params["requested"], "requested")
+        if len(offered) != 1 or len(requested) != 1:
+            raise chia.SageError("forge_swap gives one leg and takes one")
+        (give, amount_in), (take, min_out) = offered[0], requested[0]
+        _, give_id = self._forge_asset(give)
+        _, take_id = self._forge_asset(take)
+        fee = params.get("fee_mojos", 0)
+        approved_on = (params.get("_forge") or {}).get("responder")
+        try:
+            base, pick = self._forge_route(chain, give_id, take_id, amount_in)
+        except forge_mod.ForgeError as e:
+            raise chia.SageError(f"forge_swap: {e}") from e
+        if base != approved_on:
+            raise chia.SageError(
+                f"forge_swap: the configured Forge router is now {base}, not "
+                f"the {approved_on} this swap was approved on — re-request")
+        amount_out = pick["amount_out"]
+        if amount_out < min_out:
+            raise chia.SageError(
+                f"forge_swap: the route now pays {amount_out}, below the "
+                f"approved minimum {min_out} — nothing was signed")
+        rpc, _, _ = self._chia_sage_rpc(chain)
+        self._check_offer_balances(rpc, offered, fee)
+        expires = int(time.time()) + self._forge_offer_ttl()
+        made = rpc.make_offer(
+            [{"asset": give, "amount_mojos": amount_in}],
+            [{"asset": take, "amount_mojos": amount_out}],
+            fee_mojos=fee, receive_address=params.get("receive_address"),
+            expires_at_second=expires)
+        offer_id, offer = made["offer_id"], made["offer"]
+        unsettled = (f"offer {offer_id} was made but not settled; it expires "
+                     f"at {expires} (unix), or cancel it now with offer_cancel")
+        body = dict(pick["settlement_body"])
+        body["offer"] = offer
+        try:
+            rehearsal = forge_mod.settle(base, dict(body, dry_run=True))
+        except forge_mod.ForgeError as e:
+            raise chia.SageError(f"forge_swap: {e} — {unsettled}") from e
+        cost = (rehearsal.get("result") or {}).get("cost")
+        if isinstance(cost, int) and cost > 0 and fee < 5 * cost:
+            raise chia.SageError(
+                f"forge_swap: fee {fee} is under the node's floor for this "
+                f"settlement (5 x cost {cost} = {5 * cost}) — re-request with "
+                f"a higher fee_mojos; {unsettled}")
+        try:
+            live = forge_mod.settle(base, body)
+        except forge_mod.ForgeAmbiguous as e:
+            unknown = chia.BroadcastUnknown(
+                e.transaction_id or offer_id,
+                f"forge_swap: {e}. Do not re-request: poll forge_status with "
+                f"the watch. The offer expires at {expires} (unix).")
+            unknown.watch = e.watch
+            raise unknown from e
+        except forge_mod.ForgeError as e:
+            raise chia.SageError(f"forge_swap: {e} — {unsettled}") from e
+        return {"submitted": True, "tx_hash": live.get("transaction_id"),
+                "offer_id": offer_id, "watch": live.get("watch"),
+                "amount_out_mojos": amount_out,
+                "note": "settled through the Forge; in the mempool — poll "
+                        "forge_status with the watch until confirmed"}
 
     def rt_offer_take(self, p: dict, muse_id: str) -> dict:
         fields = set(p)
@@ -6315,6 +6563,31 @@ class Daemon:
                     "receive_ph": p.get("_receive_ph"),
                     "destination": None, "asset": "offer", "amount": None,
                 })
+            elif intent == "forge_swap":
+                forge = p.get("_forge") or {}
+                entry.update({
+                    "kind": "forge_swap",
+                    # The approved bounds: give exactly this, take at least
+                    # this. Execution re-quotes and refuses outside them.
+                    "give": p.get("offered"),
+                    "take_at_least": p.get("requested"),
+                    "fee_mojos": p.get("fee_mojos", 0),
+                    # What the daemon's own quote found, for the human.
+                    "venue": "the Forge (Chia AMM)",
+                    "router": forge.get("responder"),
+                    "network": forge.get("network"),
+                    "quoted_at": forge.get("quoted_at"),
+                    "expected_out_mojos": forge.get("expected_out_mojos"),
+                    "price_impact_bps": forge.get("price_impact_bps"),
+                    "total_fee_bps": forge.get("total_fee_bps"),
+                    "route": forge.get("route"),
+                    "branches": forge.get("branches"),
+                    "offer_ttl_seconds": self._forge_offer_ttl(),
+                    "receive_address": p.get("receive_address"),
+                    "receive_ph": p.get("_receive_ph"),
+                    "destination": None, "asset": "forge_swap",
+                    "amount": None,
+                })
             elif intent == "offer_take":
                 entry.update({
                     "kind": "offer_take",
@@ -6497,9 +6770,12 @@ class Daemon:
             self._record_velocity_entries(params)
             self.ledger.append(muse_id, canon, ref,
                                "approved-submit-unknown:" + str(e))
-            return {"ok": True, "queue_id": qid, "tx_hash": ref,
-                    "decision": "approved-submit-unknown",
-                    "note": str(e)}
+            out = {"ok": True, "queue_id": qid, "tx_hash": ref,
+                   "decision": "approved-submit-unknown",
+                   "note": str(e)}
+            if getattr(e, "watch", None):
+                out["watch"] = e.watch  # forge_swap: what forge_status polls
+            return out
         except (evm.EvmError, chia.SageError, chia_relay.RelayError,
                 solana_mod.SolanaError, dex_mod.DexError) as e:
             # Approved but never executed: the human's approval is consumed,
@@ -6521,6 +6797,7 @@ class Daemon:
                 out["contract_address"] = ex["contract_address"]
             if ex.get("logs") is not None:
                 out["logs"] = ex["logs"]
+            _forge_result(out, ex)
             return out
         self.ledger.append(muse_id, canon, ex.get("offer_id"),
                            "approved-by-human")

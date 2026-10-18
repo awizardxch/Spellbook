@@ -140,9 +140,12 @@ def test_non_fungible_moves_are_never_a_zero_fee_entry(tmp_path, intent,
 
 # ----------------------------------------------------------- always queue
 
-def test_always_queue_set_names_the_four_intents():
+def test_always_queue_set_names_the_five_intents():
+    # forge_swap: the human authorizes the third-party router per swap
+    # (tests/test_forge_swap.py proves it queues under auto-approve).
     assert daemon_mod.ALWAYS_QUEUE_INTENTS == {"option_exercise", "option_transfer",
-                                    "did_transfer", "nft_assign_did"}
+                                    "did_transfer", "nft_assign_did",
+                                    "forge_swap"}
 
 
 def _permissive_policy(extra_keys=()):
