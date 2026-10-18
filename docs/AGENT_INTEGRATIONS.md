@@ -130,7 +130,8 @@ To dump the schemas: `spellbook-mcp --list-tools --format openai|anthropic|mcp`.
 | `spellbook_version` | installed version compared with the latest signed release, and a link to the upgrade notes |
 | `spellbook_addresses`, `spellbook_queue`, `spellbook_ledger` | reads |
 | `spellbook_request_spend` | plain transfer (amount as a digit string in base units) |
-| `spellbook_dex_venues`, `spellbook_dex_swap` | swaps with bounds |
+| `spellbook_dex_venues`, `spellbook_dex_swap` | EVM swaps with bounds |
+| `spellbook_forge_swap`, `spellbook_forge_status` | Chia swaps on the Forge with bounds (always needs human approval); has it landed |
 | `spellbook_message_sign` | message signature (always needs human approval) |
 | `spellbook_chia_read` | read-only Chia queries |
 | `spellbook_call` | any other `AgentClient` method (offers, NFTs, LP, contracts, CATs…) |
