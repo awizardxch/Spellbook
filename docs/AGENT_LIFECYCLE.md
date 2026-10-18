@@ -123,9 +123,12 @@ the agent verifies the release key itself before installing.
 
 ## Upgrade notes
 
-### Next release: release acceptance hardened (review S-22, S-25, S-29, S-31)
+### 0.3.3: release acceptance hardened, seed custody, Forge swaps
 
-What changed: the root upgrade wrapper accepts a release only when its
+Three changes since 0.3.2 (security review 2026-10-15, rounds 1–3, and
+`forge_swap`). Do the steps in order.
+
+**1. Release acceptance (review S-22, S-25, S-29, S-31).** The root upgrade wrapper accepts a release only when its
 signed tag is on the canonical `main`, its tarball hash is published there,
 it is not in `releases/YANKED`, and it is past a 24 h delay window (see "The
 trust model" above). The install record moved to `/usr/local/lib/spellbook/`
@@ -133,7 +136,27 @@ trust model" above). The install record moved to `/usr/local/lib/spellbook/`
 an older release cannot take this one through their old wrapper (its
 installer copied itself onto itself and stopped): the human runs, once, as
 root: `bash install.sh --upgrade <tag>` from the verified release. After
-that, self-upgrade works again. Needs `git` on the host.
+that, self-upgrade works again. Needs `git` on the host. A new release is
+accepted only once it is past the 24 h delay window.
+
+**2. Seed custody (review S-16 – S-19).** The daemon user now owns the
+ceremony key, and every new, restored or ceremony-loaded seed starts
+BACKUP PENDING until the human proves the paper backup
+(`spellbook export` in their own terminal, or `sudo spellbook
+backup-confirm` with the code from the reveal envelope; see
+AGENT_ONBOARDING.md). An install made before 0.3.3 shows
+`"backup": {"state": "legacy"}` and keeps working, with a warning at every
+daemon start until the human confirms. Nothing to do now; ask the human to
+confirm the backup when convenient.
+
+**3. Forge swaps (`forge_swap`, `forge_status`).** A bounded swap on the
+Forge, the Chia AMM: the agent names only chain, assets, the exact amount
+in, the minimum out and the fee; the daemon quotes from its configured
+router, always queues for the human, and on approval Sage builds the offer
+(docs/FORGE_SWAP.md). Optional config, all with defaults:
+`chia.forge_responders`, `chia.forge_offer_ttl_seconds` (600),
+`chia.forge_max_fee_mojos` (0.01 XCH). Mainnet still needs
+`chia.mainnet_submit_enabled`. Nothing to do unless you trade on the Forge.
 
 `spellbook upgrade --check` (or the MCP tool `spellbook_version`) links
 here when a newer signed release exists. After every upgrade, run
