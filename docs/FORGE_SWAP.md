@@ -249,7 +249,7 @@ the last column. T1–T6 spend nothing; T7 spends a small amount on testnet11.
 
 | Test | Steps | Pass when |
 |------|-------|-----------|
-| T1 markets | `GET markets` | `success:true`, ≥1 market with `protocol_version: 15`, every market has `state_as_of` |
+| T1 markets | `GET markets` | `success:true`, ≥1 market with the shipping `protocol_version` (17, Forge V16; 15 when this test was first run), every market has `state_as_of` |
 | T2 quote | `POST quote` 0.05 TXCH → a CAT, `slippage_bps: 50` | ≥1 executable quote; `best.amount_out` is an integer string; each executable quote has `offer_spec`, `settlement.body`, `intent` |
 | T3 build+finalize | coins from `wallet-coins`, `fee: "5000000000"`, build, sign, finalize | offer starts with `offer1`; every maker spend passes the five checks in "Binding the spends to the intent": the asserted opcode-63 announcement id **equals** the one recomputed from `intent.requested`, the agent's receive puzzle hash and the nonce over the agent's inputs; settlement output == `intent.offer[].amount`; change only to own puzzle hashes; reveal is the daemon's standard puzzle |
 | T3b tampered spends | T3's build output with (a) the requested amount in the asserted announcement lowered, (b) the announcement's payee changed, (c) change sent to a foreign puzzle hash, (d) a reveal that hashes to the coin but is not the standard puzzle | each variant is refused before signing (`ok:false`, nothing queued, no signature returned) |
